@@ -487,5 +487,6 @@ public class ChatController {
             message.setType("done");
             message.setData(null);
             return message;
+        }
     }
 }
