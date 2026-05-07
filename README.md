@@ -1,108 +1,107 @@
-# SuperBizAgent
+# OnCall Agent
 
-> 基于 Spring Boot + AI Agent 的智能问答与运维系统
+> An intelligent Q&A and AIOps system built with Spring Boot + AI Agent framework.
 
-## 📖 项目简介
+## Overview
 
-企业级智能业务代理系统，包含两大核心模块：
+OnCall Agent is an enterprise-grade intelligent agent system with two core modules:
 
-### 1. RAG 智能问答
-集成 Milvus 向量数据库和阿里云 DashScope，提供基于检索增强生成的智能问答能力，支持多轮对话和流式输出。
+### 1. RAG-based Q&A
+Integrates Milvus vector database and Alibaba Cloud DashScope to deliver retrieval-augmented generation (RAG) capabilities, supporting multi-turn conversations and streaming output.
 
-### 2. AIOps 智能运维
-基于 AI Agent 的自动化运维系统，采用 Planner-Executor-Replanner 架构，实现告警分析、日志查询、智能诊断和报告生成。
+### 2. AIOps (AI for IT Operations)
+An AI Agent-driven automated operations system built on a Planner-Executor-Replanner architecture, enabling alert analysis, log querying, intelligent diagnosis, and report generation.
 
-## 🚀 核心特性
+## Features
 
-- ✅ **RAG 问答**: 向量检索 + 多轮对话 + 流式输出
-- ✅ **AIOps 运维**: 智能诊断 + 多 Agent 协作 + 自动报告
-- ✅ **工具集成**: 文档检索、告警查询、日志分析、时间工具
-- ✅ **会话管理**: 上下文维护、历史管理、自动清理
-- ✅ **Web 界面**: 提供测试界面和 RESTful API
+- **RAG Q&A**: Vector retrieval + multi-turn conversation + streaming output
+- **AIOps**: Intelligent diagnosis + multi-agent collaboration + auto-generated reports
+- **Tool Integration**: Document retrieval, alert querying, log analysis, date/time utilities
+- **Session Management**: Context maintenance, history management, auto-cleanup
+- **Web Interface**: Built-in test UI and RESTful API
 
+## Tech Stack
 
-## 🛠️ 技术栈
+| Technology | Version | Description |
+|------------|---------|-------------|
+| Java | 17 | Language |
+| Spring Boot | 3.2.0 | Application framework |
+| Spring AI | 1.1.0 | AI Agent framework |
+| DashScope | 2.17.0 | Alibaba Cloud AI service |
+| Milvus | 2.6.10 | Vector database |
 
-| 技术 | 版本 | 说明 |
-|------|------|------|
-| Java | 17 | 开发语言 |
-| Spring Boot | 3.2.0 | 应用框架 |
-| Spring AI | - | AI Agent 框架 |
-| DashScope | 2.17.0 | 阿里云 AI 服务 |
-| Milvus | 2.6.10 | 向量数据库 |
-
-## 📦 核心模块
+## Architecture
 
 ```
-SuperBizAgent/
+oncall-agent/
 ├── src/main/java/org/example/
 │   ├── controller/
-│   │   └── ChatController.java        # 统一接口控制器 ⭐
+│   │   └── ChatController.java        # Unified API controller
 │   ├── service/
-│   │   ├── ChatService.java           # 对话服务 ⭐
-│   │   ├── AiOpsService.java          # AIOps 服务 ⭐
-│   │   ├── RagService.java            # RAG 服务
-│   │   └── Vector*.java               # 向量服务
-│   ├── agent/tool/                    # Agent 工具集
-│   │   ├── DateTimeTools.java         # 时间工具
-│   │   ├── InternalDocsTools.java     # 文档检索
-│   │   ├── QueryMetricsTools.java     # 告警查询
-│   │   └── QueryLogsTools.java        # 日志查询
-│   └── config/                        # 配置类
+│   │   ├── ChatService.java           # Chat service
+│   │   ├── AiOpsService.java          # AIOps service
+│   │   ├── RagService.java            # RAG service
+│   │   └── Vector*.java               # Vector service classes
+│   ├── agent/tool/                    # Agent tool set
+│   │   ├── DateTimeTools.java         # Date/time utilities
+│   │   ├── InternalDocsTools.java     # Document retrieval
+│   │   ├── QueryMetricsTools.java     # Alert querying
+│   │   └── QueryLogsTools.java        # Log querying
+│   └── config/                        # Config classes
 ├── src/main/resources/
-│   ├── static/                        # Web 界面
-│   └── application.yml                # 应用配置
-└── aiops-docs/                        # 运维文档库
+│   ├── static/                        # Web frontend
+│   └── application.yml                # App configuration
+├── aiops-docs/                        # Operations document library
+├── docs/                              # Additional docs
+└── vector-database.yml                # Docker Compose for Milvus
 ```
 
+## API Reference
 
-## 📡 核心接口
+### 1. Smart Q&A
 
-### 1. 智能问答接口
-
-**流式对话（推荐）**
+**Streaming Chat (recommended)**
 ```bash
 POST /api/chat_stream
 Content-Type: application/json
 
 {
   "Id": "session-123",
-  "Question": "什么是向量数据库？"
+  "Question": "What is a vector database?"
 }
 ```
-支持 SSE 流式输出、自动工具调用、多轮对话。
+SSE streaming output, automatic tool invocation, multi-turn conversation.
 
-**普通对话**
+**Standard Chat**
 ```bash
 POST /api/chat
 Content-Type: application/json
 
 {
   "Id": "session-123",
-  "Question": "什么是向量数据库？"
+  "Question": "What is a vector database?"
 }
 ```
-一次性返回完整结果，支持工具调用和多轮对话。
+Returns the complete response in one shot, with tool invocation and multi-turn support.
 
-### 2. AIOps 智能运维接口
+### 2. AIOps
 
 ```bash
 POST /api/ai_ops
 ```
-自动执行告警分析流程，生成运维报告（SSE 流式输出）。
+Triggers the alert analysis pipeline and generates an operations report (SSE streaming).
 
-### 3. 会话管理
+### 3. Session Management
 
-- `POST /api/chat/clear` - 清空会话历史
-- `GET /api/chat/session/{sessionId}` - 获取会话信息
+- `POST /api/chat/clear` - Clear session history
+- `GET /api/chat/session/{sessionId}` - Get session info
 
-### 4. 文件管理
+### 4. File Management
 
-- `POST /api/upload` - 上传文件并自动向量化
-- `GET /milvus/health` - Milvus 健康检查
+- `POST /api/upload` - Upload and vectorize a document
+- `GET /milvus/health` - Milvus health check
 
-
-## ⚙️ 核心配置
+## Configuration
 
 ### application.yml
 
@@ -110,86 +109,79 @@ POST /api/ai_ops
 server:
   port: 9900
 
-# Milvus 向量数据库
 milvus:
   host: localhost
   port: 19530
 
-# 阿里云 DashScope
 spring:
   ai:
     dashscope:
-      api-key: "${DASHSCOPE_API_KEY}" // 环境变量
+      api-key: "${DASHSCOPE_API_KEY}"
 
-# RAG 配置
 rag:
   top-k: 3
   model: "qwen3-max"
 
-# 文档分片
 document:
   chunk:
     max-size: 800
     overlap: 100
 ```
 
-### 环境变量
+### Environment Variables
 
 ```bash
 export DASHSCOPE_API_KEY=your-api-key
 ```
 
+## Quick Start
 
-## 🚀 快速开始
-
-### 1. 环境准备
+### 1. Prerequisites
 
 ```bash
-# 设置 API Key
+# Set your API key
 export DASHSCOPE_API_KEY=your-api-key
 ```
 
-### 2. 启动应用
+### 2. Run the Application
 
-方法一： 手动启动
+**Option A — Manual**
 ```bash
-1.先启动向量数据库
+# 1. Start the vector database
 docker compose up -d -f vector-database.yml
 
-2.启动服务
+# 2. Start the service
 mvn clean install
 mvn spring-boot:run
 ```
 
-方法二：一键启动
+**Option B — One-command setup**
 ```bash
-make init  # 会自动启动向量数据库并上传运维文档到向量库
+make init  # Starts Milvus and uploads operation docs to the vector store
 ```
 
+### 3. Usage Examples
 
-### 3. 使用示例
-
-**Web 界面**
+**Web UI**
 ```
 http://localhost:9900
 ```
 
-**命令行**
+**CLI**
 ```bash
-# 上传文档
+# Upload a document
 curl -X POST http://localhost:9900/api/upload \
   -F "file=@document.txt"
 
-# 智能问答
+# Smart Q&A
 curl -X POST http://localhost:9900/api/chat \
   -H "Content-Type: application/json" \
-  -d '{"Id":"test","Question":"什么是向量数据库？"}'
+  -d '{"Id":"test","Question":"What is a vector database?"}'
 
-# 健康检查
+# Health check
 curl http://localhost:9900/milvus/health
 ```
 
+## License
 
-**版本**: v1.0.0  
-**作者**: chief  
-**许可证**: MIT
+MIT
