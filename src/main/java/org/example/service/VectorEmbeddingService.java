@@ -43,11 +43,7 @@ public class VectorEmbeddingService {
             throw new IllegalStateException("请设置环境变量 DASHSCOPE_API_KEY 或在 application.yml 中配置正确的 API Key");
         }
         
-        // 打印 API Key 前缀用于调试（不打印完整 Key 保证安全）
-        String maskedKey = apiKey.length() > 8 ? 
-            apiKey.substring(0, 8) + "..." + apiKey.substring(apiKey.length() - 4) : 
-            "***";
-        logger.info("API Key 已加载: {}", maskedKey);
+        logger.info("API Key 已加载: {} 位密钥", apiKey.length());
         
         // 设置全局 API Key（确保设置成功）
         Constants.apiKey = apiKey;
@@ -58,7 +54,7 @@ public class VectorEmbeddingService {
             throw new IllegalStateException("API Key 设置到 Constants 失败");
         }
         
-        logger.info("Constants.apiKey 已设置: {}", Constants.apiKey.substring(0, Math.min(8, Constants.apiKey.length())) + "...");
+        logger.info("Constants.apiKey 已设置");
         
         // 创建 TextEmbedding 实例
         textEmbedding = new TextEmbedding();
