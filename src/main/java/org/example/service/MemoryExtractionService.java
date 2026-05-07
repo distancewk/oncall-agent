@@ -31,9 +31,6 @@ public class MemoryExtractionService {
     private static final Logger logger = LoggerFactory.getLogger(MemoryExtractionService.class);
 
     @Autowired
-    private ChatService chatService;
-
-    @Autowired
     private DashScopeChatModel dashScopeChatModel;
 
     @Autowired

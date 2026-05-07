@@ -4,7 +4,6 @@ import com.alibaba.cloud.ai.dashscope.chat.DashScopeChatModel;
 import com.alibaba.cloud.ai.graph.OverAllState;
 import org.example.dto.AlertPayload;
 import org.example.service.AiOpsService;
-import org.example.service.ChatService;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.ai.tool.ToolCallback;
@@ -28,9 +27,6 @@ public class WebhookController {
 
     @Autowired
     private AiOpsService aiOpsService;
-
-    @Autowired
-    private ChatService chatService;
 
     @Autowired
     @Qualifier("dashScopeChatModelAiOps")
