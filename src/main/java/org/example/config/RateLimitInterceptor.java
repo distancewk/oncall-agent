@@ -10,8 +10,11 @@ import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Component;
 import org.springframework.web.servlet.HandlerInterceptor;
 
+import jakarta.annotation.PostConstruct;
 import java.io.PrintWriter;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 
 /**
@@ -28,6 +31,23 @@ public class RateLimitInterceptor implements HandlerInterceptor {
     
     // 针对重负载大模型接口的限流 (每秒总体只允许 2 个请求)
     private final RateLimiter heavyApiLimiter = RateLimiter.create(2.0);
+
+    private final ScheduledExecutorService cleanupScheduler = Executors.newSingleThreadScheduledExecutor(r -> {
+        Thread t = new Thread(r, "rate-limiter-cleanup");
+        t.setDaemon(true);
+        return t;
+    });
+
+    @PostConstruct
+    public void init() {
+        cleanupScheduler.scheduleAtFixedRate(() -> {
+            int beforeSize = ipRateLimiters.size();
+            ipRateLimiters.clear();
+            if (beforeSize > 0) {
+                logger.info("IP限流器清理完成, 清理前数量: {}", beforeSize);
+            }
+        }, 5, 5, TimeUnit.MINUTES);
+    }
 
     @Override
     public boolean preHandle(HttpServletRequest request, HttpServletResponse response, Object handler) throws Exception {
