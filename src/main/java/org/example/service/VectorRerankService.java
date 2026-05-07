@@ -79,18 +79,7 @@ public class VectorRerankService {
                     String errorMsg = response.body() != null ? response.body().string() : "No response body";
                     logger.error("Rerank API 调用失败: HTTP {}, {}", response.code(), errorMsg);
                     // 降级：如果重排失败，直接按原样返回前 topK
-                    List<VectorSearchService.SearchResult> fallback = new ArrayList<>();
-                    int limit = Math.min(topK, candidates.size());
-                    for (int i = 0; i < limit; i++) {
-                        VectorSearchService.SearchResult original = candidates.get(i);
-                        VectorSearchService.SearchResult copy = new VectorSearchService.SearchResult();
-                        copy.setId(original.getId());
-                        copy.setContent(original.getContent());
-                        copy.setScore(original.getScore());
-                        copy.setMetadata(original.getMetadata());
-                        fallback.add(copy);
-                    }
-                    return fallback;
+                    return defensiveCopyTopK(candidates, topK);
                 }
 
                 String responseStr = response.body().string();
@@ -99,18 +88,7 @@ public class VectorRerankService {
                 JsonNode resultsNode = root.path("output").path("results");
                 if (!resultsNode.isArray()) {
                     logger.warn("Rerank API 返回格式异常: {}", responseStr);
-                    List<VectorSearchService.SearchResult> fallback = new ArrayList<>();
-                    int limit = Math.min(topK, candidates.size());
-                    for (int i = 0; i < limit; i++) {
-                        VectorSearchService.SearchResult original = candidates.get(i);
-                        VectorSearchService.SearchResult copy = new VectorSearchService.SearchResult();
-                        copy.setId(original.getId());
-                        copy.setContent(original.getContent());
-                        copy.setScore(original.getScore());
-                        copy.setMetadata(original.getMetadata());
-                        fallback.add(copy);
-                    }
-                    return fallback;
+                    return defensiveCopyTopK(candidates, topK);
                 }
 
                 List<VectorSearchService.SearchResult> finalResults = new ArrayList<>();
@@ -135,32 +113,26 @@ public class VectorRerankService {
 
         } catch (IOException e) {
             logger.error("Rerank API 网络请求异常", e);
-            List<VectorSearchService.SearchResult> fallback = new ArrayList<>();
-            int limit = Math.min(topK, candidates.size());
-            for (int i = 0; i < limit; i++) {
-                VectorSearchService.SearchResult original = candidates.get(i);
-                VectorSearchService.SearchResult copy = new VectorSearchService.SearchResult();
-                copy.setId(original.getId());
-                copy.setContent(original.getContent());
-                copy.setScore(original.getScore());
-                copy.setMetadata(original.getMetadata());
-                fallback.add(copy);
-            }
-            return fallback;
+            return defensiveCopyTopK(candidates, topK);
         } catch (Exception e) {
             logger.error("Rerank 处理失败", e);
-            List<VectorSearchService.SearchResult> fallback = new ArrayList<>();
-            int limit = Math.min(topK, candidates.size());
-            for (int i = 0; i < limit; i++) {
-                VectorSearchService.SearchResult original = candidates.get(i);
-                VectorSearchService.SearchResult copy = new VectorSearchService.SearchResult();
-                copy.setId(original.getId());
-                copy.setContent(original.getContent());
-                copy.setScore(original.getScore());
-                copy.setMetadata(original.getMetadata());
-                fallback.add(copy);
-            }
-            return fallback;
+            return defensiveCopyTopK(candidates, topK);
         }
+    }
+
+    private List<VectorSearchService.SearchResult> defensiveCopyTopK(
+            List<VectorSearchService.SearchResult> candidates, int topK) {
+        List<VectorSearchService.SearchResult> result = new ArrayList<>();
+        int limit = Math.min(topK, candidates.size());
+        for (int i = 0; i < limit; i++) {
+            VectorSearchService.SearchResult original = candidates.get(i);
+            VectorSearchService.SearchResult copy = new VectorSearchService.SearchResult();
+            copy.setId(original.getId());
+            copy.setContent(original.getContent());
+            copy.setScore(original.getScore());
+            copy.setMetadata(original.getMetadata());
+            result.add(copy);
+        }
+        return result;
     }
 }
