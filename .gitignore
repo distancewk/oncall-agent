@@ -54,3 +54,4 @@ uploads/
 ### docker
 /volumes
 /server.pid
+.claude/
