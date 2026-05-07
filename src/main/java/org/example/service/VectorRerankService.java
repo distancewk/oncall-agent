@@ -79,7 +79,18 @@ public class VectorRerankService {
                     String errorMsg = response.body() != null ? response.body().string() : "No response body";
                     logger.error("Rerank API 调用失败: HTTP {}, {}", response.code(), errorMsg);
                     // 降级：如果重排失败，直接按原样返回前 topK
-                    return candidates.subList(0, Math.min(topK, candidates.size()));
+                    List<VectorSearchService.SearchResult> fallback = new ArrayList<>();
+                    int limit = Math.min(topK, candidates.size());
+                    for (int i = 0; i < limit; i++) {
+                        VectorSearchService.SearchResult original = candidates.get(i);
+                        VectorSearchService.SearchResult copy = new VectorSearchService.SearchResult();
+                        copy.setId(original.getId());
+                        copy.setContent(original.getContent());
+                        copy.setScore(original.getScore());
+                        copy.setMetadata(original.getMetadata());
+                        fallback.add(copy);
+                    }
+                    return fallback;
                 }
 
                 String responseStr = response.body().string();
@@ -88,7 +99,18 @@ public class VectorRerankService {
                 JsonNode resultsNode = root.path("output").path("results");
                 if (!resultsNode.isArray()) {
                     logger.warn("Rerank API 返回格式异常: {}", responseStr);
-                    return candidates.subList(0, Math.min(topK, candidates.size()));
+                    List<VectorSearchService.SearchResult> fallback = new ArrayList<>();
+                    int limit = Math.min(topK, candidates.size());
+                    for (int i = 0; i < limit; i++) {
+                        VectorSearchService.SearchResult original = candidates.get(i);
+                        VectorSearchService.SearchResult copy = new VectorSearchService.SearchResult();
+                        copy.setId(original.getId());
+                        copy.setContent(original.getContent());
+                        copy.setScore(original.getScore());
+                        copy.setMetadata(original.getMetadata());
+                        fallback.add(copy);
+                    }
+                    return fallback;
                 }
 
                 List<VectorSearchService.SearchResult> finalResults = new ArrayList<>();
@@ -97,10 +119,13 @@ public class VectorRerankService {
                     double relevanceScore = node.path("relevance_score").asDouble();
                     
                     if (index >= 0 && index < candidates.size()) {
-                        VectorSearchService.SearchResult originalResult = candidates.get(index);
-                        // 更新为 Rerank 后的精准得分
-                        originalResult.setScore((float) relevanceScore);
-                        finalResults.add(originalResult);
+                        VectorSearchService.SearchResult original = candidates.get(index);
+                        VectorSearchService.SearchResult copy = new VectorSearchService.SearchResult();
+                        copy.setId(original.getId());
+                        copy.setContent(original.getContent());
+                        copy.setScore((float) relevanceScore);
+                        copy.setMetadata(original.getMetadata());
+                        finalResults.add(copy);
                     }
                 }
 
@@ -110,10 +135,32 @@ public class VectorRerankService {
 
         } catch (IOException e) {
             logger.error("Rerank API 网络请求异常", e);
-            return candidates.subList(0, Math.min(topK, candidates.size()));
+            List<VectorSearchService.SearchResult> fallback = new ArrayList<>();
+            int limit = Math.min(topK, candidates.size());
+            for (int i = 0; i < limit; i++) {
+                VectorSearchService.SearchResult original = candidates.get(i);
+                VectorSearchService.SearchResult copy = new VectorSearchService.SearchResult();
+                copy.setId(original.getId());
+                copy.setContent(original.getContent());
+                copy.setScore(original.getScore());
+                copy.setMetadata(original.getMetadata());
+                fallback.add(copy);
+            }
+            return fallback;
         } catch (Exception e) {
             logger.error("Rerank 处理失败", e);
-            return candidates.subList(0, Math.min(topK, candidates.size()));
+            List<VectorSearchService.SearchResult> fallback = new ArrayList<>();
+            int limit = Math.min(topK, candidates.size());
+            for (int i = 0; i < limit; i++) {
+                VectorSearchService.SearchResult original = candidates.get(i);
+                VectorSearchService.SearchResult copy = new VectorSearchService.SearchResult();
+                copy.setId(original.getId());
+                copy.setContent(original.getContent());
+                copy.setScore(original.getScore());
+                copy.setMetadata(original.getMetadata());
+                fallback.add(copy);
+            }
+            return fallback;
         }
     }
 }
