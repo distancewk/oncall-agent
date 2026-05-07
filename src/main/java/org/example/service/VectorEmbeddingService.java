@@ -84,8 +84,8 @@ public class VectorEmbeddingService {
                 Constants.apiKey = apiKey;
             }
             
-            logger.debug("调用 API 前 Constants.apiKey: {}", 
-                Constants.apiKey != null ? Constants.apiKey.substring(0, Math.min(8, Constants.apiKey.length())) + "..." : "null");
+            logger.debug("调用 API 前 Constants.apiKey 状态: {}",
+                Constants.apiKey != null ? "已设置" : "null");
 
             // 构建请求参数
             TextEmbeddingParam param = TextEmbeddingParam

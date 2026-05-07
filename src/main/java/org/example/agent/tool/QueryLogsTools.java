@@ -23,6 +23,12 @@ import java.util.Map;
  * 日志查询工具
  * 用于查询 CLS（云日志服务）的日志信息
  * 支持 Mock 模式，提供与告警关联的模拟日志数据
+ *
+ * 注意：当前版本仅 Mock 模式可用。生产环境需要：
+ * 1. 通过 MCP 客户端连接腾讯云 CLS 服务
+ * 2. 或者在 cls.mock-enabled=true 时使用模拟数据
+ *
+ * 如果使用 MCP 方式，此工具类应在 MCP 连接可用时设置为 required=false
  */
 @Component
 public class QueryLogsTools {
