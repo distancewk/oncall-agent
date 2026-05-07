@@ -1,8 +1,6 @@
 package org.example.controller;
 
-import com.alibaba.cloud.ai.dashscope.api.DashScopeApi;
 import com.alibaba.cloud.ai.dashscope.chat.DashScopeChatModel;
-import com.alibaba.cloud.ai.dashscope.chat.DashScopeChatOptions;
 import com.alibaba.cloud.ai.graph.NodeOutput;
 import com.alibaba.cloud.ai.graph.OverAllState;
 import com.alibaba.cloud.ai.graph.agent.ReactAgent;
@@ -45,6 +43,9 @@ public class ChatController {
     private AiOpsService aiOpsService;
     
     @Autowired
+    private DashScopeChatModel dashScopeChatModel;
+
+    @Autowired
     private ChatService chatService;
 
     @Autowired
@@ -79,9 +80,8 @@ public class ChatController {
             List<Map<String, String>> history = session.getHistory();
             logger.info("会话历史消息对数: {}", history.size() / 2);
 
-            // 创建 DashScope API 和 ChatModel
-            DashScopeApi dashScopeApi = chatService.createDashScopeApi();
-            DashScopeChatModel chatModel = chatService.createStandardChatModel(dashScopeApi);
+            // 使用注入的 ChatModel
+            DashScopeChatModel chatModel = dashScopeChatModel;
 
             // 记录可用工具
             chatService.logAvailableTools();
@@ -167,9 +167,8 @@ public class ChatController {
                 List<Map<String, String>> history = session.getHistory();
                 logger.info("ReactAgent 会话历史消息对数: {}", history.size() / 2);
 
-                // 创建 DashScope API 和 ChatModel
-                DashScopeApi dashScopeApi = chatService.createDashScopeApi();
-                DashScopeChatModel chatModel = chatService.createStandardChatModel(dashScopeApi);
+                // 使用注入的 ChatModel
+                DashScopeChatModel chatModel = dashScopeChatModel;
 
                 // 记录可用工具
                 chatService.logAvailableTools();
@@ -289,8 +288,7 @@ public class ChatController {
             try {
                 logger.info("收到 AI 智能运维请求 - 启动多 Agent 协作流程");
 
-                DashScopeApi dashScopeApi = chatService.createDashScopeApi();
-                DashScopeChatModel chatModel = chatService.createStandardChatModel(dashScopeApi);
+                DashScopeChatModel chatModel = dashScopeChatModel;
 
                 ToolCallback[] toolCallbacks = tools.getToolCallbacks();
 

@@ -1,8 +1,6 @@
 package org.example.controller;
 
-import com.alibaba.cloud.ai.dashscope.api.DashScopeApi;
 import com.alibaba.cloud.ai.dashscope.chat.DashScopeChatModel;
-import com.alibaba.cloud.ai.dashscope.chat.DashScopeChatOptions;
 import com.alibaba.cloud.ai.graph.OverAllState;
 import org.example.dto.AlertPayload;
 import org.example.service.AiOpsService;
@@ -35,6 +33,10 @@ public class WebhookController {
     private ChatService chatService;
 
     @Autowired
+    @Qualifier("dashScopeChatModelAiOps")
+    private DashScopeChatModel dashScopeChatModel;
+
+    @Autowired
     private ToolCallbackProvider tools;
 
     @Autowired
@@ -53,16 +55,7 @@ public class WebhookController {
         executor.execute(() -> {
             try {
                 logger.info("开始主动执行告警分析任务...");
-                DashScopeApi dashScopeApi = chatService.createDashScopeApi();
-                DashScopeChatModel chatModel = DashScopeChatModel.builder()
-                        .dashScopeApi(dashScopeApi)
-                        .defaultOptions(DashScopeChatOptions.builder()
-                                .withModel(DashScopeChatModel.DEFAULT_MODEL_NAME)
-                                .withTemperature(0.3)
-                                .withMaxToken(8000)
-                                .withTopP(0.9)
-                                .build())
-                        .build();
+                DashScopeChatModel chatModel = dashScopeChatModel;
 
                 ToolCallback[] toolCallbacks = tools.getToolCallbacks();
                 Optional<OverAllState> overAllStateOptional = aiOpsService.executeAiOpsAnalysis(chatModel, toolCallbacks);

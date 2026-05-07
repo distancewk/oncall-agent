@@ -17,7 +17,6 @@ import org.springframework.ai.chat.messages.UserMessage;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Service;
 
-import com.alibaba.cloud.ai.dashscope.api.DashScopeApi;
 import com.alibaba.cloud.ai.dashscope.chat.DashScopeChatModel;
 
 import java.util.*;
@@ -33,6 +32,9 @@ public class MemoryExtractionService {
 
     @Autowired
     private ChatService chatService;
+
+    @Autowired
+    private DashScopeChatModel dashScopeChatModel;
 
     @Autowired
     private VectorEmbeddingService embeddingService;
@@ -71,8 +73,7 @@ public class MemoryExtractionService {
             Prompt prompt = new Prompt(Arrays.asList(systemMessage, userMessage));
 
             // 3. 调用大模型进行提炼
-            DashScopeApi dashScopeApi = chatService.createDashScopeApi();
-            DashScopeChatModel chatModel = chatService.createStandardChatModel(dashScopeApi);
+            DashScopeChatModel chatModel = dashScopeChatModel;
             
             ChatResponse response = chatModel.call(prompt);
             String extractedFacts = response.getResult().getOutput().getContent().trim();

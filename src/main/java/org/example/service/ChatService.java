@@ -1,8 +1,6 @@
 package org.example.service;
 
-import com.alibaba.cloud.ai.dashscope.api.DashScopeApi;
 import com.alibaba.cloud.ai.dashscope.chat.DashScopeChatModel;
-import com.alibaba.cloud.ai.dashscope.chat.DashScopeChatOptions;
 import com.alibaba.cloud.ai.graph.agent.ReactAgent;
 import com.alibaba.cloud.ai.graph.exception.GraphRunnerException;
 import org.example.agent.tool.DateTimeTools;
@@ -14,7 +12,6 @@ import org.slf4j.LoggerFactory;
 import org.springframework.ai.tool.ToolCallback;
 import org.springframework.ai.tool.ToolCallbackProvider;
 import org.springframework.beans.factory.annotation.Autowired;
-import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 
 import java.util.List;
@@ -43,43 +40,6 @@ public class ChatService {
 
     @Autowired
     private ToolCallbackProvider tools;
-
-    @Value("${spring.ai.dashscope.api-key}")
-    private String dashScopeApiKey;
-
-    /**
-     * 创建 DashScope API 实例
-     */
-    public DashScopeApi createDashScopeApi() {
-        return DashScopeApi.builder()
-                .apiKey(dashScopeApiKey)
-                .build();
-    }
-
-    /**
-     * 创建 ChatModel
-     * @param temperature 控制随机性 (0.0-1.0)
-     * @param maxToken 最大输出长度
-     * @param topP 核采样参数
-     */
-    public DashScopeChatModel createChatModel(DashScopeApi dashScopeApi, double temperature, int maxToken, double topP) {
-        return DashScopeChatModel.builder()
-                .dashScopeApi(dashScopeApi)
-                .defaultOptions(DashScopeChatOptions.builder()
-                        .withModel(DashScopeChatModel.DEFAULT_MODEL_NAME)
-                        .withTemperature(temperature)
-                        .withMaxToken(maxToken)
-                        .withTopP(topP)
-                        .build())
-                .build();
-    }
-
-    /**
-     * 创建标准对话 ChatModel（默认参数）
-     */
-    public DashScopeChatModel createStandardChatModel(DashScopeApi dashScopeApi) {
-        return createChatModel(dashScopeApi, 0.7, 2000, 0.9);
-    }
 
     /**
      * 构建系统提示词（包含历史消息）
