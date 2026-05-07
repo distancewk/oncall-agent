@@ -26,8 +26,23 @@ public class RateLimitInterceptor implements HandlerInterceptor {
 
     private static final Logger logger = LoggerFactory.getLogger(RateLimitInterceptor.class);
 
+    // 为每个 IP 存储限流器及其最后访问时间
+    private static class RateLimiterEntry {
+        final RateLimiter limiter;
+        volatile long lastAccessNanos;
+
+        RateLimiterEntry(double permitsPerSecond) {
+            this.limiter = RateLimiter.create(permitsPerSecond);
+            this.lastAccessNanos = System.nanoTime();
+        }
+
+        void touch() {
+            this.lastAccessNanos = System.nanoTime();
+        }
+    }
+
     // 针对每个 IP 的全局请求限流 (每秒 5 个请求)
-    private final ConcurrentHashMap<String, RateLimiter> ipRateLimiters = new ConcurrentHashMap<>();
+    private final ConcurrentHashMap<String, RateLimiterEntry> ipRateLimiters = new ConcurrentHashMap<>();
     
     // 针对重负载大模型接口的限流 (每秒总体只允许 2 个请求)
     private final RateLimiter heavyApiLimiter = RateLimiter.create(2.0);
@@ -42,9 +57,16 @@ public class RateLimitInterceptor implements HandlerInterceptor {
     public void init() {
         cleanupScheduler.scheduleAtFixedRate(() -> {
             int beforeSize = ipRateLimiters.size();
-            ipRateLimiters.clear();
-            if (beforeSize > 0) {
-                logger.info("IP限流器清理完成, 清理前数量: {}", beforeSize);
+            long now = System.nanoTime();
+            long staleThreshold = TimeUnit.MINUTES.toNanos(1);
+            ipRateLimiters.forEach((ip, entry) -> {
+                if (now - entry.lastAccessNanos > staleThreshold) {
+                    ipRateLimiters.remove(ip, entry);
+                }
+            });
+            int afterSize = ipRateLimiters.size();
+            if (beforeSize != afterSize) {
+                logger.info("IP限流器清理完成, 清理前: {}, 清理后: {}", beforeSize, afterSize);
             }
         }, 5, 5, TimeUnit.MINUTES);
     }
@@ -55,8 +77,9 @@ public class RateLimitInterceptor implements HandlerInterceptor {
         String requestURI = request.getRequestURI();
 
         // 1. IP 级别防刷限流
-        RateLimiter ipLimiter = ipRateLimiters.computeIfAbsent(clientIp, k -> RateLimiter.create(5.0));
-        if (!ipLimiter.tryAcquire(500, TimeUnit.MILLISECONDS)) {
+        RateLimiterEntry entry = ipRateLimiters.computeIfAbsent(clientIp, k -> new RateLimiterEntry(5.0));
+        entry.touch();
+        if (!entry.limiter.tryAcquire(500, TimeUnit.MILLISECONDS)) {
             logger.warn("限流拦截: IP {} 请求过快", clientIp);
             sendRateLimitResponse(response, "您的请求过于频繁，请稍后再试");
             return false;
