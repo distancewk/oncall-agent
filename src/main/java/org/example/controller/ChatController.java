@@ -50,7 +50,7 @@ public class ChatController {
     @Autowired
     private ChatService chatService;
 
-    @Autowired
+    @Autowired(required = false)
     private ToolCallbackProvider tools;
 
     @Autowired
@@ -292,7 +292,7 @@ public class ChatController {
 
                 DashScopeChatModel chatModel = dashScopeChatModelAiOps;
 
-                ToolCallback[] toolCallbacks = tools.getToolCallbacks();
+                ToolCallback[] toolCallbacks = tools != null ? tools.getToolCallbacks() : new ToolCallback[0];
 
                 emitter.send(SseEmitter.event().name("message").data(SseMessage.content("正在读取告警并拆解任务...\n")));
                 

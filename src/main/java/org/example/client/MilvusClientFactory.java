@@ -125,25 +125,13 @@ public class MilvusClientFactory {
                 .withName("content")
                 .withDataType(DataType.VarChar)
                 .withMaxLength(MilvusConstants.CONTENT_MAX_LENGTH)
-                .withEnableAnalyzer(true)
-                .withAnalyzerParams("{\"type\":\"standard\"}")
-                .build();
-
-        FieldType sparseVectorField = FieldType.newBuilder()
-                .withName("sparse_vector")
-                .withDataType(DataType.SparseFloatVector)
+                .addTypeParam("enable_analyzer", "true")
+                .addTypeParam("analyzer_params", "{\"type\":\"standard\"}")
                 .build();
 
         FieldType metadataField = FieldType.newBuilder()
                 .withName("metadata")
                 .withDataType(DataType.JSON)
-                .build();
-
-        io.milvus.param.collection.Function bm25Function = io.milvus.param.collection.Function.newBuilder()
-                .withName("bm25_function")
-                .withFunctionType(io.milvus.param.collection.FunctionType.BM25)
-                .withInputFieldNames(java.util.Collections.singletonList("content"))
-                .withOutputFieldNames(java.util.Collections.singletonList("sparse_vector"))
                 .build();
 
         // 创建 collection schema
@@ -152,9 +140,7 @@ public class MilvusClientFactory {
                 .addFieldType(idField)
                 .addFieldType(vectorField)
                 .addFieldType(contentField)
-                .addFieldType(sparseVectorField)
                 .addFieldType(metadataField)
-                .addFunction(bm25Function)
                 .build();
 
         // 创建 collection
@@ -190,21 +176,6 @@ public class MilvusClientFactory {
             throw new RuntimeException("创建 vector 索引失败: " + response.getMessage());
         }
         
-        // 为 sparse_vector 字段创建索引
-        CreateIndexParam sparseIndexParam = CreateIndexParam.newBuilder()
-                .withCollectionName(MilvusConstants.MILVUS_COLLECTION_NAME)
-                .withFieldName("sparse_vector")
-                .withIndexType(IndexType.SPARSE_INVERTED_INDEX)
-                .withMetricType(MetricType.IP)
-                .withExtraParam("{\"drop_ratio_build\":0.2}")
-                .withSyncMode(Boolean.FALSE)
-                .build();
-
-        R<RpcStatus> sparseResponse = client.createIndex(sparseIndexParam);
-        if (sparseResponse.getStatus() != 0) {
-            throw new RuntimeException("创建 sparse_vector 索引失败: " + sparseResponse.getMessage());
-        }
-        
-        logger.info("成功为 vector 和 sparse_vector 字段创建索引");
+        logger.info("成功为 vector 字段创建索引");
     }
 }

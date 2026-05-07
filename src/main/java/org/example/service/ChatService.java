@@ -38,7 +38,7 @@ public class ChatService {
     @Autowired(required = false)  // Mock 模式下才注册，所以设置为 optional,真实环境通过mcp配置注入
     private QueryLogsTools queryLogsTools;
 
-    @Autowired
+    @Autowired(required = false)
     private ToolCallbackProvider tools;
 
     /**
@@ -97,6 +97,9 @@ public class ChatService {
      * 获取工具回调列表，mcp服务提供的工具
      */
     public ToolCallback[] getToolCallbacks() {
+        if (tools == null) {
+            return new ToolCallback[0];
+        }
         return tools.getToolCallbacks();
     }
 
@@ -104,6 +107,10 @@ public class ChatService {
      * 记录可用工具列表：mcp服务提供的工具
      */
     public void logAvailableTools() {
+        if (tools == null) {
+            logger.info("MCP工具未配置，无可用工具");
+            return;
+        }
         ToolCallback[] toolCallbacks = tools.getToolCallbacks();
         logger.info("可用工具列表:");
         for (ToolCallback toolCallback : toolCallbacks) {

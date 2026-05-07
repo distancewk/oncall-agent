@@ -32,7 +32,7 @@ public class WebhookController {
     @Qualifier("dashScopeChatModelAiOps")
     private DashScopeChatModel dashScopeChatModel;
 
-    @Autowired
+    @Autowired(required = false)
     private ToolCallbackProvider tools;
 
     @Autowired
@@ -53,7 +53,7 @@ public class WebhookController {
                 logger.info("开始主动执行告警分析任务...");
                 DashScopeChatModel chatModel = dashScopeChatModel;
 
-                ToolCallback[] toolCallbacks = tools.getToolCallbacks();
+                ToolCallback[] toolCallbacks = tools != null ? tools.getToolCallbacks() : new ToolCallback[0];
                 Optional<OverAllState> overAllStateOptional = aiOpsService.executeAiOpsAnalysis(chatModel, toolCallbacks);
 
                 if (overAllStateOptional.isPresent()) {

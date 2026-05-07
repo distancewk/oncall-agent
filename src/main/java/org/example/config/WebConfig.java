@@ -22,20 +22,11 @@ public class WebConfig implements WebMvcConfigurer {
     @org.springframework.beans.factory.annotation.Autowired
     private RateLimitInterceptor rateLimitInterceptor;
 
-    @org.springframework.beans.factory.annotation.Autowired
-    private AuthInterceptor authInterceptor;
-
     @Override
     public void addInterceptors(org.springframework.web.servlet.config.annotation.InterceptorRegistry registry) {
-        // 先鉴权 (拦截非法用户)
-        registry.addInterceptor(authInterceptor)
-                .addPathPatterns("/api/**")
-                .order(1);
-        
-        // 后限流 (防刷)
+        // 限流 (防刷)
         registry.addInterceptor(rateLimitInterceptor)
-                .addPathPatterns("/api/**")
-                .order(2);
+                .addPathPatterns("/api/**");
     }
 
     @Override

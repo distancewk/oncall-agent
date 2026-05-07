@@ -73,7 +73,7 @@ public class MemoryExtractionService {
             DashScopeChatModel chatModel = dashScopeChatModel;
             
             ChatResponse response = chatModel.call(prompt);
-            String extractedFacts = response.getResult().getOutput().getContent().trim();
+            String extractedFacts = response.getResult().getOutput().getText().trim();
 
             if ("NONE".equalsIgnoreCase(extractedFacts) || extractedFacts.isEmpty()) {
                 logger.debug("会话 {} 的本次历史片段未提取出有价值记忆", sessionId);

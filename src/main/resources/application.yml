@@ -34,40 +34,12 @@ spring:
           multiplier: 2  # 重试间隔倍数
           max-interval: 10000  # 最大重试间隔10秒
     
-    # Spring AI MCP 客户端配置
-    # 如果使用mock数据，请注释这部分内容
+    # Spring AI MCP 客户端配置（当前已禁用，如需启用请设置 enabled: true 并配置相应连接）
     mcp:
       client:
-        enabled: true
-        name: tencent-mcp-server
-        version: 1.0.0
-        request-timeout: 60s
-        type: ASYNC
-        stdio:
-          connections:
-            tavily:
-              command: npx
-              args:
-                - "-y"
-                - "@agentic/tavily-mcp-server"
-              env:
-                TAVILY_API_KEY: ${TAVILY_API_KEY:}
-            database:
-              command: npx
-              args:
-                - "-y"
-                - "@modelcontextprotocol/server-postgres"
-                - "postgresql://localhost/mydb"
-        sse:
-          connections:
-            tencent-cls:
-              url: https://mcp-api.tencent-cloud.com
-              sse-endpoint: /sse/92XXXXXXXXb4  # 完整的SSE端点路径
+        enabled: false
 
-# 自定义应用级配置
-app:
-  api:
-    key: ${APP_API_KEY}
+# 自定义应用级配置（暂无）
 
 # 阿里云 DashScope Embedding API 配置
 dashscope:
