@@ -197,19 +197,22 @@ public class RagService {
                 // 获取消息内容
                 // 注意：qwen3-30b-a3b-thinking-2507 模型会在 content 中返回完整内容
                 // reasoning 部分可能需要通过特殊方式提取或者直接包含在 content 中
-                String content = message.getOutput().getChoices().get(0).getMessage().getContent();
+                var firstChoice = message.getOutput().getChoices().get(0);
+                if (firstChoice.getMessage() != null) {
+                    String content = firstChoice.getMessage().getContent();
 
-                if (content != null && !content.isEmpty()) {
-                    logger.debug("收到AI模型内容块: {}", content);
-                    
-                    // 对于 thinking 模型，content 可能包含思考过程和最终答案
-                    // 这里我们将所有内容都作为答案返回
-                    finalContent.append(content);
-                    callback.onContentChunk(content);
-                    
-                    logger.debug("已调用 onContentChunk 回调");
-                } else {
-                    logger.debug("收到空内容块，跳过");
+                    if (content != null && !content.isEmpty()) {
+                        logger.debug("收到AI模型内容块: {}", content);
+
+                        // 对于 thinking 模型，content 可能包含思考过程和最终答案
+                        // 这里我们将所有内容都作为答案返回
+                        finalContent.append(content);
+                        callback.onContentChunk(content);
+
+                        logger.debug("已调用 onContentChunk 回调");
+                    } else {
+                        logger.debug("收到空内容块，跳过");
+                    }
                 }
             }
         });
