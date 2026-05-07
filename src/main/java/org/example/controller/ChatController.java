@@ -44,6 +44,10 @@ public class ChatController {
     private DashScopeChatModel dashScopeChatModel;
 
     @Autowired
+    @org.springframework.beans.factory.annotation.Qualifier("dashScopeChatModelAiOps")
+    private DashScopeChatModel dashScopeChatModelAiOps;
+
+    @Autowired
     private ChatService chatService;
 
     @Autowired
@@ -286,7 +290,7 @@ public class ChatController {
             try {
                 logger.info("收到 AI 智能运维请求 - 启动多 Agent 协作流程");
 
-                DashScopeChatModel chatModel = dashScopeChatModel;
+                DashScopeChatModel chatModel = dashScopeChatModelAiOps;
 
                 ToolCallback[] toolCallbacks = tools.getToolCallbacks();
 
