@@ -6,7 +6,7 @@ SERVER_URL = http://localhost:9900
 UPLOAD_API = $(SERVER_URL)/api/upload
 DOCS_DIR = aiops-docs
 HEALTH_CHECK_API = $(SERVER_URL)/milvus/health
-DOCKER_COMPOSE_FILE = vector-database.yml
+DOCKER_COMPOSE_FILE = docker-compose.yml
 MILVUS_CONTAINER = milvus-standalone
 
 # 颜色输出
@@ -15,7 +15,7 @@ YELLOW = \033[0;33m
 RED = \033[0;31m
 NC = \033[0m # No Color
 
-.PHONY: help init start stop restart check upload clean up down status wait
+.PHONY: help init start stop restart check upload clean up down status wait docker-build
 
 # 默认目标：显示帮助信息
 help:
@@ -23,9 +23,10 @@ help:
 	@echo ""
 	@echo "可用命令："
 	@echo "  $(YELLOW)make init$(NC)    - 🚀 一键初始化（启动Docker → 启动服务 → 上传文档）"
-	@echo "  $(YELLOW)make up$(NC)      - 启动 Docker Compose（Milvus 向量数据库）"
+	@echo "  $(YELLOW)make up$(NC)      - 启动 Docker Compose（应用 + Milvus 向量数据库）"
 	@echo "  $(YELLOW)make down$(NC)    - 停止 Docker Compose"
 	@echo "  $(YELLOW)make status$(NC)  - 查看 Docker 容器状态"
+	@echo "  $(YELLOW)make docker-build$(NC) - 构建 Docker 镜像"
 	@echo "  $(YELLOW)make start$(NC)   - 启动 Spring Boot 服务（后台运行）"
 	@echo "  $(YELLOW)make stop$(NC)    - 停止 Spring Boot 服务"
 	@echo "  $(YELLOW)make restart$(NC) - 重启 Spring Boot 服务"
@@ -264,5 +265,11 @@ status:
 		echo "$(GREEN)运行中: $$running / $$total$(NC)"; \
 	else \
 		echo "$(YELLOW)⚠️  没有找到 Milvus 相关容器$(NC)"; \
-		echo "$(YELLOW)提示: 运行 'make docker-up' 启动容器$(NC)"; \
+		echo "$(YELLOW)提示: 运行 'make up' 启动容器$(NC)"; \
 	fi
+
+# 构建 Docker 镜像
+docker-build:
+	@echo "$(YELLOW)🔨 构建 Docker 镜像...$(NC)"
+	@docker build -t super-biz-agent:latest .
+	@echo "$(GREEN)✅ Docker 镜像构建完成: super-biz-agent:latest$(NC)"
