@@ -18,8 +18,8 @@ WORKDIR /app
 # Create non-root user
 RUN addgroup -S appgroup && adduser -S appuser -G appgroup
 
-# Copy JAR from builder stage (use wildcard for Spring Boot repackaged JAR)
-COPY --from=builder /build/target/super-biz-agent-1.0-SNAPSHOT.jar app.jar
+# Copy JAR from builder stage (wildcard handles version changes in pom.xml)
+COPY --from=builder /build/target/*.jar app.jar
 
 # Switch to non-root user
 USER appuser
