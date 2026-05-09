@@ -3,7 +3,7 @@ FROM eclipse-temurin:17-jdk-alpine AS builder
 
 WORKDIR /build
 
-# Copy Maven wrapper and pom.xml first for dependency caching
+# Copy pom.xml and source, then build the JAR
 COPY pom.xml ./
 COPY src ./src
 
@@ -18,8 +18,8 @@ WORKDIR /app
 # Create non-root user
 RUN addgroup -S appgroup && adduser -S appuser -G appgroup
 
-# Copy JAR from builder stage
-COPY --from=builder /build/target/*.jar app.jar
+# Copy JAR from builder stage (use wildcard for Spring Boot repackaged JAR)
+COPY --from=builder /build/target/super-biz-agent-1.0-SNAPSHOT.jar app.jar
 
 # Switch to non-root user
 USER appuser
