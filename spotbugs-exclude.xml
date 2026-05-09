@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<FindBugsFilter>
+    <!-- Exclude Lombok-generated code -->
+    <Match>
+        <Class name="~.*\$\$.*"/>
+    </Match>
+    <!-- Exclude DTO classes -->
+    <Match>
+        <Package name="~org\.example\.dto\..*"/>
+    </Match>
+</FindBugsFilter>
