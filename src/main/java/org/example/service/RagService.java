@@ -42,13 +42,16 @@ public class RagService {
     @Value("${rag.model}")
     private String model;
 
+    @Value("${dashscope.base-url}")
+    private String baseUrl;
+
     private Generation generation;
 
     @PostConstruct
     public void init() {
         // 设置 API Key 和 Base URL
         Constants.apiKey = apiKey;
-        Constants.baseHttpApiUrl = "https://dashscope.aliyuncs.com/api/v1";
+        Constants.baseHttpApiUrl = baseUrl;
         
         // 创建 Generation 实例
         generation = new Generation();

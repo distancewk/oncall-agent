@@ -26,6 +26,9 @@ public class VectorRerankService {
     @Value("${dashscope.rerank.model:gte-rerank}")
     private String model;
 
+    @Value("${dashscope.rerank.url}")
+    private String rerankUrl;
+
     @Autowired
     private OkHttpClient httpClient;
 
@@ -68,7 +71,7 @@ public class VectorRerankService {
             RequestBody body = RequestBody.create(jsonBody, MediaType.parse("application/json"));
 
             Request request = new Request.Builder()
-                    .url("https://dashscope.aliyuncs.com/api/v1/services/rerank/text-rerank/text-rerank")
+                    .url(rerankUrl)
                     .addHeader("Authorization", "Bearer " + apiKey)
                     .addHeader("Content-Type", "application/json")
                     .post(body)

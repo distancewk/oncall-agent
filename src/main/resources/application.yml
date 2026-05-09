@@ -45,10 +45,12 @@ spring:
 dashscope:
   api:
     key: ${DASHSCOPE_API_KEY}
+  base-url: https://dashscope.aliyuncs.com/api/v1
+  rerank:
+    url: https://dashscope.aliyuncs.com/api/v1/services/rerank/text-rerank/text-rerank
+    model: gte-rerank
   embedding:
     model: text-embedding-v4  # 阿里云文本向量化模型
-  rerank:
-    model: gte-rerank
 
 # 文档分片配置
 document:
