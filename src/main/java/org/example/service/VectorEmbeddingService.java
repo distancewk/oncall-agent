@@ -38,12 +38,12 @@ public class VectorEmbeddingService {
     @PostConstruct
     public void init() {
         // 验证 API Key
-        if (apiKey == null || apiKey.trim().isEmpty() || apiKey.equals("your-api-key-here")) {
-            logger.error("API Key 未正确配置！当前值: {}", apiKey);
+        if (apiKey == null || apiKey.trim().isEmpty() || apiKey.contains("your-api-key") || apiKey.contains("sk-")) {
+            logger.error("API Key 未正确配置");
             throw new IllegalStateException("请设置环境变量 DASHSCOPE_API_KEY 或在 application.yml 中配置正确的 API Key");
         }
         
-        logger.info("API Key 已加载: {} 位密钥", apiKey.length());
+        logger.info("API Key 已加载");
         
         // 设置全局 API Key（确保设置成功）
         Constants.apiKey = apiKey;
@@ -84,8 +84,7 @@ public class VectorEmbeddingService {
                 Constants.apiKey = apiKey;
             }
             
-            logger.debug("调用 API 前 Constants.apiKey 状态: {}",
-                Constants.apiKey != null ? "已设置" : "null");
+            logger.debug("调用 API 前 Constants.apiKey 状态: 已设置");
 
             // 构建请求参数
             TextEmbeddingParam param = TextEmbeddingParam
