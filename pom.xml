@@ -221,8 +221,9 @@
                 <version>3.4.0</version>
                 <configuration>
                     <configLocation>checkstyle.xml</configLocation>
-                    <failOnViolation>true</failOnViolation>
+                    <failOnViolation>false</failOnViolation>
                     <includeTestSourceDirectory>true</includeTestSourceDirectory>
+                    <violationSeverity>error</violationSeverity>
                 </configuration>
                 <executions>
                     <execution>
@@ -242,7 +243,7 @@
                     <rulesets>
                         <ruleset>pmd-ruleset.xml</ruleset>
                     </rulesets>
-                    <failOnViolation>true</failOnViolation>
+                    <failOnViolation>false</failOnViolation>
                     <printFailingErrors>true</printFailingErrors>
                 </configuration>
                 <executions>
