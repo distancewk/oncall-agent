@@ -78,6 +78,19 @@ services:
     networks:
       - app-network
 
+  redis:
+    image: redis:7-alpine
+    container_name: session-redis
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    networks:
+      - app-network
+
   app:
     build: .
     container_name: super-biz-agent
@@ -87,8 +100,12 @@ services:
       DASHSCOPE_API_KEY: ${DASHSCOPE_API_KEY}
       MILVUS_HOST: milvus
       MILVUS_PORT: 19530
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
     depends_on:
       milvus:
+        condition: service_started
+      redis:
         condition: service_started
     networks:
       - app-network
