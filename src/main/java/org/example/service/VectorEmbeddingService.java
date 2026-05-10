@@ -38,7 +38,7 @@ public class VectorEmbeddingService {
     @PostConstruct
     public void init() {
         // 验证 API Key
-        if (apiKey == null || apiKey.trim().isEmpty() || apiKey.contains("your-api-key") || apiKey.contains("sk-")) {
+        if (apiKey == null || apiKey.trim().isEmpty() || apiKey.contains("your-api-key")) {
             logger.error("API Key 未正确配置");
             throw new IllegalStateException("请设置环境变量 DASHSCOPE_API_KEY 或在 application.yml 中配置正确的 API Key");
         }

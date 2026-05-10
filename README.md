@@ -1,162 +1,201 @@
 # SuperBizAgent (OnCall Agent)
 
-> An intelligent Q&A and AIOps system built with Spring Boot + AI Agent framework.
+> 基于 Spring Boot + AI Agent 框架的智能问答与 AIOps 系统。
+> 支持 RAG 知识库问答、多轮对话、智能运维诊断告警与报告生成。
 
-## Overview
+## 简介
 
-SuperBizAgent is an enterprise-grade intelligent agent system with two core modules:
+SuperBizAgent 包含两大核心模块：
 
-### 1. RAG-based Q&A
-Integrates Milvus vector database and Alibaba Cloud DashScope to deliver retrieval-augmented generation (RAG) capabilities, supporting multi-turn conversations and streaming output.
+- **RAG 智能问答**：集成 Milvus 向量数据库 + 阿里云 DashScope 大模型，支持文档检索增强生成、多轮对话、流式输出
+- **AIOps 运维助手**：基于 Planner-Executor-Replanner 架构的自动化运维系统，支持告警分析、日志查询、智能诊断、报告生成
 
-### 2. AIOps (AI for IT Operations)
-An AI Agent-driven automated operations system built on a Planner-Executor-Replanner architecture, enabling alert analysis, log querying, intelligent diagnosis, and report generation.
+## 功能特性
 
-## Features
+- RAG 知识库问答（向量检索 + 多轮对话 + 流式输出）
+- AIOps 智能诊断（多智能体协作 + 自动生成报告）
+- 工具集成（文档检索、告警查询、日志分析、日期工具）
+- 会话管理（上下文维护 + Redis 持久化，刷新页面/重启不丢失）
+- Web 管理界面（内置测试 UI + RESTful API）
 
-- **RAG Q&A**: Vector retrieval + multi-turn conversation + streaming output
-- **AIOps**: Intelligent diagnosis + multi-agent collaboration + auto-generated reports
-- **Tool Integration**: Document retrieval, alert querying, log analysis, date/time utilities
-- **Session Management**: Context maintenance, history management, auto-cleanup
-- **Web Interface**: Built-in test UI and RESTful API
+## 技术栈
 
-## Tech Stack
+| 技术 | 版本 | 说明 |
+|------|------|------|
+| Java | 17 | 开发语言 |
+| Spring Boot | 3.2.0 | 应用框架 |
+| Spring AI | 1.1.0 | AI Agent 框架 |
+| DashScope | 2.17.0 | 阿里云大模型服务 |
+| Milvus | 2.5.10 | 向量数据库 |
+| Redis | 7-alpine | 会话持久化缓存 |
 
-| Technology | Version | Description |
-|------------|---------|-------------|
-| Java | 17 | Language |
-| Spring Boot | 3.2.0 | Application framework |
-| Spring AI | 1.1.0 | AI Agent framework |
-| DashScope | 2.17.0 | Alibaba Cloud AI service |
-| Milvus | 2.6.10 | Vector database |
+## 本地部署
 
-## Architecture
+### 环境要求
 
-```
-super-biz-agent/
-├── src/main/java/org/example/
-│   ├── controller/
-│   │   └── ChatController.java        # Unified API controller
-│   ├── service/
-│   │   ├── ChatService.java           # Chat service
-│   │   ├── AiOpsService.java          # AIOps service
-│   │   ├── RagService.java            # RAG service
-│   │   └── Vector*.java               # Vector service classes
-│   ├── agent/tool/                    # Agent tool set
-│   │   ├── DateTimeTools.java         # Date/time utilities
-│   │   ├── InternalDocsTools.java     # Document retrieval
-│   │   ├── QueryMetricsTools.java     # Alert querying
-│   │   └── QueryLogsTools.java        # Log querying
-│   └── config/                        # Config classes
-├── src/main/resources/
-│   ├── static/                        # Web frontend
-│   └── application.yml                # App configuration
-├── aiops-docs/                        # Operations document library
-├── docs/                              # Additional docs
-└── vector-database.yml                # Docker Compose for Milvus
-```
-
-## Quick Start
-
-### Prerequisites
-
-- **Java 17** (required, Java 8 is not supported)
+- **Java 17**（必需，Java 8 不支持）
 - **Maven** 3.6+
-- **Docker** & **Docker Compose** (for Milvus vector database)
-- **DashScope API Key** from [Alibaba Cloud](https://help.aliyun.com/document_detail/2712195.html)
+- **Docker** & **Docker Compose**（用于启动 Milvus 向量数据库和 Redis）
+- **DashScope API Key** 从 [阿里云百炼](https://help.aliyun.com/document_detail/2712195.html) 获取
 
-### 1. Set Environment Variables
+### 1. 下载项目
 
 ```bash
-# Required: DashScope API Key for LLM and embedding services
+# 解压下载的文件后，进入项目目录
+cd SuperBizAgent-release-2026-01-02
+```
+
+### 2. 设置 API Key
+
+```bash
+# 必需：DashScope API Key，用于大模型和向量化服务
 export DASHSCOPE_API_KEY=your-api-key-here
 ```
 
-### 2. Start Milvus Vector Database
+### 3. 启动基础设施（数据库、缓存等）
 
 ```bash
-docker compose -f vector-database.yml up -d
+# 一键启动所有依赖服务：Milvus + Redis + MinIO + Attu 管理界面
+docker compose up -d
 ```
 
-This starts Milvus, MinIO, and Attu (W​eb UI at http://localhost:8000).
+> 如果 Docker Hub 拉取镜像失败（国内网络问题），请参考下方的"Docker 镜像拉取失败"章节使用镜像源。
 
-### 3. Start the Application
+验证服务是否正常：
 
 ```bash
-mvn clean install
-mvn spring-boot:run
+docker ps --format "table {{.Names}}\t{{.Status}}"
 ```
 
-> First startup downloads Maven dependencies and may take a few minutes.
+所有容器状态为 `healthy` 即可继续。
 
-### 4. Access
+### 4. 编译并启动应用
+
+```bash
+# 编译项目
+mvn clean install -DskipTests
+
+# 启动应用（首次启动会下载依赖，耗时较长）
+export DASHSCOPE_API_KEY=your-api-key-here && mvn spring-boot:run
+```
+
+> 启动失败的常见原因及解决方法请参考"常见问题"章节。
+
+### 5. 访问服务
 
 - **Web UI**: http://localhost:9900
-- **Attu (Milvus Management)**: http://localhost:8000
+- **Attu（Milvus 管理界面）**: http://localhost:8000
+- **API 健康检查**: `curl http://localhost:9900/milvus/health`
 
-### Optional: Upload Documents
-
-Upload operation documents to the vector store for RAG-based Q&A:
+### 6. 上传文档到知识库（可选）
 
 ```bash
 make upload
 ```
 
-### One-Command Setup
+这会自动将 `aiops-docs/` 目录下的运维文档向量化后存入 Milvus。
+
+### 一键初始化
 
 ```bash
 make init
 ```
 
-This automates: start Milvus → compile → start service → upload documents.
+自动完成：启动 Docker → 编译项目 → 启动服务 → 上传文档。
 
-## API Reference
+## 常用命令
 
-All API endpoints are accessible without authentication (intended for internal network use).
+### 应用管理
 
-### 1. Smart Q&A
+| 命令 | 说明 |
+|------|------|
+| `mvn spring-boot:run` | 启动应用（前台运行） |
+| `make start` | 启动应用（后台运行，日志写入 server.log） |
+| `make stop` | 停止应用 |
+| `make restart` | 重启应用 |
+| `make check` | 检查应用运行状态 |
+| `tail -f server.log` | 查看实时日志 |
 
-**Streaming Chat (recommended)**
+### 基础设施管理
+
+| 命令 | 说明 |
+|------|------|
+| `docker compose up -d` | 启动所有依赖服务 |
+| `docker compose down` | 停止所有依赖服务 |
+| `make status` | 查看 Docker 容器状态 |
+| `docker compose logs milvus` | 查看 Milvus 日志 |
+| `docker compose logs redis` | 查看 Redis 日志 |
+
+### 文档管理
+
+| 命令 | 说明 |
+|------|------|
+| `make upload` | 上传 aiops-docs 目录下所有文档到向量库 |
+| `make list-docs` | 查看文档列表 |
+
+### 查看 Redis 数据
+
+```bash
+# 查看所有 session
+docker exec session-redis redis-cli KEYS "session:*"
+
+# 查看指定会话的完整内容
+docker exec session-redis redis-cli GET "session:test-session-redis" | python3 -m json.tool
+
+# 查看会话过期时间（秒）
+docker exec session-redis redis-cli TTL "session:test-session-redis"
+
+# 进入 Redis 交互式命令行
+docker exec -it session-redis redis-cli
+```
+
+## API 参考
+
+所有 API 无需鉴权（仅限内网使用）。
+
+### 智能问答
+
+**流式聊天（推荐）**
 
 ```bash
 curl -N -X POST http://localhost:9900/api/chat_stream \
   -H "Content-Type: application/json" \
-  -d '{"Id": "session-123", "Question": "What is a vector database?"}'
+  -d '{"Id": "session-123", "Question": "什么是向量数据库？"}'
 ```
 
-SSE streaming output, automatic tool invocation, multi-turn conversation.
+SSE 流式输出，自动调用工具，支持多轮对话。
 
-**Standard Chat**
+**标准聊天**
 
 ```bash
 curl -X POST http://localhost:9900/api/chat \
   -H "Content-Type: application/json" \
-  -d '{"Id": "session-123", "Question": "What is a vector database?"}'
+  -d '{"Id": "session-123", "Question": "什么是向量数据库？"}'
 ```
 
-Returns the complete response in one shot.
+一次性返回完整回复。
 
-### 2. AIOps
+### AIOps 运维诊断
 
 ```bash
 curl -N -X POST http://localhost:9900/api/ai_ops
 ```
 
-Triggers the alert analysis pipeline and generates an operations report (SSE streaming).
+触发告警分析流水线，生成运维报告（SSE 流式输出）。
 
-### 3. Session Management
+### 会话管理
 
-- `POST /api/chat/clear` - Clear session history
-- `GET /api/chat/session/{sessionId}` - Get session info
+- `POST /api/chat/clear` - 清空会话历史
+- `GET /api/chat/session/{sessionId}` - 获取会话信息
 
-### 4. File Management
+### 文件管理
 
-- `POST /api/upload` - Upload and vectorize a document
-- `GET /milvus/health` - Milvus health check
+- `POST /api/upload` - 上传文档并向量化
+- `GET /milvus/health` - Milvus 健康检查
 
-## Configuration
+## 配置说明
 
-### application.yml (key sections)
+### 主要配置项（application.yml）
 
 ```yaml
 server:
@@ -170,6 +209,9 @@ spring:
   ai:
     dashscope:
       api-key: "${DASHSCOPE_API_KEY}"
+  redis:
+    host: ${REDIS_HOST:localhost}
+    port: ${REDIS_PORT:6379}
 
 rag:
   top-k: 3
@@ -181,45 +223,85 @@ document:
     overlap: 100
 ```
 
-### Environment Variables
+### 环境变量
 
-| Variable | Required | Description |
-|----------|----------|-------------|
-| `DASHSCOPE_API_KEY` | Yes | DashScope API key for LLM/embedding |
+| 变量 | 必需 | 说明 |
+|------|------|------|
+| `DASHSCOPE_API_KEY` | 是 | 阿里云百炼 API Key |
 
-## Troubleshooting
+## 项目结构
 
-### Compilation fails with "找不到符号"
-Ensure Java 17 is set as the default JDK:
+```
+super-biz-agent/
+├── src/main/java/org/example/
+│   ├── controller/
+│   │   └── ChatController.java        # 统一 API 控制器
+│   ├── service/
+│   │   ├── ChatService.java           # 聊天服务
+│   │   ├── AiOpsService.java          # AIOps 服务
+│   │   ├── RagService.java            # RAG 服务
+│   │   ├── SessionManager.java        # 会话管理（内存 + Redis 持久化）
+│   │   └── Vector*.java               # 向量服务
+│   ├── agent/tool/                    # 智能体工具集
+│   │   ├── DateTimeTools.java         # 日期时间
+│   │   ├── InternalDocsTools.java     # 文档检索
+│   │   ├── QueryMetricsTools.java     # 告警查询
+│   │   └── QueryLogsTools.java        # 日志查询
+│   └── config/                        # 配置类
+├── src/main/resources/
+│   ├── static/                        # 前端页面
+│   └── application.yml                # 应用配置
+├── aiops-docs/                        # 运维文档库
+├── docker-compose.yml                 # Docker Compose（含应用）
+└── vector-database.yml                # Docker Compose（仅 Milvus）
+```
+
+## 常见问题
+
+### 编译报错"找不到符号"
+
+确保使用 Java 17：
+
 ```bash
-# Check current version
-java -version  # Must be 17.x
+# 检查当前版本
+java -version  # 必须是 17.x
 
-# On macOS, set Java 17 explicitly:
+# macOS 上设置 Java 17
 export JAVA_HOME=/Library/Java/JavaVirtualMachines/jdk-17.jdk/Contents/Home
 export PATH=$JAVA_HOME/bin:$PATH
 ```
 
-### Docker image pull fails in China
-Docker Hub is frequently blocked. Use a mirror registry:
+### Docker 镜像拉取失败（国内网络）
+
+Docker Hub 在国内访问不稳定时，可使用镜像源：
+
 ```bash
-# Pull images via a reliable mirror
-docker pull docker.1ms.run/milvusdb/milvus:v2.5.10
-docker pull docker.1ms.run/minio/minio:RELEASE.2023-03-20T20-16-18Z
-docker pull docker.1ms.run/zilliz/attu:v2.5
+# 从镜像源拉取并重新打标签
+docker pull docker.1panel.live/milvusdb/milvus:v2.5.10
+docker pull docker.1panel.live/minio/minio:RELEASE.2023-03-20T20-16-18Z
+docker pull docker.1panel.live/zilliz/attu:v2.5
 docker pull quay.io/coreos/etcd:v3.5.18
+docker pull docker.1panel.live/library/redis:7-alpine
 
-# Tag them with original names
-docker tag docker.1ms.run/milvusdb/milvus:v2.5.10 milvusdb/milvus:v2.5.10
-docker tag docker.1ms.run/minio/minio:RELEASE.2023-03-20T20-16-18Z minio/minio:RELEASE.2023-03-20T20-16-18Z
-docker tag docker.1ms.run/zilliz/attu:v2.5 zilliz/attu:v2.5
+# 重新打标签
+docker tag docker.1panel.live/milvusdb/milvus:v2.5.10 milvusdb/milvus:v2.5.10
+docker tag docker.1panel.live/minio/minio:RELEASE.2023-03-20T20-16-18Z minio/minio:RELEASE.2023-03-20T20-16-18Z
+docker tag docker.1panel.live/zilliz/attu:v2.5 zilliz/attu:v2.5
+docker tag docker.1panel.live/library/redis:7-alpine redis:7-alpine
 
-# Then start Milvus
-docker compose -f vector-database.yml up -d
+# 然后启动服务
+docker compose up -d
 ```
 
-### MCP Client fails on startup (optional)
-MCP client connections (tavily, postgres, tencent-cls) are **disabled by default** in `application.yml`. To enable them, set `spring.ai.mcp.client.enabled: true` and configure the necessary API keys and endpoints.
+### 应用启动报错"API Key 未正确配置"
+
+- 确认已设置 `DASHSCOPE_API_KEY` 环境变量：`echo $DASHSCOPE_API_KEY`
+- 启动时需确保环境变量已导出：`export DASHSCOPE_API_KEY=your-key && mvn spring-boot:run`
+- DashScope API Key 以 `sk-` 开头属于正常格式
+
+### MCP 客户端启动报错（可选）
+
+MCP 客户端连接（tavily、postgres、tencent-cls）**默认禁用**。如需启用，在 `application.yml` 中设置 `spring.ai.mcp.client.enabled: true` 并配置相应的 API Key 和端点。
 
 ## License
 

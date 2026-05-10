@@ -237,6 +237,11 @@ public class SessionManager {
                 lock.unlock();
             }
 
+            // 持久化到 Redis（异步，非阻塞）
+            if (manager != null) {
+                manager.saveSession(this);
+            }
+
             // 触发异步提炼
             if (!evictedMessages.isEmpty() && manager != null) {
                 manager.triggerMemoryExtraction(sessionId, evictedMessages);
