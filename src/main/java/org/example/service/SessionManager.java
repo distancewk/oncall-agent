@@ -4,11 +4,14 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Qualifier;
+import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.stereotype.Service;
 
+import com.fasterxml.jackson.databind.ObjectMapper;
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.Executor;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.locks.ReentrantLock;
 
 /**
@@ -31,6 +34,15 @@ public class SessionManager {
     @Qualifier("chatTaskExecutor")
     private Executor executor;
 
+    @Autowired(required = false)
+    private StringRedisTemplate redisTemplate;
+
+    @Autowired(required = false)
+    private ObjectMapper objectMapper;
+
+    private static final String REDIS_KEY_PREFIX = "session:";
+    private static final long SESSION_TTL_SECONDS = 3600; // 1 hour
+
     // 存储会话信息
     private final Map<String, SessionInfo> sessions = new ConcurrentHashMap<>();
 
@@ -41,7 +53,23 @@ public class SessionManager {
         if (sessionId == null || sessionId.isEmpty()) {
             sessionId = UUID.randomUUID().toString();
         }
-        return sessions.computeIfAbsent(sessionId, SessionInfo::new);
+        // Check L1 cache first
+        SessionInfo existing = sessions.get(sessionId);
+        if (existing != null) {
+            refreshRedisTtl(sessionId);
+            return existing;
+        }
+        // Check Redis persistence
+        SessionInfo fromRedis = loadFromRedis(sessionId);
+        if (fromRedis != null) {
+            sessions.put(sessionId, fromRedis);
+            return fromRedis;
+        }
+        // Create new
+        SessionInfo session = new SessionInfo(sessionId);
+        sessions.put(sessionId, session);
+        saveToRedis(session);
+        return session;
     }
 
     /**
@@ -51,7 +79,98 @@ public class SessionManager {
         if (sessionId == null || sessionId.isEmpty()) {
             return null;
         }
-        return sessions.get(sessionId);
+        // Check L1 cache first
+        SessionInfo session = sessions.get(sessionId);
+        if (session != null) {
+            refreshRedisTtl(sessionId);
+            return session;
+        }
+        // Check Redis
+        SessionInfo fromRedis = loadFromRedis(sessionId);
+        if (fromRedis != null) {
+            sessions.put(sessionId, fromRedis);
+            return fromRedis;
+        }
+        return null;
+    }
+
+    /**
+     * Persist session changes to Redis. Called by SessionInfo after mutations.
+     */
+    public void saveSession(SessionInfo session) {
+        saveToRedis(session);
+    }
+
+    private void saveToRedis(SessionInfo session) {
+        if (redisTemplate == null || objectMapper == null) {
+            return; // Redis not configured, use in-memory only
+        }
+        try {
+            Map<String, Object> data = new HashMap<>();
+            data.put("sessionId", session.getSessionId());
+            data.put("createTime", session.getCreateTime());
+            data.put("messageHistory", session.getHistory());
+            String json = objectMapper.writeValueAsString(data);
+            redisTemplate.opsForValue().set(
+                REDIS_KEY_PREFIX + session.getSessionId(),
+                json,
+                SESSION_TTL_SECONDS,
+                TimeUnit.SECONDS
+            );
+        } catch (Exception e) {
+            logger.warn("Failed to save session to Redis: {}", e.getMessage());
+        }
+    }
+
+    private SessionInfo loadFromRedis(String sessionId) {
+        if (redisTemplate == null || objectMapper == null) {
+            return null;
+        }
+        try {
+            String json = redisTemplate.opsForValue().get(REDIS_KEY_PREFIX + sessionId);
+            if (json == null) {
+                return null;
+            }
+            @SuppressWarnings("unchecked")
+            Map<String, Object> data = objectMapper.readValue(json, Map.class);
+            SessionInfo session = new SessionInfo(sessionId);
+
+            Object createTimeVal = data.get("createTime");
+            if (createTimeVal instanceof Number) {
+                java.lang.reflect.Field createTimeField = SessionInfo.class.getDeclaredField("createTime");
+                createTimeField.setAccessible(true);
+                createTimeField.set(session, ((Number) createTimeVal).longValue());
+            }
+
+            @SuppressWarnings("unchecked")
+            List<Map<String, String>> history = (List<Map<String, String>>) data.get("messageHistory");
+            if (history != null) {
+                java.lang.reflect.Field historyField = SessionInfo.class.getDeclaredField("messageHistory");
+                historyField.setAccessible(true);
+                @SuppressWarnings("unchecked")
+                List<Map<String, String>> mutableHistory = new java.util.ArrayList<>();
+                for (Map<String, String> entry : history) {
+                    mutableHistory.add(new java.util.HashMap<>(entry));
+                }
+                historyField.set(session, mutableHistory);
+            }
+
+            return session;
+        } catch (Exception e) {
+            logger.warn("Failed to load session from Redis: {}", e.getMessage());
+            return null;
+        }
+    }
+
+    private void refreshRedisTtl(String sessionId) {
+        if (redisTemplate == null) {
+            return;
+        }
+        try {
+            redisTemplate.expire(REDIS_KEY_PREFIX + sessionId, SESSION_TTL_SECONDS, TimeUnit.SECONDS);
+        } catch (Exception e) {
+            // Non-critical, ignore
+        }
     }
 
     // ==================== 内部类 ====================
@@ -144,6 +263,22 @@ public class SessionManager {
             try {
                 messageHistory.clear();
                 logger.info("会话 {} 历史消息已清空", sessionId);
+            } finally {
+                lock.unlock();
+            }
+        }
+
+        /**
+         * 清空历史消息并持久化
+         */
+        public void clearHistory(SessionManager manager) {
+            lock.lock();
+            try {
+                messageHistory.clear();
+                logger.info("会话 {} 历史消息已清空", sessionId);
+                if (manager != null) {
+                    manager.saveSession(this);
+                }
             } finally {
                 lock.unlock();
             }

@@ -126,7 +126,7 @@ public class ChatController {
 
             SessionManager.SessionInfo session = sessionManager.getSession(request.getId());
             if (session != null) {
-                session.clearHistory();
+                session.clearHistory(sessionManager);
                 return ResponseEntity.ok(ApiResponse.success("会话历史已清空"));
             } else {
                 return ResponseEntity.ok(ApiResponse.error("会话不存在"));
