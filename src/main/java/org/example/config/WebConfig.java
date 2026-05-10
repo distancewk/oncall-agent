@@ -1,7 +1,5 @@
 package org.example.config;
 
-import com.fasterxml.jackson.databind.ObjectMapper;
-import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.http.converter.HttpMessageConverter;
 import org.springframework.http.converter.StringHttpMessageConverter;
@@ -56,10 +54,5 @@ public class WebConfig implements WebMvcConfigurer {
         // 配置静态资源映射
         registry.addResourceHandler("/**")
                 .addResourceLocations("classpath:/static/");
-    }
-
-    @Bean
-    public ObjectMapper objectMapper() {
-        return new ObjectMapper();
     }
 }

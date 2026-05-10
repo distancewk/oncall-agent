@@ -4,6 +4,7 @@ import com.alibaba.cloud.ai.dashscope.chat.DashScopeChatModel;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.example.dto.ApiResponse;
 import org.example.service.AiOpsService;
+import org.example.service.AlertService;
 import org.example.service.ChatService;
 import org.example.service.SessionManager;
 import org.junit.jupiter.api.Test;
@@ -50,6 +51,9 @@ class ChatControllerTest {
 
     @MockBean
     private SessionManager sessionManager;
+
+    @MockBean
+    private AlertService alertService;
 
     @Test
     void chat_shouldReturnError_whenQuestionIsEmpty() throws Exception {

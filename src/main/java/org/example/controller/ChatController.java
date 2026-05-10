@@ -10,6 +10,7 @@ import lombok.Getter;
 import lombok.Setter;
 import org.example.dto.ApiResponse;
 import org.example.service.AiOpsService;
+import org.example.service.AlertService;
 import org.example.service.ChatService;
 import org.example.service.SessionManager;
 import org.slf4j.Logger;
@@ -59,6 +60,9 @@ public class ChatController {
 
     @Autowired
     private SessionManager sessionManager;
+
+    @Autowired
+    private AlertService alertService;
 
     /**
      * 普通对话接口（支持工具调用）
@@ -280,11 +284,26 @@ public class ChatController {
 
     /**
      * AI 智能运维接口（SSE 流式模式）- 自动分析告警并生成运维报告
-     * 无需用户输入，自动执行告警分析流程
+     * 可选的 alertContext 参数，用于传入告警上下文
      */
     @PostMapping(value = "/ai_ops", produces = "text/event-stream;charset=UTF-8")
-    public SseEmitter aiOps() {
+    public SseEmitter aiOps(@RequestBody(required = false) Map<String, Object> body) {
         SseEmitter emitter = new SseEmitter(600000L); // 10分钟超时（告警分析可能较慢）
+
+        // 从请求体中提取 alertContext
+        String alertContext = null;
+        String alertId = null;
+        if (body != null) {
+            if (body.containsKey("alertContext") && body.get("alertContext") instanceof String) {
+                alertContext = (String) body.get("alertContext");
+            }
+            if (body.containsKey("alertId") && body.get("alertId") instanceof String) {
+                alertId = (String) body.get("alertId");
+            }
+        }
+
+        final String context = alertContext;
+        final String aId = alertId;
 
         executor.execute(() -> {
             try {
@@ -295,9 +314,9 @@ public class ChatController {
                 ToolCallback[] toolCallbacks = tools != null ? tools.getToolCallbacks() : new ToolCallback[0];
 
                 emitter.send(SseEmitter.event().name("message").data(SseMessage.content("正在读取告警并拆解任务...\n")));
-                
-                // 调用 AiOpsService 执行分析流程
-                Optional<OverAllState> overAllStateOptional = aiOpsService.executeAiOpsAnalysis(chatModel, toolCallbacks);
+
+                // 调用 AiOpsService 执行分析流程（传入告警上下文）
+                Optional<OverAllState> overAllStateOptional = aiOpsService.executeAiOpsAnalysis(chatModel, toolCallbacks, context);
 
                 if (overAllStateOptional.isEmpty()) {
                     emitter.send(SseEmitter.event().name("message")
@@ -316,6 +335,12 @@ public class ChatController {
                 if (finalReportOptional.isPresent()) {
                     String finalReportText = finalReportOptional.get();
                     logger.info("提取到 Planner 最终报告，长度: {}", finalReportText.length());
+
+                    // 如果有关联的告警 ID，存储报告
+                    if (aId != null) {
+                        alertService.storeReport(aId, finalReportText);
+                        logger.info("告警分析报告已关联存储, alertId: {}", aId);
+                    }
                     
                     // 发送分隔线
                     emitter.send(SseEmitter.event().name("message")
