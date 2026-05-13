@@ -149,12 +149,13 @@ public class VectorIndexService {
             try {
                 // 生成向量
                 List<Float> vector = embeddingService.generateEmbedding(chunk.getContent());
+                java.util.SortedMap<Long, Float> sparseVector = embeddingService.generateSparseVector(chunk.getContent());
 
                 // 构建元数据（包含文件信息）
                 Map<String, Object> metadata = buildMetadata(path.toString(), chunk, chunks.size());
 
                 // 插入到 Milvus
-                insertToMilvus(chunk.getContent(), vector, metadata, chunk.getChunkIndex());
+                insertToMilvus(chunk.getContent(), vector, sparseVector, metadata, chunk.getChunkIndex());
                 
                 logger.info("✓ 分片 {}/{} 索引成功", i + 1, chunks.size());
 
@@ -252,7 +253,8 @@ public class VectorIndexService {
     /**
      * 插入向量到 Milvus
      */
-    private void insertToMilvus(String content, List<Float> vector, 
+    private void insertToMilvus(String content, List<Float> vector,
+                                java.util.SortedMap<Long, Float> sparseVector,
                                 Map<String, Object> metadata, int chunkIndex) throws Exception {
         try {
             // 确保 collection 已加载
@@ -272,16 +274,19 @@ public class VectorIndexService {
 
             // 构建字段数据
             List<InsertParam.Field> fields = new ArrayList<>();
-            
+
             // ID 字段
             fields.add(new InsertParam.Field("id", Collections.singletonList(id)));
-            
+
             // content 字段
             fields.add(new InsertParam.Field("content", Collections.singletonList(content)));
-            
+
             // vector 字段
             fields.add(new InsertParam.Field("vector", Collections.singletonList(vector)));
-            
+
+            // sparse_vector 字段
+            fields.add(new InsertParam.Field("sparse_vector", Collections.singletonList(sparseVector)));
+
             // metadata 字段（JSON 对象）
             com.google.gson.Gson gson = new com.google.gson.Gson();
             com.google.gson.JsonObject metadataJson = gson.toJsonTree(metadata).getAsJsonObject();

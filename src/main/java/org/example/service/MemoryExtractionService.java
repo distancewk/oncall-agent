@@ -104,6 +104,7 @@ public class MemoryExtractionService {
             // 生成向量
             String content = "[用户私人记忆] " + fact;
             List<Float> vector = embeddingService.generateEmbedding(content);
+            java.util.SortedMap<Long, Float> sparseVector = embeddingService.generateSparseVector(content);
 
             // 准备元数据
             Map<String, Object> metadata = new HashMap<>();
@@ -131,6 +132,7 @@ public class MemoryExtractionService {
             fields.add(new InsertParam.Field("id", Collections.singletonList(id)));
             fields.add(new InsertParam.Field("content", Collections.singletonList(content)));
             fields.add(new InsertParam.Field("vector", Collections.singletonList(vector)));
+            fields.add(new InsertParam.Field("sparse_vector", Collections.singletonList(sparseVector)));
             
             com.google.gson.Gson gson = new com.google.gson.Gson();
             com.google.gson.JsonObject metadataJson = gson.toJsonTree(metadata).getAsJsonObject();

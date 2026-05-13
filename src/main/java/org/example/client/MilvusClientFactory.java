@@ -129,6 +129,11 @@ public class MilvusClientFactory {
                 .addTypeParam("analyzer_params", "{\"type\":\"standard\"}")
                 .build();
 
+        FieldType sparseVectorField = FieldType.newBuilder()
+                .withName("sparse_vector")
+                .withDataType(DataType.SparseFloatVector)
+                .build();
+
         FieldType metadataField = FieldType.newBuilder()
                 .withName("metadata")
                 .withDataType(DataType.JSON)
@@ -140,6 +145,7 @@ public class MilvusClientFactory {
                 .addFieldType(idField)
                 .addFieldType(vectorField)
                 .addFieldType(contentField)
+                .addFieldType(sparseVectorField)
                 .addFieldType(metadataField)
                 .build();
 
@@ -175,7 +181,24 @@ public class MilvusClientFactory {
         if (response.getStatus() != 0) {
             throw new RuntimeException("创建 vector 索引失败: " + response.getMessage());
         }
-        
+
         logger.info("成功为 vector 字段创建索引");
+
+        // 为 sparse_vector 字段创建索引（SparseFloatVector 使用 SPARSE_INVERTED_INDEX 和 IP 距离）
+        CreateIndexParam sparseIndexParam = CreateIndexParam.newBuilder()
+                .withCollectionName(MilvusConstants.MILVUS_COLLECTION_NAME)
+                .withFieldName("sparse_vector")
+                .withIndexType(IndexType.SPARSE_INVERTED_INDEX)
+                .withMetricType(MetricType.IP)
+                .withExtraParam("{\"inverted_index_algo\":\"DAAT_MAXSCORE\"}")
+                .withSyncMode(Boolean.FALSE)
+                .build();
+
+        R<RpcStatus> sparseResponse = client.createIndex(sparseIndexParam);
+        if (sparseResponse.getStatus() != 0) {
+            throw new RuntimeException("创建 sparse_vector 索引失败: " + sparseResponse.getMessage());
+        }
+
+        logger.info("成功为 sparse_vector 字段创建索引");
     }
 }
