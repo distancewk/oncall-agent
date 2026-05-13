@@ -46,6 +46,7 @@ logs/
 
 ### Upload Files ###
 uploads/
+data/
 
 ### Temp Scripts ###
 *.sh

@@ -77,15 +77,21 @@ public class VectorRerankService {
                     .post(body)
                     .build();
 
-            try (Response response = httpClient.newCall(request).execute()) {
+            try (Response response = httpClient.newCall(request).execute();
+                 ResponseBody responseBody = response.body()) {
                 if (!response.isSuccessful()) {
-                    String errorMsg = response.body() != null ? response.body().string() : "No response body";
+                    String errorMsg = responseBody != null ? responseBody.string() : "No response body";
                     logger.error("Rerank API 调用失败: HTTP {}, {}", response.code(), errorMsg);
                     // 降级：如果重排失败，直接按原样返回前 topK
                     return defensiveCopyTopK(candidates, topK);
                 }
 
-                String responseStr = response.body().string();
+                if (responseBody == null) {
+                    logger.warn("Rerank API 返回空响应体");
+                    return defensiveCopyTopK(candidates, topK);
+                }
+
+                String responseStr = responseBody.string();
                 JsonNode root = objectMapper.readTree(responseStr);
                 
                 JsonNode resultsNode = root.path("output").path("results");

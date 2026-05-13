@@ -1,5 +1,7 @@
 package org.example.service;
 
+import org.example.dto.ChatSessionRecord;
+import org.example.dto.ChatSessionSummary;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -40,6 +42,9 @@ public class SessionManager {
     @Autowired(required = false)
     private ObjectMapper objectMapper;
 
+    @Autowired(required = false)
+    private ChatHistoryStore chatHistoryStore;
+
     private static final String REDIS_KEY_PREFIX = "session:";
     private static final long SESSION_TTL_SECONDS = 3600; // 1 hour
 
@@ -64,6 +69,12 @@ public class SessionManager {
         if (fromRedis != null) {
             sessions.put(sessionId, fromRedis);
             return fromRedis;
+        }
+        SessionInfo fromHistoryStore = loadFromHistoryStore(sessionId);
+        if (fromHistoryStore != null) {
+            sessions.put(sessionId, fromHistoryStore);
+            saveToRedis(fromHistoryStore);
+            return fromHistoryStore;
         }
         // Create new
         SessionInfo session = new SessionInfo(sessionId);
@@ -90,6 +101,12 @@ public class SessionManager {
         if (fromRedis != null) {
             sessions.put(sessionId, fromRedis);
             return fromRedis;
+        }
+        SessionInfo fromHistoryStore = loadFromHistoryStore(sessionId);
+        if (fromHistoryStore != null) {
+            sessions.put(sessionId, fromHistoryStore);
+            saveToRedis(fromHistoryStore);
+            return fromHistoryStore;
         }
         return null;
     }
@@ -133,29 +150,15 @@ public class SessionManager {
             }
             @SuppressWarnings("unchecked")
             Map<String, Object> data = objectMapper.readValue(json, Map.class);
-            SessionInfo session = new SessionInfo(sessionId);
-
+            long createTime = System.currentTimeMillis();
             Object createTimeVal = data.get("createTime");
             if (createTimeVal instanceof Number) {
-                java.lang.reflect.Field createTimeField = SessionInfo.class.getDeclaredField("createTime");
-                createTimeField.setAccessible(true);
-                createTimeField.set(session, ((Number) createTimeVal).longValue());
+                createTime = ((Number) createTimeVal).longValue();
             }
 
             @SuppressWarnings("unchecked")
             List<Map<String, String>> history = (List<Map<String, String>>) data.get("messageHistory");
-            if (history != null) {
-                java.lang.reflect.Field historyField = SessionInfo.class.getDeclaredField("messageHistory");
-                historyField.setAccessible(true);
-                @SuppressWarnings("unchecked")
-                List<Map<String, String>> mutableHistory = new java.util.ArrayList<>();
-                for (Map<String, String> entry : history) {
-                    mutableHistory.add(new java.util.HashMap<>(entry));
-                }
-                historyField.set(session, mutableHistory);
-            }
-
-            return session;
+            return new SessionInfo(sessionId, createTime, history);
         } catch (Exception e) {
             logger.warn("Failed to load session from Redis: {}", e.getMessage());
             return null;
@@ -173,6 +176,123 @@ public class SessionManager {
         }
     }
 
+    private SessionInfo loadFromHistoryStore(String sessionId) {
+        if (chatHistoryStore == null) {
+            return null;
+        }
+        return chatHistoryStore.load(sessionId)
+                .map(record -> new SessionInfo(
+                        record.getSessionId(),
+                        record.getCreateTime(),
+                        recentWindow(record.getMessageHistory())
+                ))
+                .orElse(null);
+    }
+
+    public List<ChatSessionSummary> listSessions() {
+        if (chatHistoryStore == null) {
+            return sessions.values().stream()
+                    .map(this::summaryFromSession)
+                    .sorted(Comparator.comparingLong(ChatSessionSummary::getUpdateTime).reversed())
+                    .toList();
+        }
+        return chatHistoryStore.listSessions();
+    }
+
+    public Optional<ChatSessionRecord> getSessionMessages(String sessionId) {
+        if (chatHistoryStore != null) {
+            Optional<ChatSessionRecord> persisted = chatHistoryStore.load(sessionId);
+            if (persisted.isPresent()) {
+                return persisted;
+            }
+        }
+        SessionInfo session = getSession(sessionId);
+        return session == null ? Optional.empty() : Optional.of(recordFromSession(session));
+    }
+
+    public boolean deleteSession(String sessionId) {
+        if (sessionId == null || sessionId.isBlank()) {
+            return false;
+        }
+        boolean removedFromMemory = sessions.remove(sessionId) != null;
+        deleteFromRedis(sessionId);
+        boolean removedFromHistory = chatHistoryStore != null && chatHistoryStore.delete(sessionId);
+        return removedFromMemory || removedFromHistory;
+    }
+
+    private void appendToHistoryStore(String sessionId, long createTime, String userQuestion, String aiAnswer) {
+        if (chatHistoryStore == null) {
+            return;
+        }
+        try {
+            chatHistoryStore.appendMessagePair(sessionId, createTime, userQuestion, aiAnswer);
+        } catch (RuntimeException e) {
+            logger.warn("保存完整聊天历史失败: {}", e.getMessage());
+        }
+    }
+
+    private void deletePersistedHistory(String sessionId) {
+        deleteFromRedis(sessionId);
+        if (chatHistoryStore != null) {
+            chatHistoryStore.delete(sessionId);
+        }
+    }
+
+    private void deleteFromRedis(String sessionId) {
+        if (redisTemplate == null) {
+            return;
+        }
+        try {
+            redisTemplate.delete(REDIS_KEY_PREFIX + sessionId);
+        } catch (Exception e) {
+            logger.warn("Failed to delete session from Redis: {}", e.getMessage());
+        }
+    }
+
+    private List<Map<String, String>> recentWindow(List<Map<String, String>> history) {
+        if (history == null || history.isEmpty()) {
+            return new ArrayList<>();
+        }
+        int maxMessages = MAX_WINDOW_SIZE * 2;
+        int start = Math.max(0, history.size() - maxMessages);
+        List<Map<String, String>> window = new ArrayList<>();
+        for (int i = start; i < history.size(); i++) {
+            window.add(new HashMap<>(history.get(i)));
+        }
+        return window;
+    }
+
+    private ChatSessionRecord recordFromSession(SessionInfo session) {
+        ChatSessionRecord record = new ChatSessionRecord();
+        record.setSessionId(session.getSessionId());
+        record.setCreateTime(session.getCreateTime());
+        record.setUpdateTime(System.currentTimeMillis());
+        record.setMessageHistory(session.getHistory());
+        return record;
+    }
+
+    private ChatSessionSummary summaryFromSession(SessionInfo session) {
+        ChatSessionSummary summary = new ChatSessionSummary();
+        summary.setSessionId(session.getSessionId());
+        summary.setTitle(titleFromHistory(session.getHistory()));
+        summary.setMessagePairCount(session.getMessagePairCount());
+        summary.setCreateTime(session.getCreateTime());
+        summary.setUpdateTime(session.getCreateTime());
+        return summary;
+    }
+
+    private String titleFromHistory(List<Map<String, String>> history) {
+        for (Map<String, String> message : history) {
+            if ("user".equals(message.get("role"))) {
+                String content = message.getOrDefault("content", "").trim();
+                if (!content.isEmpty()) {
+                    return content.length() > 30 ? content.substring(0, 30) + "..." : content;
+                }
+            }
+        }
+        return "新对话";
+    }
+
     // ==================== 内部类 ====================
 
     /**
@@ -186,9 +306,14 @@ public class SessionManager {
         private final ReentrantLock lock;
 
         public SessionInfo(String sessionId) {
+            this(sessionId, System.currentTimeMillis(), new ArrayList<>());
+        }
+
+        private SessionInfo(String sessionId, long createTime, List<Map<String, String>> initialHistory) {
             this.sessionId = sessionId;
             this.messageHistory = new ArrayList<>();
-            this.createTime = System.currentTimeMillis();
+            replaceHistory(initialHistory);
+            this.createTime = createTime > 0 ? createTime : System.currentTimeMillis();
             this.lock = new ReentrantLock();
         }
 
@@ -204,8 +329,8 @@ public class SessionManager {
          * 添加一对消息（用户问题 + AI回复）
          */
         public void addMessage(String userQuestion, String aiAnswer, SessionManager manager) {
-            lock.lock();
             List<Map<String, String>> evictedMessages = new ArrayList<>();
+            lock.lock();
             try {
                 // 添加用户消息
                 Map<String, String> userMsg = new HashMap<>();
@@ -239,6 +364,7 @@ public class SessionManager {
 
             // 持久化到 Redis（异步，非阻塞）
             if (manager != null) {
+                manager.appendToHistoryStore(sessionId, createTime, userQuestion, aiAnswer);
                 manager.saveSession(this);
             }
 
@@ -282,7 +408,7 @@ public class SessionManager {
                 messageHistory.clear();
                 logger.info("会话 {} 历史消息已清空", sessionId);
                 if (manager != null) {
-                    manager.saveSession(this);
+                    manager.deletePersistedHistory(sessionId);
                 }
             } finally {
                 lock.unlock();
@@ -298,6 +424,16 @@ public class SessionManager {
                 return messageHistory.size() / 2;
             } finally {
                 lock.unlock();
+            }
+        }
+
+        private void replaceHistory(List<Map<String, String>> history) {
+            messageHistory.clear();
+            if (history == null) {
+                return;
+            }
+            for (Map<String, String> entry : history) {
+                messageHistory.add(new HashMap<>(entry));
             }
         }
     }

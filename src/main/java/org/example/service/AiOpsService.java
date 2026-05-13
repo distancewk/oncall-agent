@@ -100,6 +100,10 @@ public class AiOpsService {
 
         if (plannerFinalOutput.isPresent()) {
             String reportText = plannerFinalOutput.get().getText();
+            if (reportText == null || reportText.isBlank()) {
+                logger.warn("Planner 最终报告为空");
+                return Optional.empty();
+            }
             logger.info("成功提取到 Planner 最终报告，长度: {}", reportText.length());
             return Optional.of(reportText);
         } else {

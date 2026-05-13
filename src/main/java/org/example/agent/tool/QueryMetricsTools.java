@@ -6,6 +6,7 @@ import lombok.Data;
 import okhttp3.OkHttpClient;
 import okhttp3.Request;
 import okhttp3.Response;
+import okhttp3.ResponseBody;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.ai.tool.annotation.Tool;
@@ -179,12 +180,17 @@ public class QueryMetricsTools {
                 .get()
                 .build();
         
-        try (Response response = httpClient.newCall(request).execute()) {
+        try (Response response = httpClient.newCall(request).execute();
+             ResponseBody body = response.body()) {
             if (!response.isSuccessful()) {
                 throw new RuntimeException("HTTP 请求失败: " + response.code());
             }
-            
-            String responseBody = response.body().string();
+
+            if (body == null) {
+                throw new RuntimeException("Prometheus API 返回空响应体");
+            }
+
+            String responseBody = body.string();
             return objectMapper.readValue(responseBody, PrometheusAlertsResult.class);
         }
     }

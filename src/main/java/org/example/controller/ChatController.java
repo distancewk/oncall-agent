@@ -8,11 +8,15 @@ import com.alibaba.cloud.ai.graph.streaming.OutputType;
 import com.alibaba.cloud.ai.graph.streaming.StreamingOutput;
 import lombok.Getter;
 import lombok.Setter;
+import org.example.config.AppMemoryProperties;
 import org.example.dto.ApiResponse;
+import org.example.dto.ChatSessionRecord;
+import org.example.dto.ChatSessionSummary;
 import org.example.service.AiOpsService;
 import org.example.service.AlertService;
 import org.example.service.ChatService;
 import org.example.service.SessionManager;
+import org.example.service.VectorSearchService;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.ai.tool.ToolCallback;
@@ -64,6 +68,12 @@ public class ChatController {
     @Autowired
     private AlertService alertService;
 
+    @Autowired(required = false)
+    private VectorSearchService vectorSearchService;
+
+    @Autowired(required = false)
+    private AppMemoryProperties appMemoryProperties;
+
     /**
      * 普通对话接口（支持工具调用）
      * 与 /chat_react 逻辑一致，但直接返回完整结果而非流式输出
@@ -94,8 +104,11 @@ public class ChatController {
 
             logger.info("开始 ReactAgent 对话（支持自动工具调用）");
             
+            List<VectorSearchService.SearchResult> privateMemories =
+                    searchPrivateMemories(request.getQuestion(), session);
+
             // 构建系统提示词（包含历史消息）
-            String systemPrompt = chatService.buildSystemPrompt(history);
+            String systemPrompt = chatService.buildSystemPrompt(history, privateMemories);
             
             // 创建 ReactAgent
             ReactAgent agent = chatService.createReactAgent(chatModel, systemPrompt);
@@ -180,9 +193,12 @@ public class ChatController {
                 chatService.logAvailableTools();
 
                 logger.info("开始 ReactAgent 流式对话（支持自动工具调用）");
+
+                List<VectorSearchService.SearchResult> privateMemories =
+                        searchPrivateMemories(request.getQuestion(), session);
                 
                 // 构建系统提示词（包含历史消息）
-                String systemPrompt = chatService.buildSystemPrompt(history);
+                String systemPrompt = chatService.buildSystemPrompt(history, privateMemories);
                 
                 // 创建 ReactAgent
                 ReactAgent agent = chatService.createReactAgent(chatModel, systemPrompt);
@@ -412,6 +428,46 @@ public class ChatController {
         } catch (Exception e) {
             logger.error("获取会话信息失败", e);
             return ResponseEntity.ok(ApiResponse.error(e.getMessage()));
+        }
+    }
+
+    @GetMapping("/chat/sessions")
+    public ResponseEntity<ApiResponse<List<ChatSessionSummary>>> listChatSessions() {
+        return ResponseEntity.ok(ApiResponse.success(sessionManager.listSessions()));
+    }
+
+    @GetMapping("/chat/session/{sessionId}/messages")
+    public ResponseEntity<ApiResponse<ChatSessionRecord>> getSessionMessages(@PathVariable String sessionId) {
+        return sessionManager.getSessionMessages(sessionId)
+                .map(record -> ResponseEntity.ok(ApiResponse.success(record)))
+                .orElseGet(() -> ResponseEntity.ok(ApiResponse.error("会话不存在")));
+    }
+
+    @DeleteMapping("/chat/session/{sessionId}")
+    public ResponseEntity<ApiResponse<String>> deleteChatSession(@PathVariable String sessionId) {
+        boolean deleted = sessionManager.deleteSession(sessionId);
+        if (deleted) {
+            return ResponseEntity.ok(ApiResponse.success("会话已删除"));
+        }
+        return ResponseEntity.ok(ApiResponse.error("会话不存在"));
+    }
+
+    private List<VectorSearchService.SearchResult> searchPrivateMemories(
+            String question,
+            SessionManager.SessionInfo session) {
+        if (vectorSearchService == null || session == null) {
+            return List.of();
+        }
+        boolean enabled = appMemoryProperties == null || appMemoryProperties.isPrivateRecallEnabled();
+        if (!enabled) {
+            return List.of();
+        }
+        int memoryTopK = appMemoryProperties == null ? 3 : Math.max(1, appMemoryProperties.getPrivateRecallTopK());
+        try {
+            return vectorSearchService.searchSessionMemories(question, session.getSessionId(), memoryTopK);
+        } catch (RuntimeException e) {
+            logger.warn("检索私人长期记忆失败，继续普通对话: {}", e.getMessage());
+            return List.of();
         }
     }
 

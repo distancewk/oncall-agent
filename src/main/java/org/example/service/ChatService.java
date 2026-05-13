@@ -57,6 +57,11 @@ public class ChatService {
      * @return 完整的系统提示词
      */
     public String buildSystemPrompt(List<Map<String, String>> history) {
+        return buildSystemPrompt(history, List.of());
+    }
+
+    public String buildSystemPrompt(List<Map<String, String>> history,
+                                    List<VectorSearchService.SearchResult> privateMemories) {
         StringBuilder systemPromptBuilder = new StringBuilder();
 
         // 从资源文件加载基础系统提示
@@ -72,8 +77,19 @@ public class ChatService {
             systemPromptBuilder.append("你是一个专业的智能助手，可以获取当前时间、查询内部文档知识库，以及查询 Prometheus 告警信息。\n\n");
         }
 
+        // 添加私人长期记忆
+        if (privateMemories != null && !privateMemories.isEmpty()) {
+            systemPromptBuilder.append("--- 私人记忆 ---\n");
+            for (VectorSearchService.SearchResult memory : privateMemories) {
+                if (memory.getContent() != null && !memory.getContent().isBlank()) {
+                    systemPromptBuilder.append("- ").append(memory.getContent()).append("\n");
+                }
+            }
+            systemPromptBuilder.append("--- 私人记忆结束 ---\n\n");
+        }
+
         // 添加历史消息
-        if (!history.isEmpty()) {
+        if (history != null && !history.isEmpty()) {
             systemPromptBuilder.append("--- 对话历史 ---\n");
             for (Map<String, String> msg : history) {
                 String role = msg.get("role");
@@ -150,7 +166,13 @@ public class ChatService {
     public String executeChat(ReactAgent agent, String question) throws GraphRunnerException {
         logger.info("执行 ReactAgent.call() - 自动处理工具调用");
         var response = agent.call(question);
-        String answer = response.getText();
+        String answer = "";
+        if (response != null) {
+            String responseText = response.getText();
+            if (responseText != null) {
+                answer = responseText;
+            }
+        }
         logger.info("ReactAgent 对话完成，答案长度: {}", answer.length());
         return answer;
     }

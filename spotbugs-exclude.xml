@@ -8,4 +8,21 @@
     <Match>
         <Package name="~org\.example\.dto\..*"/>
     </Match>
+    <!-- Mutable DTO/API models intentionally expose collections for serialization. -->
+    <Match>
+        <Bug pattern="EI_EXPOSE_REP,EI_EXPOSE_REP2"/>
+    </Match>
+    <!-- DashScope SDK configuration is global state by design. -->
+    <Match>
+        <Class name="org.example.service.RagService"/>
+        <Bug pattern="ST_WRITE_TO_STATIC_FROM_INSTANCE_METHOD"/>
+    </Match>
+    <Match>
+        <Class name="org.example.service.VectorEmbeddingService"/>
+        <Bug pattern="ST_WRITE_TO_STATIC_FROM_INSTANCE_METHOD"/>
+    </Match>
+    <!-- Prompt templates intentionally use literal newlines for readability. -->
+    <Match>
+        <Bug pattern="VA_FORMAT_STRING_USES_NEWLINE"/>
+    </Match>
 </FindBugsFilter>

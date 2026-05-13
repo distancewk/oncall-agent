@@ -3,7 +3,6 @@ package org.example.service;
 import io.milvus.client.MilvusServiceClient;
 import io.milvus.grpc.SearchResults;
 import io.milvus.param.R;
-import io.milvus.param.dml.SearchParam;
 import io.milvus.response.SearchResultsWrapper;
 import lombok.Getter;
 import lombok.Setter;
@@ -38,6 +37,9 @@ public class VectorSearchService {
     @org.springframework.beans.factory.annotation.Value("${rag.candidate-k:10}")
     private int candidateK;
 
+    @org.springframework.beans.factory.annotation.Value("${rag.search-ef:64}")
+    private int searchEf;
+
     /**
      * 搜索相似文档 (粗排 + 精排)
      * 
@@ -46,9 +48,47 @@ public class VectorSearchService {
      * @return 搜索结果列表
      */
     public List<SearchResult> searchSimilarDocuments(String query, int topK) {
+        return searchWithFilter(query, topK, MilvusConstants.DOCUMENT_FILTER_EXPR, "相似文档").getResults();
+    }
+
+    /**
+     * 搜索普通知识库并返回检索解释信息，用于排查 RAG 命中质量。
+     *
+     * @param query 查询文本
+     * @param topK 返回最相似的K个结果
+     * @return 包含粗排候选、精排结果和检索参数的追踪信息
+     */
+    public SearchTrace explainSimilarDocuments(String query, int topK) {
+        return searchWithFilter(query, topK, MilvusConstants.DOCUMENT_FILTER_EXPR, "相似文档");
+    }
+
+    /**
+     * 搜索当前会话的私人记忆。
+     *
+     * @param query 查询文本
+     * @param sessionId 当前会话 ID
+     * @param topK 返回最相似的K个结果
+     * @return 搜索结果列表
+     */
+    public List<SearchResult> searchSessionMemories(String query, String sessionId, int topK) {
+        if (sessionId == null || sessionId.isBlank()) {
+            throw new IllegalArgumentException("sessionId 不能为空");
+        }
+        return searchWithFilter(query, topK, MilvusConstants.chatMemoryFilterExpr(sessionId), "会话私人记忆")
+                .getResults();
+    }
+
+    private SearchTrace searchWithFilter(String query, int topK, String filterExpr, String searchLabel) {
         try {
             int searchK = Math.max(topK, candidateK);
-            logger.info("开始搜索相似文档, 查询: {}, 粗排获取 {} 条, 精排截取 {} 条", query, searchK, topK);
+            SearchTrace trace = new SearchTrace();
+            trace.setQuery(query);
+            trace.setSearchLabel(searchLabel);
+            trace.setRequestedTopK(topK);
+            trace.setSearchK(searchK);
+            trace.setSearchEf(searchEf);
+            trace.setFilterExpr(filterExpr);
+            logger.info("开始搜索{}, 查询: {}, 粗排获取 {} 条, 精排截取 {} 条", searchLabel, query, searchK, topK);
 
             // 1. 将查询文本向量化 (稠密和稀疏)
             List<Float> denseVector = embeddingService.generateQueryVector(query);
@@ -60,7 +100,8 @@ public class VectorSearchService {
                     .withVectorFieldName("vector")
                     .withFloatVectors(Collections.singletonList(denseVector))
                     .withMetricType(io.milvus.param.MetricType.COSINE)
-                    .withParams("{\"nprobe\":10}")
+                    .withExpr(filterExpr)
+                    .withParams("{\"ef\":" + searchEf + "}")
                     .withTopK(searchK)
                     .build();
 
@@ -68,6 +109,7 @@ public class VectorSearchService {
                     .withVectorFieldName("sparse_vector")
                     .withSparseFloatVectors(Collections.singletonList(sparseVector))
                     .withMetricType(io.milvus.param.MetricType.IP)
+                    .withExpr(filterExpr)
                     .withTopK(searchK)
                     .build();
 
@@ -111,12 +153,30 @@ public class VectorSearchService {
             // 5. 执行重排 (精排)
             List<SearchResult> finalResults = rerankService.rerank(query, candidates, topK);
 
-            return finalResults;
+            trace.setCandidates(candidates);
+            trace.setResults(finalResults);
+            return trace;
 
-        } catch (Exception e) {
+        } catch (RuntimeException e) {
             logger.error("搜索相似文档失败", e);
             throw new RuntimeException("搜索失败: " + e.getMessage(), e);
         }
+    }
+
+    /**
+     * 检索解释信息
+     */
+    @Setter
+    @Getter
+    public static class SearchTrace {
+        private String query;
+        private String searchLabel;
+        private int requestedTopK;
+        private int searchK;
+        private int searchEf;
+        private String filterExpr;
+        private List<SearchResult> candidates = new ArrayList<>();
+        private List<SearchResult> results = new ArrayList<>();
     }
 
     /**

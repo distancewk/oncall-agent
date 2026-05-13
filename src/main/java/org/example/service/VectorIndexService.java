@@ -21,6 +21,7 @@ import java.io.File;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
+import java.nio.charset.StandardCharsets;
 import java.time.LocalDateTime;
 import java.util.*;
 
@@ -41,6 +42,9 @@ public class VectorIndexService {
 
     @Autowired
     private DocumentChunkService chunkService;
+
+    @Autowired
+    private MilvusInsertHelper insertHelper = new MilvusInsertHelper();
 
     @Value("${file.upload.path}")
     private String uploadPath;
@@ -135,37 +139,61 @@ public class VectorIndexService {
         String content = Files.readString(path);
         logger.info("读取文件: {}, 内容长度: {} 字符", path, content.length());
 
-        // 2. 删除该文件的旧数据（如果存在）
+        // 2. 任务开始时加载 collection，删除和插入共用这次加载
+        ensureCollectionLoaded();
+
+        // 3. 删除该文件的旧数据（如果存在）
         deleteExistingData(path.toString());
 
-        // 3. 文档分片
+        // 4. 文档分片
         List<DocumentChunk> chunks = chunkService.chunkDocument(content, path.toString());
         logger.info("文档分片完成: {} -> {} 个分片", filePath, chunks.size());
+        if (chunks.isEmpty()) {
+            logger.warn("文件未产生可索引分片: {}", filePath);
+            return;
+        }
 
-        // 4. 为每个分片生成向量并插入 Milvus
+        // 5. 批量生成 dense embedding，稀疏向量仍按分片生成
+        List<String> contents = new ArrayList<>(chunks.size());
+        for (DocumentChunk chunk : chunks) {
+            contents.add(chunk.getContent());
+        }
+
+        List<List<Float>> vectors = embeddingService.generateEmbeddings(contents);
+        if (vectors.size() != chunks.size()) {
+            throw new IllegalStateException("批量 embedding 返回数量与分片数量不一致");
+        }
+
+        List<java.util.SortedMap<Long, Float>> sparseVectors = new ArrayList<>(chunks.size());
+        List<Map<String, Object>> metadataList = new ArrayList<>(chunks.size());
         for (int i = 0; i < chunks.size(); i++) {
             DocumentChunk chunk = chunks.get(i);
-            
             try {
-                // 生成向量
-                List<Float> vector = embeddingService.generateEmbedding(chunk.getContent());
-                java.util.SortedMap<Long, Float> sparseVector = embeddingService.generateSparseVector(chunk.getContent());
-
-                // 构建元数据（包含文件信息）
-                Map<String, Object> metadata = buildMetadata(path.toString(), chunk, chunks.size());
-
-                // 插入到 Milvus
-                insertToMilvus(chunk.getContent(), vector, sparseVector, metadata, chunk.getChunkIndex());
-                
-                logger.info("✓ 分片 {}/{} 索引成功", i + 1, chunks.size());
-
+                sparseVectors.add(embeddingService.generateSparseVector(chunk.getContent()));
+                metadataList.add(buildMetadata(path.toString(), chunk, chunks.size()));
             } catch (Exception e) {
-                logger.error("✗ 分片 {}/{} 索引失败", i + 1, chunks.size(), e);
-                throw new RuntimeException("分片索引失败: " + e.getMessage(), e);
+                logger.error("✗ 分片 {}/{} 准备失败", i + 1, chunks.size(), e);
+                throw new RuntimeException("分片准备失败: " + e.getMessage(), e);
             }
         }
 
+        // 6. 批量写入 Milvus
+        insertBatchToMilvus(contents, vectors, sparseVectors, metadataList);
+
         logger.info("文件索引完成: {}, 共 {} 个分片", filePath, chunks.size());
+    }
+
+    private void ensureCollectionLoaded() {
+        R<RpcStatus> loadResponse = milvusClient.loadCollection(
+                LoadCollectionParam.newBuilder()
+                        .withCollectionName(MilvusConstants.MILVUS_COLLECTION_NAME)
+                        .build()
+        );
+
+        // 状态码 65535 表示集合已经加载，这不是错误
+        if (loadResponse.getStatus() != 0 && loadResponse.getStatus() != 65535) {
+            throw new RuntimeException("加载 collection 失败: " + loadResponse.getMessage());
+        }
     }
 
     /**
@@ -182,19 +210,6 @@ public class VectorIndexService {
             String expr = String.format("metadata[\"_source\"] == \"%s\"", normalizedPath);
             
             logger.info("准备删除旧数据，路径: {}, 表达式: {}", normalizedPath, expr);
-
-            // 确保 collection 已加载（删除操作需要集合已加载）
-            R<RpcStatus> loadResponse = milvusClient.loadCollection(
-                LoadCollectionParam.newBuilder()
-                    .withCollectionName(MilvusConstants.MILVUS_COLLECTION_NAME)
-                    .build()
-            );
-
-            // 状态码 65535 表示集合已经加载，这不是错误
-            if (loadResponse.getStatus() != 0 && loadResponse.getStatus() != 65535) {
-                logger.warn("加载 collection 失败: {}", loadResponse.getMessage());
-                return;
-            }
 
             DeleteParam deleteParam = DeleteParam.newBuilder()
                     .withCollectionName(MilvusConstants.MILVUS_COLLECTION_NAME)
@@ -235,6 +250,7 @@ public class VectorIndexService {
         }
         
         metadata.put("_source", normalizedPath);
+        metadata.put("doc_type", MilvusConstants.DOC_TYPE_DOCUMENT);
         metadata.put("_extension", extension);
         metadata.put("_file_name", fileNameStr);
         
@@ -253,62 +269,29 @@ public class VectorIndexService {
     /**
      * 插入向量到 Milvus
      */
-    private void insertToMilvus(String content, List<Float> vector,
-                                java.util.SortedMap<Long, Float> sparseVector,
-                                Map<String, Object> metadata, int chunkIndex) throws Exception {
+    private void insertBatchToMilvus(List<String> contents,
+                                     List<List<Float>> vectors,
+                                     List<java.util.SortedMap<Long, Float>> sparseVectors,
+                                     List<Map<String, Object>> metadataList) throws Exception {
         try {
-            // 确保 collection 已加载
-            R<RpcStatus> loadResponse = milvusClient.loadCollection(
-                LoadCollectionParam.newBuilder()
-                    .withCollectionName(MilvusConstants.MILVUS_COLLECTION_NAME)
-                    .build()
-            );
-
-            if (loadResponse.getStatus() != 0 && loadResponse.getStatus() != 65535) {
-                throw new RuntimeException("加载 collection 失败: " + loadResponse.getMessage());
+            List<String> ids = new ArrayList<>(metadataList.size());
+            for (Map<String, Object> metadata : metadataList) {
+                String source = (String) metadata.get("_source");
+                int chunkIndex = ((Number) metadata.get("chunkIndex")).intValue();
+                ids.add(UUID.nameUUIDFromBytes((source + "_" + chunkIndex).getBytes(StandardCharsets.UTF_8)).toString());
             }
 
-            // 生成唯一 ID（使用 _source + 分片索引）
-            String source = (String) metadata.get("_source");
-            String id = UUID.nameUUIDFromBytes((source + "_" + chunkIndex).getBytes()).toString();
-
-            // 构建字段数据
-            List<InsertParam.Field> fields = new ArrayList<>();
-
-            // ID 字段
-            fields.add(new InsertParam.Field("id", Collections.singletonList(id)));
-
-            // content 字段
-            fields.add(new InsertParam.Field("content", Collections.singletonList(content)));
-
-            // vector 字段
-            fields.add(new InsertParam.Field("vector", Collections.singletonList(vector)));
-
-            // sparse_vector 字段
-            fields.add(new InsertParam.Field("sparse_vector", Collections.singletonList(sparseVector)));
-
-            // metadata 字段（JSON 对象）
-            com.google.gson.Gson gson = new com.google.gson.Gson();
-            com.google.gson.JsonObject metadataJson = gson.toJsonTree(metadata).getAsJsonObject();
-            fields.add(new InsertParam.Field("metadata", Collections.singletonList(metadataJson)));
-
-            // 构建插入参数
-            InsertParam insertParam = InsertParam.newBuilder()
-                    .withCollectionName(MilvusConstants.MILVUS_COLLECTION_NAME)
-                    .withFields(fields)
-                    .build();
-
-            // 执行插入
+            InsertParam insertParam = insertHelper.buildInsertParam(ids, contents, vectors, sparseVectors, metadataList);
             R<MutationResult> insertResponse = milvusClient.insert(insertParam);
 
             if (insertResponse.getStatus() != 0) {
                 throw new RuntimeException("插入向量失败: " + insertResponse.getMessage());
             }
 
-            logger.debug("向量插入成功: id={}, source={}, chunk={}", id, source, chunkIndex);
+            logger.info("✓ 批量向量插入成功: {} 条", contents.size());
 
         } catch (Exception e) {
-            logger.error("插入向量到 Milvus 失败", e);
+            logger.error("批量插入向量到 Milvus 失败", e);
             throw e;
         }
     }

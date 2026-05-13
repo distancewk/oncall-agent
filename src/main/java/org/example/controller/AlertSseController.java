@@ -1,11 +1,15 @@
 package org.example.controller;
 
 import org.example.dto.AlertPayload;
+import org.example.dto.IncidentRecord;
 import org.example.service.AlertService;
+import org.example.service.IncidentService;
 import org.example.service.AlertService.StoredAlert;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Value;
+import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
@@ -26,6 +30,12 @@ public class AlertSseController {
     @Autowired
     private AlertService alertService;
 
+    @Autowired(required = false)
+    private IncidentService incidentService;
+
+    @Value("${app.alerts.simulate-enabled:false}")
+    private boolean simulateEnabled;
+
     /**
      * SSE 长连接，实时推送告警通知
      */
@@ -39,6 +49,7 @@ public class AlertSseController {
                 Map<String, Object> data = new HashMap<>();
                 data.put("type", "new_alert");
                 data.put("alertId", alert.getId());
+                data.put("incidentId", alert.getIncidentId());
                 data.put("status", alert.getStatus());
                 data.put("receivedAt", alert.getReceivedAt());
 
@@ -85,6 +96,7 @@ public class AlertSseController {
         for (StoredAlert alert : alerts) {
             Map<String, Object> item = new LinkedHashMap<>();
             item.put("id", alert.getId());
+            item.put("incidentId", alert.getIncidentId());
             item.put("status", alert.getStatus());
             item.put("receivedAt", alert.getReceivedAt());
 
@@ -160,6 +172,12 @@ public class AlertSseController {
      */
     @PostMapping("/simulate")
     public ResponseEntity<Map<String, Object>> simulateAlert(@RequestBody(required = false) Map<String, Object> body) {
+        if (!simulateEnabled) {
+            logger.warn("模拟告警接口未开启，拒绝请求");
+            return ResponseEntity.status(HttpStatus.NOT_FOUND)
+                    .body(Map.of("success", false, "message", "模拟告警接口未开启"));
+        }
+
         logger.info("收到模拟告警请求");
 
         // 构造模拟告警
@@ -188,7 +206,14 @@ public class AlertSseController {
 
         payload.setAlerts(List.of(alert));
 
-        String alertId = alertService.storeAlert(payload);
+        IncidentRecord incident = null;
+        if (incidentService != null) {
+            incident = incidentService.recordAlert(payload);
+            logger.info("模拟告警已聚合到 Incident, incidentId: {}", incident.getId());
+        }
+        String alertId = incident != null
+                ? alertService.storeAlert(payload, incident.getId())
+                : alertService.storeAlert(payload);
         logger.info("模拟告警已存储, alertId: {}", alertId);
 
         // 异步触发分析
@@ -197,6 +222,9 @@ public class AlertSseController {
         Map<String, Object> result = new LinkedHashMap<>();
         result.put("success", true);
         result.put("alertId", alertId);
+        if (incident != null) {
+            result.put("incidentId", incident.getId());
+        }
         result.put("message", "模拟告警已触发");
         return ResponseEntity.ok(result);
     }

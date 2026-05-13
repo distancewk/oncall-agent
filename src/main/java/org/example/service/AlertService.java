@@ -29,9 +29,14 @@ public class AlertService {
      * @return 告警 ID
      */
     public String storeAlert(AlertPayload payload) {
+        return storeAlert(payload, null);
+    }
+
+    public String storeAlert(AlertPayload payload, String incidentId) {
         String alertId = UUID.randomUUID().toString().substring(0, 8);
         StoredAlert storedAlert = new StoredAlert();
         storedAlert.setId(alertId);
+        storedAlert.setIncidentId(incidentId);
         storedAlert.setStatus(payload.getStatus());
         storedAlert.setAlerts(payload.getAlerts());
         storedAlert.setGroupLabels(payload.getGroupLabels());
@@ -117,6 +122,7 @@ public class AlertService {
      */
     public static class StoredAlert {
         private String id;
+        private String incidentId;
         private String status;
         private List<AlertPayload.Alert> alerts;
         private Map<String, String> groupLabels;
@@ -127,6 +133,9 @@ public class AlertService {
 
         public String getId() { return id; }
         public void setId(String id) { this.id = id; }
+
+        public String getIncidentId() { return incidentId; }
+        public void setIncidentId(String incidentId) { this.incidentId = incidentId; }
 
         public String getStatus() { return status; }
         public void setStatus(String status) { this.status = status; }

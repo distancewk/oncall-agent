@@ -20,8 +20,16 @@ public class WebConfig implements WebMvcConfigurer {
     @org.springframework.beans.factory.annotation.Autowired
     private RateLimitInterceptor rateLimitInterceptor;
 
+    @org.springframework.beans.factory.annotation.Autowired
+    private ApiSecurityInterceptor apiSecurityInterceptor;
+
+    @org.springframework.beans.factory.annotation.Autowired(required = false)
+    private AppCorsProperties appCorsProperties = new AppCorsProperties();
+
     @Override
     public void addInterceptors(org.springframework.web.servlet.config.annotation.InterceptorRegistry registry) {
+        registry.addInterceptor(apiSecurityInterceptor)
+                .addPathPatterns("/api/**");
         // 限流 (防刷)
         registry.addInterceptor(rateLimitInterceptor)
                 .addPathPatterns("/api/**");
@@ -43,7 +51,7 @@ public class WebConfig implements WebMvcConfigurer {
     @Override
     public void addCorsMappings(CorsRegistry registry) {
         registry.addMapping("/**")
-                .allowedOrigins("*")
+                .allowedOrigins(appCorsProperties.allowedOriginArray())
                 .allowedMethods("GET", "POST", "PUT", "DELETE", "OPTIONS")
                 .allowedHeaders("*")
                 .maxAge(3600);

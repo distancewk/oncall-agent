@@ -8,12 +8,12 @@ server:
 
 file:
   upload:
-    path: ./uploads
+    path: ${FILE_UPLOAD_PATH:./uploads}
     allowed-extensions: txt,md
 
 milvus:
-  host: localhost
-  port: 19530
+  host: ${MILVUS_HOST:localhost}
+  port: ${MILVUS_PORT:19530}
   username: ""
   password: ""
   database: default
@@ -73,14 +73,32 @@ document:
 rag:
   candidate-k: 10  # 混合检索粗排获取的候选文档数
   top-k: 3  # 检索返回的最相似文档数量
+  search-ef: ${RAG_SEARCH_EF:64}
   model: "qwen3-max"  # 大语言模型名称
 
 # Prometheus 配置
 prometheus:
-  base-url: http://localhost:9090
+  base-url: ${PROMETHEUS_BASE_URL:http://localhost:9090}
   timeout: 10  # 超时时间（秒）
   mock-enabled: false  # 是否启用 Mock 模式（用于测试）
 
 # CLS 云日志服务配置
 cls:
   mock-enabled: false  # 是否启用 Mock 模式（用于测试，设为 true 返回与告警关联的模拟日志数据）
+
+app:
+  cors:
+    allowed-origins: ${APP_CORS_ALLOWED_ORIGINS:http://localhost:9900,http://127.0.0.1:9900}
+  security:
+    enabled: ${APP_SECURITY_ENABLED:false}
+    api-token: ${APP_API_TOKEN:}
+    webhook-secret: ${APP_WEBHOOK_SECRET:}
+  alerts:
+    simulate-enabled: ${APP_ALERT_SIMULATE_ENABLED:false}
+  chat-history:
+    path: ${APP_CHAT_HISTORY_PATH:./data/chat-history}
+  incidents:
+    path: ${APP_INCIDENTS_PATH:./data/incidents}
+  memory:
+    private-recall-enabled: ${APP_PRIVATE_MEMORY_RECALL_ENABLED:true}
+    private-recall-top-k: ${APP_PRIVATE_MEMORY_RECALL_TOP_K:3}

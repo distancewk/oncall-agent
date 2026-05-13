@@ -19,6 +19,7 @@ class SuperBizAgentApp {
         this.initMarkdown();
         this.checkAndSetCentered();
         this.renderChatHistory();
+        this.loadServerChatHistories();
         this.connectAlertSSE();
         this.setupMobileSidebar();
     }
@@ -69,7 +70,12 @@ class SuperBizAgentApp {
             return this.escapeHtml(content);
         }
         try {
-            return marked.parse(content);
+            const html = marked.parse(content);
+            if (typeof DOMPurify !== 'undefined') {
+                return DOMPurify.sanitize(html);
+            }
+            console.warn('DOMPurify 未加载，Markdown 内容将以纯文本显示');
+            return this.escapeHtml(content);
         } catch (e) {
             console.error('Markdown 渲染失败:', e);
             return this.escapeHtml(content);
@@ -130,6 +136,12 @@ class SuperBizAgentApp {
         this.alertDetailPanel = document.getElementById('alertDetailPanel');
         this.alertDetailContent = document.getElementById('alertDetailContent');
         this.alertDetailPanelClose = document.getElementById('alertDetailPanelClose');
+
+        // 知识库相关元素
+        this.knowledgePanelBtn = document.getElementById('knowledgePanelBtn');
+        this.knowledgePanel = document.getElementById('knowledgePanel');
+        this.knowledgePanelContent = document.getElementById('knowledgePanelContent');
+        this.knowledgePanelClose = document.getElementById('knowledgePanelClose');
     }
 
     // ==================== 事件绑定 ====================
@@ -228,6 +240,12 @@ class SuperBizAgentApp {
         if (this.alertDetailPanelClose) {
             this.alertDetailPanelClose.addEventListener('click', () => this.hideAlertPanel('detail'));
         }
+        if (this.knowledgePanelBtn) {
+            this.knowledgePanelBtn.addEventListener('click', () => this.showKnowledgePanel());
+        }
+        if (this.knowledgePanelClose) {
+            this.knowledgePanelClose.addEventListener('click', () => this.hideKnowledgePanel());
+        }
 
         // 主题切换
         if (this.themeToggleBtn) {
@@ -236,14 +254,19 @@ class SuperBizAgentApp {
 
         // 点击面板外部关闭
         document.addEventListener('click', (e) => {
-            if (this.alertHistoryPanel && this.alertHistoryPanel.style.display === 'block') {
+            if (this.alertHistoryPanel && this.alertHistoryPanel.classList.contains('open')) {
                 if (!e.target.closest('.alert-panel') && !e.target.closest('#alertHistoryBtn')) {
                     this.hideAlertPanel('history');
                 }
             }
-            if (this.alertDetailPanel && this.alertDetailPanel.style.display === 'block') {
+            if (this.alertDetailPanel && this.alertDetailPanel.classList.contains('open')) {
                 if (!e.target.closest('.alert-detail-panel')) {
                     this.hideAlertPanel('detail');
+                }
+            }
+            if (this.knowledgePanel && this.knowledgePanel.classList.contains('open')) {
+                if (!e.target.closest('#knowledgePanel') && !e.target.closest('#knowledgePanelBtn')) {
+                    this.hideKnowledgePanel();
                 }
             }
         });
@@ -454,6 +477,34 @@ class SuperBizAgentApp {
         }
     }
 
+    async loadServerChatHistories() {
+        try {
+            const response = await fetch(`${this.apiBaseUrl}/chat/sessions`);
+            if (!response.ok) throw new Error(`HTTP错误: ${response.status}`);
+
+            const payload = await response.json();
+            const serverHistories = (payload.data || []).map(session => {
+                const local = this.chatHistories.find(history => history.id === session.sessionId);
+                return {
+                    id: session.sessionId,
+                    title: session.title || '新对话',
+                    messages: local ? local.messages : null,
+                    createdAt: session.createTime ? new Date(session.createTime).toISOString() : new Date().toISOString(),
+                    updatedAt: session.updateTime ? new Date(session.updateTime).toISOString() : new Date().toISOString(),
+                    serverBacked: true
+                };
+            });
+
+            const serverIds = new Set(serverHistories.map(history => history.id));
+            const localOnly = this.chatHistories.filter(history => !serverIds.has(history.id));
+            this.chatHistories = [...serverHistories, ...localOnly];
+            this.saveChatHistories();
+            this.renderChatHistory();
+        } catch (error) {
+            console.warn('加载服务端历史对话失败，使用本地缓存:', error);
+        }
+    }
+
     saveChatHistories() {
         try {
             localStorage.setItem('chatHistories', JSON.stringify(this.chatHistories));
@@ -499,7 +550,7 @@ class SuperBizAgentApp {
         });
     }
 
-    loadChatHistory(historyId) {
+    async loadChatHistory(historyId) {
         const history = this.chatHistories.find(h => h.id === historyId);
         if (!history) return;
 
@@ -508,6 +559,19 @@ class SuperBizAgentApp {
                 this.updateCurrentChatHistory();
             } else {
                 this.saveCurrentChat();
+            }
+        }
+
+        if (!history.messages || history.serverBacked) {
+            try {
+                history.messages = await this.fetchChatHistoryMessages(historyId);
+                this.saveChatHistories();
+            } catch (error) {
+                console.warn('加载服务端对话消息失败，使用本地缓存:', error);
+                if (!history.messages) {
+                    this.showNotification('加载历史消息失败: ' + error.message, 'error');
+                    return;
+                }
             }
         }
 
@@ -525,7 +589,30 @@ class SuperBizAgentApp {
         this.renderChatHistory();
     }
 
-    deleteChatHistory(historyId) {
+    async fetchChatHistoryMessages(historyId) {
+        const response = await fetch(`${this.apiBaseUrl}/chat/session/${encodeURIComponent(historyId)}/messages`);
+        if (!response.ok) throw new Error(`HTTP错误: ${response.status}`);
+        const payload = await response.json();
+        if (payload.code !== 200 || !payload.data) {
+            throw new Error(payload.message || '会话不存在');
+        }
+        return (payload.data.messageHistory || []).map(message => ({
+            type: message.role === 'assistant' ? 'assistant' : 'user',
+            content: message.content || '',
+            timestamp: new Date().toISOString()
+        }));
+    }
+
+    async deleteChatHistory(historyId) {
+        try {
+            const response = await fetch(`${this.apiBaseUrl}/chat/session/${encodeURIComponent(historyId)}`, {
+                method: 'DELETE'
+            });
+            if (!response.ok) throw new Error(`HTTP错误: ${response.status}`);
+        } catch (error) {
+            console.warn('删除服务端历史对话失败，仅删除本地缓存:', error);
+        }
+
         this.chatHistories = this.chatHistories.filter(h => h.id !== historyId);
         this.saveChatHistories();
         this.renderChatHistory();
@@ -623,9 +710,14 @@ class SuperBizAgentApp {
         } finally {
             this.isStreaming = false;
             this.updateUI();
-            if (this.isCurrentChatFromHistory && this.currentChatHistory.length > 0) {
-                this.updateCurrentChatHistory();
+            if (this.currentChatHistory.length > 0) {
+                if (this.isCurrentChatFromHistory) {
+                    this.updateCurrentChatHistory();
+                } else {
+                    this.saveCurrentChat();
+                }
                 this.renderChatHistory();
+                this.loadServerChatHistories();
             }
         }
     }
@@ -980,7 +1072,16 @@ class SuperBizAgentApp {
             const data = await response.json();
 
             if ((data.code === 200 || data.message === 'success') && data.data) {
-                this.addMessage('assistant', `${file.name} 上传到知识库成功`, false, true);
+                const indexStatus = data.data.indexStatus || 'INDEXING';
+                const indexTaskId = data.data.indexTaskId || '-';
+                const message = data.data.message || '文件已接收，索引处理中';
+                this.addMessage('assistant',
+                    `${file.name} ${message}\n\n索引任务: \`${indexTaskId}\`\n当前状态: \`${indexStatus}\``,
+                    false,
+                    true);
+                if (this.knowledgePanel && this.knowledgePanel.classList.contains('open')) {
+                    this.loadKnowledgeIndexTasks();
+                }
             } else {
                 throw new Error(data.message || '上传失败');
             }
@@ -1001,6 +1102,211 @@ class SuperBizAgentApp {
         const sizes = ['Bytes', 'KB', 'MB', 'GB'];
         const i = Math.floor(Math.log(bytes) / Math.log(k));
         return Math.round(bytes / Math.pow(k, i) * 100) / 100 + ' ' + sizes[i];
+    }
+
+    // ==================== 知识库 ====================
+
+    hideKnowledgePanel() {
+        if (this.knowledgePanel) {
+            this.knowledgePanel.style.display = 'none';
+            this.knowledgePanel.classList.remove('open');
+        }
+    }
+
+    async showKnowledgePanel() {
+        if (!this.knowledgePanel || !this.knowledgePanelContent) return;
+
+        this.knowledgePanel.style.display = 'flex';
+        this.knowledgePanel.classList.add('open');
+        this.knowledgePanelContent.innerHTML = this.renderKnowledgePanelShell();
+        this.bindKnowledgePanelEvents();
+
+        await this.loadKnowledgeIndexTasks();
+    }
+
+    renderKnowledgePanelShell() {
+        return `
+            <div class="knowledge-search">
+                <div class="knowledge-search-row">
+                    <input id="knowledgeSearchInput" class="knowledge-search-input" type="search" placeholder="测试知识库检索" maxlength="200">
+                    <select id="knowledgeTopKSelect" class="knowledge-topk-select" aria-label="返回条数">
+                        <option value="3">Top 3</option>
+                        <option value="5" selected>Top 5</option>
+                        <option value="10">Top 10</option>
+                    </select>
+                    <button id="knowledgeSearchBtn" class="knowledge-search-btn">检索</button>
+                </div>
+                <div id="knowledgeSearchResult" class="knowledge-search-result">
+                    <div class="knowledge-muted">输入关键词后可查看过滤条件、粗排参数和命中文档。</div>
+                </div>
+            </div>
+            <div class="knowledge-section-block">
+                <div class="knowledge-section-title">索引任务</div>
+                <div id="knowledgeIndexTasks" class="knowledge-task-list">
+                    <div class="alert-panel-loading">加载中...</div>
+                </div>
+            </div>
+        `;
+    }
+
+    bindKnowledgePanelEvents() {
+        const searchInput = document.getElementById('knowledgeSearchInput');
+        const searchBtn = document.getElementById('knowledgeSearchBtn');
+
+        if (searchBtn) {
+            searchBtn.addEventListener('click', () => this.searchKnowledge());
+        }
+        if (searchInput) {
+            searchInput.addEventListener('keydown', (e) => {
+                if (e.key === 'Enter') {
+                    e.preventDefault();
+                    this.searchKnowledge();
+                }
+            });
+            setTimeout(() => searchInput.focus(), 0);
+        }
+    }
+
+    async loadKnowledgeIndexTasks() {
+        const tasksContainer = document.getElementById('knowledgeIndexTasks');
+        if (!tasksContainer) return;
+
+        try {
+            const response = await fetch(`${this.apiBaseUrl}/knowledge/index-tasks`);
+            if (!response.ok) throw new Error(`HTTP错误: ${response.status}`);
+
+            const payload = await response.json();
+            this.renderKnowledgeIndexTasks(payload.data || []);
+        } catch (error) {
+            console.error('获取索引任务失败:', error);
+            tasksContainer.innerHTML =
+                '<div class="alert-panel-error">获取索引任务失败: ' + this.escapeHtml(error.message) + '</div>';
+        }
+    }
+
+    renderKnowledgeIndexTasks(tasks) {
+        const tasksContainer = document.getElementById('knowledgeIndexTasks');
+        if (!tasksContainer) return;
+
+        if (!tasks || tasks.length === 0) {
+            tasksContainer.innerHTML = '<div class="alert-panel-empty">暂无索引任务</div>';
+            return;
+        }
+
+        const html = tasks.map(task => {
+            const status = task.status || 'UNKNOWN';
+            const statusClass = this.knowledgeStatusClass(status);
+            const updatedAt = task.updatedAt ? new Date(task.updatedAt).toLocaleString('zh-CN') : '未知';
+            const errorHtml = task.errorMessage
+                ? `<div class="knowledge-task-error">${this.escapeHtml(task.errorMessage)}</div>`
+                : '';
+            return `
+                <div class="knowledge-task-card">
+                    <div class="knowledge-task-header">
+                        <span class="knowledge-task-name">${this.escapeHtml(task.fileName || '未知文件')}</span>
+                        <span class="knowledge-task-status ${statusClass}">${this.escapeHtml(status)}</span>
+                    </div>
+                    <div class="knowledge-task-meta">${this.escapeHtml(task.message || '')}</div>
+                    <div class="knowledge-task-meta">更新时间: ${this.escapeHtml(updatedAt)}</div>
+                    ${errorHtml}
+                </div>
+            `;
+        }).join('');
+
+        tasksContainer.innerHTML = html;
+    }
+
+    knowledgeStatusClass(status) {
+        const normalized = status.toLowerCase();
+        if (normalized === 'completed') return 'status-completed';
+        if (normalized === 'failed') return 'status-failed';
+        return 'status-indexing';
+    }
+
+    async searchKnowledge() {
+        const input = document.getElementById('knowledgeSearchInput');
+        const topKSelect = document.getElementById('knowledgeTopKSelect');
+        const resultContainer = document.getElementById('knowledgeSearchResult');
+        if (!input || !resultContainer) return;
+
+        const query = input.value.trim();
+        if (!query) {
+            this.showNotification('请输入知识库检索关键词', 'warning');
+            return;
+        }
+
+        const topK = topKSelect ? topKSelect.value : '5';
+        resultContainer.innerHTML = '<div class="alert-panel-loading">检索中...</div>';
+
+        try {
+            const params = new URLSearchParams({ query, topK });
+            const response = await fetch(`${this.apiBaseUrl}/knowledge/search?${params.toString()}`);
+            if (!response.ok) throw new Error(`HTTP错误: ${response.status}`);
+
+            const payload = await response.json();
+            this.renderKnowledgeSearchResult(payload.data);
+        } catch (error) {
+            console.error('知识库检索失败:', error);
+            resultContainer.innerHTML =
+                '<div class="alert-panel-error">知识库检索失败: ' + this.escapeHtml(error.message) + '</div>';
+        }
+    }
+
+    renderKnowledgeSearchResult(trace) {
+        const resultContainer = document.getElementById('knowledgeSearchResult');
+        if (!resultContainer) return;
+
+        if (!trace) {
+            resultContainer.innerHTML = '<div class="alert-panel-empty">暂无检索结果</div>';
+            return;
+        }
+
+        const results = trace.results || [];
+        const paramsHtml = `
+            <div class="knowledge-trace-grid">
+                <div><strong>TopK</strong><span>${this.escapeHtml(String(trace.requestedTopK || '-'))}</span></div>
+                <div><strong>CandidateK</strong><span>${this.escapeHtml(String(trace.searchK || '-'))}</span></div>
+                <div><strong>HNSW ef</strong><span>${this.escapeHtml(String(trace.searchEf || '-'))}</span></div>
+            </div>
+            <div class="knowledge-filter">
+                <strong>过滤条件</strong>
+                <code>${this.escapeHtml(trace.filterExpr || '-')}</code>
+            </div>
+        `;
+
+        if (results.length === 0) {
+            resultContainer.innerHTML = paramsHtml + '<div class="alert-panel-empty">未命中文档</div>';
+            return;
+        }
+
+        const resultsHtml = results.map((result, index) => {
+            const metadata = this.formatKnowledgeMetadata(result.metadata);
+            const score = Number.isFinite(result.score) ? result.score.toFixed(4) : String(result.score || '-');
+            return `
+                <div class="knowledge-result-card">
+                    <div class="knowledge-result-header">
+                        <span class="knowledge-result-rank">#${index + 1}</span>
+                        <span class="knowledge-result-score">score ${this.escapeHtml(score)}</span>
+                    </div>
+                    <div class="knowledge-result-content">${this.escapeHtml(result.content || '')}</div>
+                    ${metadata ? `<div class="knowledge-result-meta">${metadata}</div>` : ''}
+                </div>
+            `;
+        }).join('');
+
+        resultContainer.innerHTML = paramsHtml + '<div class="knowledge-result-list">' + resultsHtml + '</div>';
+    }
+
+    formatKnowledgeMetadata(metadata) {
+        if (!metadata) return '';
+        try {
+            const parsed = typeof metadata === 'string' ? JSON.parse(metadata) : metadata;
+            return Object.entries(parsed)
+                .map(([key, value]) => `<span>${this.escapeHtml(key)}: ${this.escapeHtml(String(value))}</span>`)
+                .join('');
+        } catch (e) {
+            return `<span>${this.escapeHtml(metadata)}</span>`;
+        }
     }
 
     // ==================== 加载遮罩 ====================
@@ -1200,7 +1506,7 @@ class SuperBizAgentApp {
     }
 
     showAlertNotification(data) {
-        this.pendingAlertId = data.alertId;
+        this.pendingAlertId = data.incidentId || data.alertId;
 
         // 移除旧通知
         const oldNotif = document.getElementById('_dynamic_alert_notif');
@@ -1241,8 +1547,10 @@ class SuperBizAgentApp {
         if (viewBtn) {
             viewBtn.addEventListener('click', () => {
                 notif.remove();
-                if (this.pendingAlertId) {
+                if (data.incidentId) {
                     this.showAlertDetail(this.pendingAlertId);
+                } else if (this.pendingAlertId) {
+                    this.showAlertHistory();
                 }
             });
         }
@@ -1265,49 +1573,55 @@ class SuperBizAgentApp {
     async showAlertHistory() {
         if (!this.alertHistoryPanel || !this.alertHistoryContent) return;
 
-        this.alertHistoryPanel.style.display = 'block';
+        this.alertHistoryPanel.style.display = 'flex';
         this.alertHistoryPanel.classList.add('open');
         this.alertHistoryContent.innerHTML = '<div class="alert-panel-loading">加载中...</div>';
+        this.alertHistoryContent.scrollTop = 0;
 
         try {
-            const response = await fetch(`${this.apiBaseUrl}/alerts/history`);
+            const response = await fetch(`${this.apiBaseUrl}/incidents`);
             if (!response.ok) throw new Error(`HTTP错误: ${response.status}`);
 
             const data = await response.json();
-            this.renderAlertHistory(data.alerts || []);
+            this.renderAlertHistory(data.data || []);
         } catch (error) {
-            console.error('获取告警历史失败:', error);
+            console.error('获取事故历史失败:', error);
             this.alertHistoryContent.innerHTML =
-                '<div class="alert-panel-error">获取告警历史失败: ' + this.escapeHtml(error.message) + '</div>';
+                '<div class="alert-panel-error">获取事故历史失败: ' + this.escapeHtml(error.message) + '</div>';
         }
     }
 
-    renderAlertHistory(alerts) {
+    renderAlertHistory(incidents) {
         if (!this.alertHistoryContent) return;
 
-        if (!alerts || alerts.length === 0) {
-            this.alertHistoryContent.innerHTML = '<div class="alert-panel-empty">暂无告警记录</div>';
+        if (!incidents || incidents.length === 0) {
+            this.alertHistoryContent.innerHTML = '<div class="alert-panel-empty">暂无事故记录</div>';
             return;
         }
 
         let html = '';
-        alerts.forEach(alert => {
-            const severityClass = alert.severity === 'critical' ? 'severity-critical' : 'severity-warning';
-            const time = new Date(alert.receivedAt).toLocaleString('zh-CN');
-            const statusText = alert.status === 'firing' ? '触发中' : '已恢复';
-            const statusClass = alert.status === 'firing' ? 'status-firing' : 'status-resolved';
+        incidents.forEach(incident => {
+            const severityClass = incident.severity === 'critical' ? 'severity-critical' : 'severity-warning';
+            const time = new Date(incident.updatedAt || incident.lastAlertAt || incident.createdAt).toLocaleString('zh-CN');
+            const statusText = this.incidentStatusText(incident.status);
+            const statusClass = incident.status === 'RESOLVED' ? 'status-resolved' : 'status-firing';
+            const runText = incident.latestRunStatus
+                ? this.runStatusText(incident.latestRunStatus)
+                : '尚未诊断';
 
             html += `
-                <div class="alert-card" data-alert-id="${this.escapeHtml(alert.id)}">
+                <div class="alert-card" data-incident-id="${this.escapeHtml(incident.id)}">
                     <div class="alert-card-header">
-                        <span class="alert-severity ${severityClass}">${this.escapeHtml(alert.severity)}</span>
+                        <span class="alert-severity ${severityClass}">${this.escapeHtml(incident.severity || 'unknown')}</span>
                         <span class="alert-status ${statusClass}">${statusText}</span>
                         <span class="alert-time">${time}</span>
                     </div>
-                    <div class="alert-card-body">${this.escapeHtml(alert.summary || '未知告警')}</div>
+                    <div class="alert-card-body">${this.escapeHtml(incident.title || '未知事故')}</div>
                     <div class="alert-card-footer">
-                        ${alert.hasReport ? '<span class="alert-has-report">已有报告</span>' : '<span class="alert-no-report">暂无报告</span>'}
-                        <button class="alert-view-btn" data-alert-id="${this.escapeHtml(alert.id)}">查看详情</button>
+                        <span class="${incident.latestRunStatus === 'COMPLETED' ? 'alert-has-report' : 'alert-no-report'}">
+                            ${this.escapeHtml(runText)} · ${incident.alertCount || 0} 次告警
+                        </span>
+                        <button class="alert-view-btn" data-incident-id="${this.escapeHtml(incident.id)}">查看详情</button>
                     </div>
                 </div>
             `;
@@ -1318,102 +1632,114 @@ class SuperBizAgentApp {
         this.alertHistoryContent.querySelectorAll('.alert-view-btn').forEach(btn => {
             btn.addEventListener('click', (e) => {
                 e.stopPropagation();
-                const alertId = btn.getAttribute('data-alert-id');
-                if (alertId) {
+                const incidentId = btn.getAttribute('data-incident-id');
+                if (incidentId) {
                     this.hideAlertPanel('history');
-                    this.showAlertDetail(alertId);
+                    this.showAlertDetail(incidentId);
                 }
             });
         });
     }
 
-    async showAlertDetail(alertId) {
+    async showAlertDetail(incidentId) {
         if (!this.alertDetailPanel || !this.alertDetailContent) return;
 
-        this.alertDetailPanel.style.display = 'block';
+        this.alertDetailPanel.style.display = 'flex';
         this.alertDetailPanel.classList.add('open');
         this.alertDetailContent.innerHTML = '<div class="alert-panel-loading">加载中...</div>';
+        this.alertDetailContent.scrollTop = 0;
 
         try {
-            const detailResponse = await fetch(`${this.apiBaseUrl}/alerts/detail/${alertId}`);
-            if (!detailResponse.ok) throw new Error(`获取告警详情失败: ${detailResponse.status}`);
-            const detailData = await detailResponse.json();
-
-            const reportResponse = await fetch(`${this.apiBaseUrl}/alerts/report/${alertId}`);
-            let reportHtml = '';
-
-            if (reportResponse.ok) {
-                const reportData = await reportResponse.json();
-                if (reportData && reportData.report) {
-                    reportHtml = this.renderMarkdown(reportData.report);
-                } else {
-                    reportHtml = '<div class="alert-panel-empty">报告生成中或暂无可用的分析报告</div>';
-                }
-            } else {
-                reportHtml = '<div class="alert-panel-empty">获取报告失败</div>';
-            }
-
-            const time = new Date(detailData.receivedAt).toLocaleString('zh-CN');
+            const detailResponse = await fetch(`${this.apiBaseUrl}/incidents/${incidentId}`);
+            if (!detailResponse.ok) throw new Error(`获取事故详情失败: ${detailResponse.status}`);
+            const responseData = await detailResponse.json();
+            const detailData = responseData.data;
+            const time = new Date(detailData.lastAlertAt || detailData.updatedAt || detailData.createdAt).toLocaleString('zh-CN');
             let alertsHtml = '';
-            let alertContext = '';
+            const payloads = detailData.alertPayloads || [];
 
-            if (detailData.alerts) {
-                detailData.alerts.forEach(alert => {
-                    const labels = alert.labels
-                        ? Object.entries(alert.labels).map(([k, v]) => `${k}: ${v}`).join(', ') : '无';
-                    const annotations = alert.annotations
-                        ? Object.entries(alert.annotations).map(([k, v]) => `${k}: ${v}`).join(', ') : '无';
+            payloads.forEach((payload, payloadIndex) => {
+                (payload.alerts || []).forEach(alert => {
+                    const labels = alert.labels ? this.formatKeyValue(alert.labels) : '无';
+                    const annotations = alert.annotations ? this.formatKeyValue(alert.annotations) : '无';
                     alertsHtml += `
                         <div class="alert-detail-item">
-                            <div><strong>状态:</strong> ${alert.status}</div>
-                            <div><strong>开始时间:</strong> ${alert.startsAt || '未知'}</div>
+                            <div><strong>告警批次:</strong> #${payloadIndex + 1}</div>
+                            <div><strong>状态:</strong> ${this.escapeHtml(alert.status || 'unknown')}</div>
+                            <div><strong>开始时间:</strong> ${this.escapeHtml(alert.startsAt || '未知')}</div>
+                            <div><strong>Fingerprint:</strong> ${this.escapeHtml(alert.fingerprint || '无')}</div>
                             <div><strong>标签:</strong> ${this.escapeHtml(labels)}</div>
                             <div><strong>注解:</strong> ${this.escapeHtml(annotations)}</div>
                         </div>
                     `;
-
-                    const name = alert.labels ? (alert.labels.alertname || '未知告警') : '未知告警';
-                    alertContext += '告警: ' + name + '\n状态: ' + (alert.status || 'unknown') + '\n';
-                    if (alert.labels) {
-                        Object.entries(alert.labels).forEach(([k, v]) => { alertContext += '  ' + k + ': ' + v + '\n'; });
-                    }
-                    if (alert.annotations) {
-                        Object.entries(alert.annotations).forEach(([k, v]) => { alertContext += '  ' + k + ': ' + v + '\n'; });
-                    }
                 });
+            });
+
+            const runs = detailData.diagnosisRuns || [];
+            const latestRun = runs.length > 0 ? runs[runs.length - 1] : null;
+            let reportHtml = '<div class="alert-panel-empty">暂无诊断任务</div>';
+            let runHtml = '<div class="alert-panel-empty">暂无诊断记录</div>';
+
+            if (latestRun) {
+                const runTime = latestRun.completedAt || latestRun.startedAt || latestRun.createdAt;
+                runHtml = `
+                    <div class="alert-detail-info">
+                        <div><strong>Run ID:</strong> ${this.escapeHtml(latestRun.runId)}</div>
+                        <div><strong>状态:</strong> ${this.escapeHtml(this.runStatusText(latestRun.status))}</div>
+                        <div><strong>更新时间:</strong> ${runTime ? new Date(runTime).toLocaleString('zh-CN') : '未知'}</div>
+                        ${latestRun.errorMessage ? `<div><strong>失败原因:</strong> ${this.escapeHtml(latestRun.errorMessage)}</div>` : ''}
+                    </div>
+                `;
+
+                if (latestRun.status === 'COMPLETED' && latestRun.report) {
+                    reportHtml = this.renderMarkdown(latestRun.report);
+                } else if (latestRun.status === 'FAILED') {
+                    reportHtml = '<div class="alert-panel-error">' + this.escapeHtml(latestRun.errorMessage || '诊断失败') + '</div>';
+                } else {
+                    reportHtml = '<div class="alert-panel-empty">诊断任务正在执行，请稍后刷新详情</div>';
+                }
             }
 
             this.alertDetailContent.innerHTML = `
                 <div class="alert-detail-section">
                     <div class="alert-detail-info">
-                        <div><strong>告警ID:</strong> ${this.escapeHtml(detailData.id)}</div>
-                        <div><strong>状态:</strong> ${detailData.status === 'firing' ? '触发中' : '已恢复'}</div>
-                        <div><strong>接收时间:</strong> ${time}</div>
+                        <div><strong>Incident ID:</strong> ${this.escapeHtml(detailData.id)}</div>
+                        <div><strong>标题:</strong> ${this.escapeHtml(detailData.title || '未知事故')}</div>
+                        <div><strong>状态:</strong> ${this.escapeHtml(this.incidentStatusText(detailData.status))}</div>
+                        <div><strong>级别:</strong> ${this.escapeHtml(detailData.severity || 'unknown')}</div>
+                        <div><strong>累计告警:</strong> ${detailData.alertCount || 0} 次</div>
+                        <div><strong>最近告警:</strong> ${time}</div>
                     </div>
                 </div>
                 <div class="alert-detail-section">
-                    <h4>告警列表</h4>
+                    <h4>关联告警</h4>
                     ${alertsHtml || '<div class="alert-panel-empty">无告警数据</div>'}
+                </div>
+                <div class="alert-detail-section">
+                    <h4>最新诊断</h4>
+                    ${runHtml}
                 </div>
                 <div class="alert-detail-section">
                     <h4>分析报告</h4>
                     <div class="alert-report-content">${reportHtml}</div>
-                    <button class="alert-aiops-btn" data-alert-id="${this.escapeHtml(alertId)}">对此告警执行 AI Ops 分析</button>
+                    <button class="alert-aiops-btn" data-incident-id="${this.escapeHtml(incidentId)}">重新执行 AI Ops 诊断</button>
                 </div>
             `;
 
             const aiOpsBtn = this.alertDetailContent.querySelector('.alert-aiops-btn');
             if (aiOpsBtn) {
                 aiOpsBtn.addEventListener('click', () => {
-                    this.hideAlertPanel('detail');
-                    this.triggerAIOps(alertId, alertContext);
+                    const id = aiOpsBtn.getAttribute('data-incident-id');
+                    if (id) {
+                        this.triggerIncidentDiagnosis(id);
+                    }
                 });
             }
 
         } catch (error) {
-            console.error('获取告警详情失败:', error);
+            console.error('获取事故详情失败:', error);
             this.alertDetailContent.innerHTML =
-                '<div class="alert-panel-error">获取告警详情失败: ' + this.escapeHtml(error.message) + '</div>';
+                '<div class="alert-panel-error">获取事故详情失败: ' + this.escapeHtml(error.message) + '</div>';
         }
     }
 
@@ -1431,9 +1757,32 @@ class SuperBizAgentApp {
             if (!data.success) {
                 throw new Error(data.message || '模拟告警失败');
             }
+            this.showNotification('模拟告警已触发', 'success');
+            if (data.incidentId) {
+                this.showAlertDetail(data.incidentId);
+            }
         } catch (error) {
             console.error('模拟告警失败:', error);
             this.showNotification('模拟告警失败: ' + error.message, 'error');
+        }
+    }
+
+    async triggerIncidentDiagnosis(incidentId) {
+        try {
+            const response = await fetch(`${this.apiBaseUrl}/incidents/${incidentId}/diagnose`, {
+                method: 'POST'
+            });
+            if (!response.ok) throw new Error(`HTTP错误: ${response.status}`);
+            const data = await response.json();
+            if (data.code !== 200) {
+                throw new Error(data.message || '诊断任务提交失败');
+            }
+            this.showNotification('诊断任务已提交', 'success');
+            this.showAlertDetail(incidentId);
+            setTimeout(() => this.showAlertDetail(incidentId), 3000);
+        } catch (error) {
+            console.error('提交诊断任务失败:', error);
+            this.showNotification('提交诊断任务失败: ' + error.message, 'error');
         }
     }
 
@@ -1466,6 +1815,31 @@ class SuperBizAgentApp {
     }
 
     // ==================== 工具 ====================
+
+    formatKeyValue(values) {
+        return Object.entries(values)
+            .map(([key, value]) => `${key}: ${value}`)
+            .join(', ');
+    }
+
+    incidentStatusText(status) {
+        const names = {
+            OPEN: '处理中',
+            RESOLVED: '已恢复'
+        };
+        return names[status] || status || '未知';
+    }
+
+    runStatusText(status) {
+        const names = {
+            QUEUED: '排队中',
+            RUNNING: '诊断中',
+            COMPLETED: '已完成',
+            FAILED: '失败',
+            CANCELLED: '已取消'
+        };
+        return names[status] || status || '未知';
+    }
 
     escapeHtml(text) {
         const div = document.createElement('div');

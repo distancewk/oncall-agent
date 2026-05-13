@@ -97,9 +97,11 @@ public class RateLimitInterceptor implements HandlerInterceptor {
         return true;
     }
 
+    @SuppressWarnings("PMD.CloseResource")
     private void sendRateLimitResponse(HttpServletResponse response, String message) throws Exception {
         response.setStatus(429); // 429 Too Many Requests
         response.setContentType("application/json;charset=UTF-8");
+        // The servlet container owns this writer; closing it here can interfere with response handling.
         PrintWriter writer = response.getWriter();
         
         ApiResponse<String> apiResponse = ApiResponse.error(429, message);

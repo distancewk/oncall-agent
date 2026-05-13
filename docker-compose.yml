@@ -60,9 +60,9 @@ services:
       - "9091:9091"
     depends_on:
       etcd:
-        condition: service_started
+        condition: service_healthy
       minio:
-        condition: service_started
+        condition: service_healthy
     networks:
       - app-network
 
@@ -102,11 +102,25 @@ services:
       MILVUS_PORT: 19530
       REDIS_HOST: redis
       REDIS_PORT: 6379
+      PROMETHEUS_BASE_URL: ${PROMETHEUS_BASE_URL:-http://prometheus:9090}
+      FILE_UPLOAD_PATH: /app/uploads
+      APP_CORS_ALLOWED_ORIGINS: ${APP_CORS_ALLOWED_ORIGINS:-http://localhost:9900}
+      APP_SECURITY_ENABLED: ${APP_SECURITY_ENABLED:-false}
+      APP_API_TOKEN: ${APP_API_TOKEN:-}
+      APP_WEBHOOK_SECRET: ${APP_WEBHOOK_SECRET:-}
+      APP_CHAT_HISTORY_PATH: /app/data/chat-history
+      APP_INCIDENTS_PATH: /app/data/incidents
+      APP_PRIVATE_MEMORY_RECALL_ENABLED: ${APP_PRIVATE_MEMORY_RECALL_ENABLED:-true}
+      APP_PRIVATE_MEMORY_RECALL_TOP_K: ${APP_PRIVATE_MEMORY_RECALL_TOP_K:-3}
+    volumes:
+      - ${DOCKER_VOLUME_DIRECTORY:-.}/uploads:/app/uploads
+      - ${DOCKER_VOLUME_DIRECTORY:-.}/data/chat-history:/app/data/chat-history
+      - ${DOCKER_VOLUME_DIRECTORY:-.}/data/incidents:/app/data/incidents
     depends_on:
       milvus:
-        condition: service_started
+        condition: service_healthy
       redis:
-        condition: service_started
+        condition: service_healthy
     networks:
       - app-network
 

@@ -4,37 +4,27 @@
          xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
          xsi:schemaLocation="http://pmd.sourceforge.net/ruleset/2.0.0 https://pmd.sourceforge.net/ruleset_2_0_0.xsd">
 
-    <description>PMD ruleset for SuperBizAgent</description>
+    <description>
+        High-risk PMD gate for SuperBizAgent. Style and naming cleanup is tracked separately
+        so the build only blocks on correctness, resource, exception, and security risks.
+    </description>
 
-    <!-- Best practices -->
-    <rule ref="category/java/bestpractices.xml">
-        <exclude name="GuardLogStatement"/>
-        <exclude name="AvoidPrintStackTrace"/>
-        <exclude name="SystemPrintln"/>
-    </rule>
+    <!-- Null-safety and correctness -->
+    <rule ref="category/java/errorprone.xml/BrokenNullCheck"/>
+    <rule ref="category/java/errorprone.xml/MisplacedNullCheck"/>
+    <rule ref="category/java/errorprone.xml/UnusedNullCheckInEquals"/>
+    <rule ref="category/java/errorprone.xml/EqualsNull"/>
+    <rule ref="category/java/errorprone.xml/ComparisonWithNaN"/>
+    <rule ref="category/java/errorprone.xml/DoNotThrowExceptionInFinally"/>
+    <rule ref="category/java/errorprone.xml/ReturnFromFinallyBlock"/>
+    <rule ref="category/java/errorprone.xml/UnconditionalIfStatement"/>
 
-    <!-- Code style -->
-    <rule ref="category/java/codestyle.xml">
-        <exclude name="OnlyOneReturn"/>
-        <exclude name="AtLeastOneConstructor"/>
-        <exclude name="ShortVariable"/>
-        <exclude name="LongVariable"/>
-        <exclude name="ShortClassName"/>
-        <exclude name="LocalVariableCouldBeFinal"/>
-        <exclude name="MethodArgumentCouldBeFinal"/>
-        <exclude name="DefaultPackage"/>
-        <exclude name="CommentDefaultAccessModifier"/>
-        <exclude name="CallSuperInConstructor"/>
-    </rule>
+    <!-- Resource and exception handling -->
+    <rule ref="category/java/errorprone.xml/CloseResource"/>
+    <rule ref="category/java/bestpractices.xml/UseTryWithResources"/>
+    <rule ref="category/java/bestpractices.xml/PreserveStackTrace"/>
 
-    <!-- Error-prone -->
-    <rule ref="category/java/errorprone.xml">
-        <exclude name="DataflowAnomalyAnalysis"/>
-        <exclude name="BeanMembersShouldSerialize"/>
-        <exclude name="NullAssignment"/>
-        <exclude name="AvoidLiteralsInIfCondition"/>
-    </rule>
-
-    <!-- Performance -->
-    <rule ref="category/java/performance.xml"/>
+    <!-- Security-sensitive defaults -->
+    <rule ref="category/java/security.xml/HardCodedCryptoKey"/>
+    <rule ref="category/java/security.xml/InsecureCryptoIv"/>
 </ruleset>

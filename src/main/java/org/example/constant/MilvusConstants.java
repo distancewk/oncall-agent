@@ -11,6 +11,21 @@ public class MilvusConstants {
      * Milvus 集合名称
      */
     public static final String MILVUS_COLLECTION_NAME = "biz";
+
+    public static final String DOC_TYPE_DOCUMENT = "document";
+
+    public static final String DOC_TYPE_CHAT_MEMORY = "chat_memory";
+
+    public static final String DOCUMENT_FILTER_EXPR = "metadata[\"doc_type\"] == \"document\"";
+
+    public static String chatMemoryFilterExpr(String sessionId) {
+        return "metadata[\"doc_type\"] == \"chat_memory\" && metadata[\"session_id\"] == \""
+                + escapeExprValue(sessionId) + "\"";
+    }
+
+    private static String escapeExprValue(String value) {
+        return value.replace("\\", "\\\\").replace("\"", "\\\"");
+    }
     
     /**
      * 向量维度（豆包 embedding 模型的维度）

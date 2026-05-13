@@ -1,11 +1,15 @@
 package org.example.service;
 
+import com.fasterxml.jackson.databind.ObjectMapper;
+import org.example.config.AppChatHistoryProperties;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
+import org.junit.jupiter.api.io.TempDir;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 
+import java.nio.file.Path;
 import java.util.List;
 import java.util.Map;
 
@@ -148,5 +152,51 @@ class SessionManagerTest {
         SessionManager.SessionInfo session = sessionManager.getOrCreateSession("time-test");
         assertTrue(session.getCreateTime() > 0);
         assertTrue(session.getCreateTime() <= System.currentTimeMillis());
+    }
+
+    @Test
+    void sessionInfo_shouldPersistCompleteHistoryAndRestoreRecentWindowAfterRestart(@TempDir Path historyDir) {
+        ChatHistoryStore store = newHistoryStore(historyDir);
+        setField(sessionManager, "chatHistoryStore", store);
+
+        SessionManager.SessionInfo session = sessionManager.getOrCreateSession("persist-test");
+        for (int i = 1; i <= 8; i++) {
+            session.addMessage("q" + i, "a" + i, sessionManager);
+        }
+
+        assertEquals(6, session.getMessagePairCount());
+        assertEquals(16, store.load("persist-test").orElseThrow().getMessageHistory().size());
+        assertEquals("q1", store.load("persist-test").orElseThrow().getMessageHistory().get(0).get("content"));
+
+        SessionManager restarted = new SessionManager();
+        setField(restarted, "memoryExtractionService", memoryExtractionService);
+        setField(restarted, "executor", executor);
+        setField(restarted, "chatHistoryStore", store);
+
+        SessionManager.SessionInfo restored = restarted.getOrCreateSession("persist-test");
+
+        assertEquals(6, restored.getMessagePairCount());
+        assertEquals("q3", restored.getHistory().get(0).get("content"));
+    }
+
+    @Test
+    void deleteSession_shouldRemoveInMemoryAndPersistedHistory(@TempDir Path historyDir) {
+        ChatHistoryStore store = newHistoryStore(historyDir);
+        setField(sessionManager, "chatHistoryStore", store);
+        SessionManager.SessionInfo session = sessionManager.getOrCreateSession("delete-test");
+        session.addMessage("hello", "hi", sessionManager);
+
+        assertTrue(store.load("delete-test").isPresent());
+
+        sessionManager.deleteSession("delete-test");
+
+        assertNull(sessionManager.getSession("delete-test"));
+        assertTrue(store.load("delete-test").isEmpty());
+    }
+
+    private ChatHistoryStore newHistoryStore(Path historyDir) {
+        AppChatHistoryProperties properties = new AppChatHistoryProperties();
+        properties.setPath(historyDir.toString());
+        return new ChatHistoryStore(properties, new ObjectMapper());
     }
 }

@@ -11,7 +11,6 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.ai.chat.model.ChatResponse;
 import org.springframework.ai.chat.prompt.Prompt;
-import org.springframework.ai.chat.prompt.SystemPromptTemplate;
 import org.springframework.ai.chat.messages.SystemMessage;
 import org.springframework.ai.chat.messages.UserMessage;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -38,6 +37,9 @@ public class MemoryExtractionService {
 
     @Autowired
     private MilvusServiceClient milvusClient;
+
+    @Autowired
+    private MilvusInsertHelper insertHelper = new MilvusInsertHelper();
 
     /**
      * 提炼对话并存储
@@ -73,7 +75,12 @@ public class MemoryExtractionService {
             DashScopeChatModel chatModel = dashScopeChatModel;
             
             ChatResponse response = chatModel.call(prompt);
-            String extractedFacts = response.getResult().getOutput().getText().trim();
+            String responseText = response.getResult().getOutput().getText();
+            if (responseText == null) {
+                logger.warn("会话 {} 的记忆提炼响应为空", sessionId);
+                return;
+            }
+            String extractedFacts = responseText.trim();
 
             if ("NONE".equalsIgnoreCase(extractedFacts) || extractedFacts.isEmpty()) {
                 logger.debug("会话 {} 的本次历史片段未提取出有价值记忆", sessionId);
@@ -109,6 +116,7 @@ public class MemoryExtractionService {
             // 准备元数据
             Map<String, Object> metadata = new HashMap<>();
             metadata.put("_source", "chat_memory");
+            metadata.put("doc_type", MilvusConstants.DOC_TYPE_CHAT_MEMORY);
             metadata.put("session_id", sessionId);
             metadata.put("timestamp", System.currentTimeMillis());
 
@@ -127,21 +135,13 @@ public class MemoryExtractionService {
             // 生成唯一 ID
             String id = UUID.randomUUID().toString();
 
-            // 构建插入参数
-            List<InsertParam.Field> fields = new ArrayList<>();
-            fields.add(new InsertParam.Field("id", Collections.singletonList(id)));
-            fields.add(new InsertParam.Field("content", Collections.singletonList(content)));
-            fields.add(new InsertParam.Field("vector", Collections.singletonList(vector)));
-            fields.add(new InsertParam.Field("sparse_vector", Collections.singletonList(sparseVector)));
-            
-            com.google.gson.Gson gson = new com.google.gson.Gson();
-            com.google.gson.JsonObject metadataJson = gson.toJsonTree(metadata).getAsJsonObject();
-            fields.add(new InsertParam.Field("metadata", Collections.singletonList(metadataJson)));
-
-            InsertParam insertParam = InsertParam.newBuilder()
-                    .withCollectionName(MilvusConstants.MILVUS_COLLECTION_NAME)
-                    .withFields(fields)
-                    .build();
+            InsertParam insertParam = insertHelper.buildInsertParam(
+                    List.of(id),
+                    List.of(content),
+                    List.of(vector),
+                    List.of(sparseVector),
+                    List.of(metadata)
+            );
 
             R<MutationResult> insertResponse = milvusClient.insert(insertParam);
 

@@ -3,6 +3,8 @@ package org.example.controller;
 import org.example.config.FileUploadConfig;
 import org.example.dto.ApiResponse;
 import org.example.dto.FileUploadRes;
+import org.example.dto.IndexTaskStatus;
+import org.example.service.IndexTaskStatusService;
 import org.example.service.VectorIndexService;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -12,6 +14,8 @@ import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.util.StringUtils;
 import org.springframework.web.bind.annotation.PostMapping;
+import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 import org.springframework.web.multipart.MultipartFile;
@@ -34,6 +38,9 @@ public class FileUploadController {
 
     @Autowired
     private VectorIndexService vectorIndexService;
+
+    @Autowired
+    private IndexTaskStatusService indexTaskStatusService = new IndexTaskStatusService();
 
     @Autowired
     @Qualifier("chatTaskExecutor")
@@ -83,13 +90,21 @@ public class FileUploadController {
 
         logger.info("文件上传成功: {}", filePath);
 
+        IndexTaskStatus indexTask = indexTaskStatusService.createTask(
+                cleanFilename,
+                filePath.toString()
+        );
+
         // 文件落盘后，使用异步线程进行切片和向量化，不阻塞 HTTP 返回
         executor.execute(() -> {
             try {
+                indexTaskStatusService.markRunning(indexTask.getTaskId());
                 logger.info("异步开始为上传文件创建向量索引: {}", filePath);
                 vectorIndexService.indexSingleFile(filePath.toString());
+                indexTaskStatusService.markCompleted(indexTask.getTaskId());
                 logger.info("向量索引创建成功: {}", filePath);
             } catch (Exception e) {
+                indexTaskStatusService.markFailed(indexTask.getTaskId(), e.getMessage());
                 logger.error("向量索引创建失败: {}, 错误: {}", filePath, e.getMessage(), e);
             }
         });
@@ -97,10 +112,21 @@ public class FileUploadController {
         FileUploadRes response = new FileUploadRes(
                 cleanFilename,
                 filePath.toString(),
-                file.getSize()
+                file.getSize(),
+                indexTask.getTaskId(),
+                "INDEXING",
+                "文件已接收，索引处理中"
         );
 
         return ResponseEntity.ok(ApiResponse.success(response));
+    }
+
+    @GetMapping("/api/upload/status/{taskId}")
+    public ResponseEntity<ApiResponse<IndexTaskStatus>> getUploadStatus(@PathVariable String taskId) {
+        return indexTaskStatusService.getStatus(taskId)
+                .map(status -> ResponseEntity.ok(ApiResponse.success(status)))
+                .orElseGet(() -> ResponseEntity.status(HttpStatus.NOT_FOUND)
+                        .body(ApiResponse.error(404, "索引任务不存在")));
     }
 
     private String getFileExtension(String filename) {
