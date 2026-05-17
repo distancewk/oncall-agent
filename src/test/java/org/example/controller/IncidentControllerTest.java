@@ -5,7 +5,9 @@ import org.example.dto.DiagnosisRunRecord;
 import org.example.dto.IncidentRecord;
 import org.example.dto.IncidentSummary;
 import org.example.service.AiOpsService;
+import org.example.service.IncidentCaseService;
 import org.example.service.IncidentService;
+import org.example.service.VectorSearchService;
 import org.junit.jupiter.api.Test;
 import org.springframework.ai.tool.ToolCallbackProvider;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -36,6 +38,9 @@ class IncidentControllerTest {
 
     @MockBean
     private AiOpsService aiOpsService;
+
+    @MockBean
+    private IncidentCaseService incidentCaseService;
 
     @MockBean(name = "dashScopeChatModelAiOps")
     private DashScopeChatModel dashScopeChatModelAiOps;
@@ -117,5 +122,34 @@ class IncidentControllerTest {
                 .andExpect(jsonPath("$.data[0].runId").value("run-1"))
                 .andExpect(jsonPath("$.data[0].status").value("FAILED"))
                 .andExpect(jsonPath("$.data[0].errorMessage").value("Prometheus 查询失败"));
+    }
+
+    @Test
+    void archiveCase_shouldDelegateToIncidentCaseService() throws Exception {
+        IncidentCaseService.ArchiveResult result = new IncidentCaseService.ArchiveResult();
+        result.setSuccess(true);
+        result.setIncidentId("incident-1");
+        result.setMessage("历史案例已写入知识库");
+        when(incidentCaseService.archiveCase("incident-1")).thenReturn(result);
+
+        mockMvc.perform(post("/api/incidents/incident-1/archive-case"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.data.success").value(true))
+                .andExpect(jsonPath("$.data.incidentId").value("incident-1"));
+    }
+
+    @Test
+    void similarCases_shouldReturnIncidentCaseSearchResults() throws Exception {
+        VectorSearchService.SearchResult result = new VectorSearchService.SearchResult();
+        result.setId("case-1");
+        result.setContent("历史案例");
+        result.setScore(0.82f);
+        result.setMetadata("{\"doc_type\":\"incident_case\"}");
+        when(incidentCaseService.findSimilarCases("incident-1", 3)).thenReturn(List.of(result));
+
+        mockMvc.perform(get("/api/incidents/incident-1/similar-cases?topK=3"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.data[0].id").value("case-1"))
+                .andExpect(jsonPath("$.data[0].score").value(0.82));
     }
 }

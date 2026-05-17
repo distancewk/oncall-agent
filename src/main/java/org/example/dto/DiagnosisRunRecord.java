@@ -14,6 +14,9 @@ public class DiagnosisRunRecord {
     private String alertContext;
     private String report;
     private String errorMessage;
+    private String currentStep;
+    private String progressMessage;
+    private String currentTool;
     private List<DiagnosisEvidence> evidence = new ArrayList<>();
 
     public String getRunId() {
@@ -86,6 +89,30 @@ public class DiagnosisRunRecord {
 
     public void setErrorMessage(String errorMessage) {
         this.errorMessage = errorMessage;
+    }
+
+    public String getCurrentStep() {
+        return currentStep;
+    }
+
+    public void setCurrentStep(String currentStep) {
+        this.currentStep = currentStep;
+    }
+
+    public String getProgressMessage() {
+        return progressMessage;
+    }
+
+    public void setProgressMessage(String progressMessage) {
+        this.progressMessage = progressMessage;
+    }
+
+    public String getCurrentTool() {
+        return currentTool;
+    }
+
+    public void setCurrentTool(String currentTool) {
+        this.currentTool = currentTool;
     }
 
     public List<DiagnosisEvidence> getEvidence() {

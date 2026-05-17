@@ -78,6 +78,11 @@ public class VectorSearchService {
                 .getResults();
     }
 
+    public List<SearchResult> searchIncidentCases(String query, int topK) {
+        return searchWithFilter(query, topK, MilvusConstants.INCIDENT_CASE_FILTER_EXPR, "相似历史故障案例")
+                .getResults();
+    }
+
     private SearchTrace searchWithFilter(String query, int topK, String filterExpr, String searchLabel) {
         try {
             int searchK = Math.max(topK, candidateK);

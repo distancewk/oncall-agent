@@ -7,7 +7,9 @@ import org.example.dto.DiagnosisRunRecord;
 import org.example.dto.IncidentRecord;
 import org.example.dto.IncidentSummary;
 import org.example.service.AiOpsService;
+import org.example.service.IncidentCaseService;
 import org.example.service.IncidentService;
+import org.example.service.VectorSearchService;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.ai.tool.ToolCallback;
@@ -18,6 +20,7 @@ import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
+import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
 
@@ -36,6 +39,9 @@ public class IncidentController {
 
     @Autowired
     private AiOpsService aiOpsService;
+
+    @Autowired
+    private IncidentCaseService incidentCaseService;
 
     @Autowired
     @Qualifier("dashScopeChatModelAiOps")
@@ -80,13 +86,25 @@ public class IncidentController {
         return ResponseEntity.ok(ApiResponse.success(run));
     }
 
+    @PostMapping("/{incidentId}/archive-case")
+    public ResponseEntity<ApiResponse<IncidentCaseService.ArchiveResult>> archiveCase(@PathVariable String incidentId) {
+        return ResponseEntity.ok(ApiResponse.success(incidentCaseService.archiveCase(incidentId)));
+    }
+
+    @GetMapping("/{incidentId}/similar-cases")
+    public ResponseEntity<ApiResponse<List<VectorSearchService.SearchResult>>> similarCases(@PathVariable String incidentId,
+                                                                                            @RequestParam(required = false) Integer topK) {
+        return ResponseEntity.ok(ApiResponse.success(incidentCaseService.findSimilarCases(incidentId, topK == null ? 3 : topK)));
+    }
+
     private void executeDiagnosisRun(String incidentId, String runId, String alertContext) {
         try {
             logger.info("开始执行 Incident 诊断, incidentId: {}, runId: {}", incidentId, runId);
             incidentService.markRunRunning(incidentId, runId);
+            String diagnosisContext = prefetchSimilarCasesContext(incidentId, runId, alertContext);
             ToolCallback[] toolCallbacks = tools != null ? tools.getToolCallbacks() : new ToolCallback[0];
             Optional<OverAllState> stateOptional = aiOpsService.executeAiOpsAnalysis(
-                    dashScopeChatModelAiOps, toolCallbacks, alertContext);
+                    dashScopeChatModelAiOps, toolCallbacks, diagnosisContext, incidentId, runId);
             if (stateOptional.isEmpty()) {
                 incidentService.failRun(incidentId, runId, "告警分析执行失败，未获取到有效结果");
                 return;
@@ -101,6 +119,28 @@ public class IncidentController {
         } catch (Exception e) {
             logger.error("Incident 诊断执行异常, incidentId: {}, runId: {}", incidentId, runId, e);
             incidentService.failRun(incidentId, runId, "告警分析异常: " + e.getMessage());
+        }
+    }
+
+    private String prefetchSimilarCasesContext(String incidentId, String runId, String alertContext) {
+        try {
+            Optional<IncidentRecord> incidentOptional = incidentService.getIncident(incidentId);
+            Optional<DiagnosisRunRecord> runOptional = incidentService.getDiagnosisRuns(incidentId)
+                    .flatMap(runs -> runs.stream()
+                            .filter(run -> runId.equals(run.getRunId()))
+                            .findFirst());
+            if (incidentOptional.isEmpty() || runOptional.isEmpty()) {
+                return alertContext;
+            }
+            String enriched = incidentCaseService.prefetchAndAppend(incidentOptional.get(), runOptional.get(), alertContext);
+            if (!enriched.equals(alertContext)) {
+                incidentService.updateRunAlertContext(incidentId, runId, enriched);
+            }
+            return enriched;
+        } catch (Exception e) {
+            logger.warn("相似历史故障案例召回失败，将继续使用原始告警上下文, incidentId: {}, runId: {}",
+                    incidentId, runId, e);
+            return alertContext;
         }
     }
 }

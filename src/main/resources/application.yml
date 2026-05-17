@@ -80,11 +80,11 @@ rag:
 prometheus:
   base-url: ${PROMETHEUS_BASE_URL:http://localhost:9090}
   timeout: 10  # 超时时间（秒）
-  mock-enabled: false  # 是否启用 Mock 模式（用于测试）
+  mock-enabled: ${PROMETHEUS_MOCK_ENABLED:false}  # 是否启用 Mock 模式（用于测试）
 
 # CLS 云日志服务配置
 cls:
-  mock-enabled: false  # 是否启用 Mock 模式（用于测试，设为 true 返回与告警关联的模拟日志数据）
+  mock-enabled: ${CLS_MOCK_ENABLED:false}  # 是否启用 Mock 模式（用于测试，设为 true 返回与告警关联的模拟日志数据）
 
 app:
   cors:

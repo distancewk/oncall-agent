@@ -1,15 +1,20 @@
 package org.example.agent.tool;
 
 import com.fasterxml.jackson.annotation.JsonProperty;
+import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.Data;
+import okhttp3.HttpUrl;
 import okhttp3.OkHttpClient;
 import okhttp3.Request;
 import okhttp3.Response;
 import okhttp3.ResponseBody;
+import org.example.service.DiagnosisEvidenceRecorder;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.ai.tool.annotation.Tool;
+import org.springframework.ai.tool.annotation.ToolParam;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
 
@@ -19,16 +24,20 @@ import java.time.temporal.ChronoUnit;
 import java.util.*;
 
 /**
- * Prometheus 告警查询工具
- * 用于查询 Prometheus 的活动告警信息
+ * Prometheus 告警和指标查询工具
+ * 用于查询 Prometheus 的活动告警与核心指标趋势
  */
 @Component
 public class QueryMetricsTools {
 
     private static final Logger logger = LoggerFactory.getLogger(QueryMetricsTools.class);
+    private static final Set<String> SUPPORTED_TREND_METRICS = Set.of(
+            "cpu_usage", "memory_usage", "error_rate", "p99_latency", "restart_count");
+    private static final Set<String> SUPPORTED_TREND_WINDOWS = Set.of("15m", "1h", "6h");
     
     /** 工具名常量，用于动态构建提示词 */
     public static final String TOOL_QUERY_PROMETHEUS_ALERTS = "queryPrometheusAlerts";
+    public static final String TOOL_QUERY_METRIC_TREND = "queryMetricTrend";
     
     private final ObjectMapper objectMapper = new ObjectMapper();
     
@@ -43,6 +52,9 @@ public class QueryMetricsTools {
     
     @org.springframework.beans.factory.annotation.Autowired
     private OkHttpClient httpClient;
+
+    @Autowired(required = false)
+    private DiagnosisEvidenceRecorder diagnosisEvidenceRecorder;
     
     @jakarta.annotation.PostConstruct
     public void init() {
@@ -57,6 +69,51 @@ public class QueryMetricsTools {
             "This tool retrieves all currently active/firing alerts including their labels, annotations, state, and values. " +
             "Use this tool when you need to check what alerts are currently firing, investigate alert conditions, or monitor alert status.")
     public String queryPrometheusAlerts() {
+        if (diagnosisEvidenceRecorder != null) {
+            return diagnosisEvidenceRecorder.recordToolCall(
+                    TOOL_QUERY_PROMETHEUS_ALERTS,
+                    "{\"endpoint\":\"/api/v1/alerts\"}",
+                    "active alerts",
+                    this::doQueryPrometheusAlerts);
+        }
+        return doQueryPrometheusAlerts();
+    }
+
+    /**
+     * 查询核心运维指标趋势。
+     * 支持 CPU、内存、错误率、P99 延迟和重启次数，用于诊断时补齐时间序列证据。
+     */
+    @Tool(description = "Query Prometheus metric trend over a time window. " +
+            "Supported metrics: cpu_usage, memory_usage, error_rate, p99_latency, restart_count. " +
+            "Use this before diagnosing CPU, memory, latency, error-rate, or restart alerts. " +
+            "Returns points, PromQL query, min/max/avg/latest, direction, anomaly flag, and message.")
+    public String queryMetricTrend(
+            @ToolParam(description = "Metric name. Supported: cpu_usage, memory_usage, error_rate, p99_latency, restart_count")
+            String metric,
+            @ToolParam(description = "Service name, for example payment-service. Optional but recommended")
+            String service,
+            @ToolParam(description = "Instance or pod name, for example pod-payment-service-xxx. Optional")
+            String instance,
+            @ToolParam(description = "Trend window. Supported: 15m, 1h, 6h. Invalid or blank values default to 1h")
+            String window,
+            @ToolParam(description = "Prometheus query_range step, for example 30s, 1m, 5m. Blank uses the default for the selected window")
+            String step) {
+        String normalizedMetric = normalizeMetric(metric);
+        String normalizedWindow = normalizeWindow(window);
+        String normalizedStep = normalizeStep(normalizedWindow, step);
+        String queryParams = buildTrendQueryParams(normalizedMetric, service, instance, normalizedWindow, normalizedStep);
+
+        if (diagnosisEvidenceRecorder != null) {
+            return diagnosisEvidenceRecorder.recordToolCall(
+                    TOOL_QUERY_METRIC_TREND,
+                    queryParams,
+                    normalizedWindow,
+                    () -> doQueryMetricTrend(normalizedMetric, service, instance, normalizedWindow, normalizedStep));
+        }
+        return doQueryMetricTrend(normalizedMetric, service, instance, normalizedWindow, normalizedStep);
+    }
+
+    private String doQueryPrometheusAlerts() {
         logger.info("开始查询 Prometheus 活动告警, Mock模式: {}", mockEnabled);
         
         try {
@@ -114,6 +171,41 @@ public class QueryMetricsTools {
         } catch (Exception e) {
             logger.error("查询 Prometheus 告警失败", e);
             return buildErrorResponse("查询失败", e.getMessage());
+        }
+    }
+
+    private String doQueryMetricTrend(String metric, String service, String instance, String window, String step) {
+        logger.info("开始查询指标趋势, metric: {}, service: {}, instance: {}, window: {}, step: {}, Mock模式: {}",
+                metric, service, instance, window, step, mockEnabled);
+
+        if (!SUPPORTED_TREND_METRICS.contains(metric)) {
+            return buildMetricTrendErrorResponse(metric, window, null,
+                    "不支持的指标: " + metric + "。支持的指标: " + String.join(", ", SUPPORTED_TREND_METRICS));
+        }
+
+        String query = buildMetricTrendQuery(metric, service, instance);
+        try {
+            List<MetricPoint> points = mockEnabled
+                    ? buildMockTrendPoints(metric, window, step)
+                    : fetchPrometheusTrend(query, window, step);
+            MetricTrendSummary summary = summarizeTrend(metric, points);
+
+            MetricTrendOutput output = new MetricTrendOutput();
+            output.setSuccess(true);
+            output.setMetric(metric);
+            output.setWindow(window);
+            output.setStep(step);
+            output.setQuery(query);
+            output.setPoints(points);
+            output.setSummary(summary);
+            output.setMessage(buildMetricTrendMessage(metric, window, summary, points));
+
+            logger.info("指标趋势查询完成, metric: {}, points: {}, anomalous: {}",
+                    metric, points.size(), summary.isAnomalous());
+            return objectMapper.writerWithDefaultPrettyPrinter().writeValueAsString(output);
+        } catch (Exception e) {
+            logger.error("查询指标趋势失败, metric: {}, query: {}", metric, query, e);
+            return buildMetricTrendErrorResponse(metric, window, query, e.getMessage());
         }
     }
     
@@ -194,6 +286,214 @@ public class QueryMetricsTools {
             return objectMapper.readValue(responseBody, PrometheusAlertsResult.class);
         }
     }
+
+    private List<MetricPoint> fetchPrometheusTrend(String query, String window, String step) throws Exception {
+        if (httpClient == null) {
+            throw new IllegalStateException("OkHttpClient 未初始化，无法查询 Prometheus");
+        }
+        String baseUrl = prometheusBaseUrl == null ? "" : prometheusBaseUrl.trim();
+        if (baseUrl.endsWith("/")) {
+            baseUrl = baseUrl.substring(0, baseUrl.length() - 1);
+        }
+        HttpUrl parsedUrl = HttpUrl.parse(baseUrl + "/api/v1/query_range");
+        if (parsedUrl == null) {
+            throw new IllegalArgumentException("Prometheus base-url 无效: " + prometheusBaseUrl);
+        }
+
+        Instant end = Instant.now();
+        Instant start = end.minus(windowDuration(window));
+        HttpUrl url = parsedUrl.newBuilder()
+                .addQueryParameter("query", query)
+                .addQueryParameter("start", String.valueOf(start.getEpochSecond()))
+                .addQueryParameter("end", String.valueOf(end.getEpochSecond()))
+                .addQueryParameter("step", step)
+                .build();
+
+        logger.debug("请求 Prometheus query_range: {}", url);
+        Request request = new Request.Builder()
+                .url(url)
+                .get()
+                .build();
+
+        try (Response response = httpClient.newCall(request).execute();
+             ResponseBody body = response.body()) {
+            if (!response.isSuccessful()) {
+                throw new RuntimeException("HTTP 请求失败: " + response.code());
+            }
+            if (body == null) {
+                throw new RuntimeException("Prometheus query_range 返回空响应体");
+            }
+            return parsePrometheusTrendPoints(body.string());
+        }
+    }
+
+    private List<MetricPoint> parsePrometheusTrendPoints(String responseBody) throws Exception {
+        JsonNode root = objectMapper.readTree(responseBody);
+        if (!"success".equals(root.path("status").asText())) {
+            String error = root.path("error").asText("Prometheus query_range 返回非成功状态");
+            throw new RuntimeException(error);
+        }
+
+        JsonNode result = root.path("data").path("result");
+        if (!result.isArray() || result.isEmpty()) {
+            return Collections.emptyList();
+        }
+
+        List<MetricPoint> points = new ArrayList<>();
+        for (JsonNode series : result) {
+            JsonNode values = series.path("values");
+            if (!values.isArray()) {
+                continue;
+            }
+            for (JsonNode value : values) {
+                if (!value.isArray() || value.size() < 2) {
+                    continue;
+                }
+                double timestamp = value.get(0).asDouble();
+                double metricValue = parseDouble(value.get(1).asText(), Double.NaN);
+                if (Double.isNaN(metricValue) || Double.isInfinite(metricValue)) {
+                    continue;
+                }
+                points.add(new MetricPoint(Instant.ofEpochMilli((long) (timestamp * 1000)).toString(), round(metricValue)));
+            }
+        }
+        return points;
+    }
+
+    private String buildMetricTrendQuery(String metric, String service, String instance) {
+        String appSelector = buildSelector("job", service, "instance", instance, Collections.emptyMap());
+        String appErrorSelector = buildSelector("job", service, "instance", instance, Map.of("status", "=~\"5..\""));
+        String podSelector = buildSelector("pod", firstNonBlank(instance, service), null, null, Map.of("container", "!\"\""));
+
+        return switch (metric) {
+            case "cpu_usage" -> "100 * avg(rate(container_cpu_usage_seconds_total" + podSelector + "[5m]))";
+            case "memory_usage" -> "100 * avg(container_memory_working_set_bytes" + podSelector + ") / "
+                    + "clamp_min(avg(container_spec_memory_limit_bytes" + podSelector + "), 1)";
+            case "error_rate" -> "sum(rate(http_requests_total" + appErrorSelector + "[5m])) / "
+                    + "clamp_min(sum(rate(http_requests_total" + appSelector + "[5m])), 1) * 100";
+            case "p99_latency" -> "histogram_quantile(0.99, sum(rate(http_request_duration_seconds_bucket"
+                    + appSelector + "[5m])) by (le))";
+            case "restart_count" -> "sum(increase(kube_pod_container_status_restarts_total"
+                    + buildSelector("pod", firstNonBlank(instance, service), null, null, Collections.emptyMap()) + "[5m]))";
+            default -> metric;
+        };
+    }
+
+    private String buildSelector(String primaryLabel,
+                                 String primaryValue,
+                                 String secondaryLabel,
+                                 String secondaryValue,
+                                 Map<String, String> extraMatchers) {
+        List<String> matchers = new ArrayList<>();
+        if (primaryLabel != null && primaryValue != null && !primaryValue.isBlank()) {
+            matchers.add(primaryLabel + "=~\"" + regexContains(primaryValue) + "\"");
+        }
+        if (secondaryLabel != null && secondaryValue != null && !secondaryValue.isBlank()) {
+            matchers.add(secondaryLabel + "=~\"" + regexContains(secondaryValue) + "\"");
+        }
+        for (Map.Entry<String, String> entry : extraMatchers.entrySet()) {
+            matchers.add(entry.getKey() + entry.getValue());
+        }
+        return matchers.isEmpty() ? "{}" : "{" + String.join(",", matchers) + "}";
+    }
+
+    private List<MetricPoint> buildMockTrendPoints(String metric, String window, String step) {
+        int count = mockPointCount(window, step);
+        Instant start = Instant.now().minus(windowDuration(window));
+        Duration interval = count <= 1 ? Duration.ZERO : windowDuration(window).dividedBy(count - 1);
+        List<MetricPoint> points = new ArrayList<>();
+
+        for (int i = 0; i < count; i++) {
+            double ratio = count <= 1 ? 1.0 : (double) i / (count - 1);
+            double value = switch (metric) {
+                case "cpu_usage" -> 58.0 + ratio * 36.0;
+                case "memory_usage" -> 64.0 + ratio * 28.0;
+                case "error_rate" -> ratio < 0.75 ? 0.2 + ratio * 0.8 : 2.0 + (ratio - 0.75) * 40.0;
+                case "p99_latency" -> 0.8 + ratio * ratio * 3.6;
+                case "restart_count" -> ratio < 0.55 ? 0.0 : Math.floor((ratio - 0.55) * 8.0);
+                default -> 0.0;
+            };
+            points.add(new MetricPoint(start.plus(interval.multipliedBy(i)).toString(), round(value)));
+        }
+        return points;
+    }
+
+    private MetricTrendSummary summarizeTrend(String metric, List<MetricPoint> points) {
+        MetricTrendSummary summary = new MetricTrendSummary();
+        if (points == null || points.isEmpty()) {
+            summary.setMin(0);
+            summary.setMax(0);
+            summary.setAvg(0);
+            summary.setLatest(0);
+            summary.setDirection("stable");
+            summary.setAnomalous(false);
+            return summary;
+        }
+
+        double min = Double.MAX_VALUE;
+        double max = -Double.MAX_VALUE;
+        double total = 0;
+        for (MetricPoint point : points) {
+            double value = point.getValue();
+            min = Math.min(min, value);
+            max = Math.max(max, value);
+            total += value;
+        }
+
+        double first = points.get(0).getValue();
+        double latest = points.get(points.size() - 1).getValue();
+        double avg = total / points.size();
+
+        summary.setMin(round(min));
+        summary.setMax(round(max));
+        summary.setAvg(round(avg));
+        summary.setLatest(round(latest));
+        summary.setDirection(detectDirection(first, latest, max, avg));
+        summary.setAnomalous(isAnomalous(metric, latest, max));
+        return summary;
+    }
+
+    private String detectDirection(double first, double latest, double max, double avg) {
+        double delta = latest - first;
+        double base = Math.max(Math.abs(first), 1.0);
+        if (max > Math.max(avg * 2.0, first + base * 0.8) && latest > avg * 1.3) {
+            return "spiking";
+        }
+        if (Math.abs(delta) <= base * 0.08) {
+            return "stable";
+        }
+        return delta > 0 ? "increasing" : "decreasing";
+    }
+
+    private boolean isAnomalous(String metric, double latest, double max) {
+        return switch (metric) {
+            case "cpu_usage" -> latest >= 80 || max >= 90;
+            case "memory_usage" -> latest >= 85 || max >= 90;
+            case "error_rate" -> latest >= 1 || max >= 5;
+            case "p99_latency" -> latest >= 3 || max >= 3;
+            case "restart_count" -> latest > 0 || max > 0;
+            default -> false;
+        };
+    }
+
+    private String buildMetricTrendMessage(String metric, String window, MetricTrendSummary summary, List<MetricPoint> points) {
+        if (points == null || points.isEmpty()) {
+            return metric + " 最近 " + window + " 未查询到趋势点";
+        }
+        return String.format(Locale.ROOT,
+                "%s 最近 %s %s，latest=%.2f，max=%.2f，avg=%.2f，anomalous=%s",
+                metric, window, directionText(summary.getDirection()), summary.getLatest(), summary.getMax(),
+                summary.getAvg(), summary.isAnomalous());
+    }
+
+    private String directionText(String direction) {
+        return switch (direction) {
+            case "increasing" -> "持续上升";
+            case "decreasing" -> "持续下降";
+            case "spiking" -> "出现突增";
+            default -> "整体平稳";
+        };
+    }
     
     /**
      * 计算从 activeAt 到现在的持续时间
@@ -218,6 +518,126 @@ public class QueryMetricsTools {
             logger.warn("解析时间失败: {}", activeAtStr, e);
             return "unknown";
         }
+    }
+
+    private String normalizeMetric(String metric) {
+        return metric == null ? "" : metric.trim().toLowerCase(Locale.ROOT);
+    }
+
+    private String normalizeWindow(String window) {
+        String normalized = window == null ? "" : window.trim().toLowerCase(Locale.ROOT);
+        return SUPPORTED_TREND_WINDOWS.contains(normalized) ? normalized : "1h";
+    }
+
+    private String normalizeStep(String window, String step) {
+        String normalized = step == null ? "" : step.trim().toLowerCase(Locale.ROOT);
+        if (normalized.matches("\\d+[smh]")) {
+            return normalized;
+        }
+        return switch (window) {
+            case "15m" -> "30s";
+            case "6h" -> "5m";
+            default -> "1m";
+        };
+    }
+
+    private Duration windowDuration(String window) {
+        return switch (normalizeWindow(window)) {
+            case "15m" -> Duration.ofMinutes(15);
+            case "6h" -> Duration.ofHours(6);
+            default -> Duration.ofHours(1);
+        };
+    }
+
+    private int mockPointCount(String window, String step) {
+        long windowSeconds = windowDuration(window).toSeconds();
+        long stepSeconds = parseStepSeconds(step);
+        long count = stepSeconds <= 0 ? 20 : windowSeconds / stepSeconds + 1;
+        return (int) Math.max(8, Math.min(count, 80));
+    }
+
+    private long parseStepSeconds(String step) {
+        if (step == null || !step.matches("\\d+[smh]")) {
+            return 60;
+        }
+        long value = Long.parseLong(step.substring(0, step.length() - 1));
+        char unit = step.charAt(step.length() - 1);
+        return switch (unit) {
+            case 's' -> value;
+            case 'h' -> value * 3600;
+            default -> value * 60;
+        };
+    }
+
+    private String buildTrendQueryParams(String metric, String service, String instance, String window, String step) {
+        try {
+            Map<String, Object> params = new LinkedHashMap<>();
+            params.put("metric", metric);
+            params.put("service", service);
+            params.put("instance", instance);
+            params.put("window", window);
+            params.put("step", step);
+            return objectMapper.writeValueAsString(params);
+        } catch (Exception e) {
+            return "{}";
+        }
+    }
+
+    private String buildMetricTrendErrorResponse(String metric, String window, String query, String error) {
+        try {
+            MetricTrendOutput output = new MetricTrendOutput();
+            output.setSuccess(false);
+            output.setMetric(metric);
+            output.setWindow(window);
+            output.setQuery(query);
+            output.setPoints(Collections.emptyList());
+            output.setSummary(summarizeTrend(metric, Collections.emptyList()));
+            output.setMessage(error == null || error.isBlank() ? "查询指标趋势失败" : error);
+            output.setError(error);
+            return objectMapper.writerWithDefaultPrettyPrinter().writeValueAsString(output);
+        } catch (Exception e) {
+            return String.format("{\"success\":false,\"metric\":\"%s\",\"window\":\"%s\",\"message\":\"%s\",\"error\":\"%s\"}",
+                    metric, window, error, error);
+        }
+    }
+
+    private String firstNonBlank(String first, String second) {
+        if (first != null && !first.isBlank()) {
+            return first;
+        }
+        return second;
+    }
+
+    private String regexContains(String value) {
+        return ".*" + value.trim()
+                .replace("\\", "\\\\")
+                .replace("\"", "\\\"")
+                .replace(".", "\\.")
+                .replace("*", "\\*")
+                .replace("+", "\\+")
+                .replace("?", "\\?")
+                .replace("[", "\\[")
+                .replace("]", "\\]")
+                .replace("(", "\\(")
+                .replace(")", "\\)")
+                .replace("{", "\\{")
+                .replace("}", "\\}")
+                .replace("|", "\\|")
+                .replace("^", "\\^")
+                .replace("$", "\\$")
+                + ".*";
+    }
+
+    private double parseDouble(String value, double defaultValue) {
+        try {
+            return Double.parseDouble(value);
+        } catch (Exception e) {
+            return defaultValue;
+        }
+    }
+
+    private double round(double value) {
+        return Math.round(value * 100.0) / 100.0;
     }
     
     /**
@@ -302,5 +722,73 @@ public class QueryMetricsTools {
         
         @JsonProperty("error")
         private String error;
+    }
+
+    @Data
+    public static class MetricTrendOutput {
+        @JsonProperty("success")
+        private boolean success;
+
+        @JsonProperty("metric")
+        private String metric;
+
+        @JsonProperty("window")
+        private String window;
+
+        @JsonProperty("step")
+        private String step;
+
+        @JsonProperty("query")
+        private String query;
+
+        @JsonProperty("points")
+        private List<MetricPoint> points = new ArrayList<>();
+
+        @JsonProperty("summary")
+        private MetricTrendSummary summary;
+
+        @JsonProperty("message")
+        private String message;
+
+        @JsonProperty("error")
+        private String error;
+    }
+
+    @Data
+    public static class MetricPoint {
+        @JsonProperty("timestamp")
+        private String timestamp;
+
+        @JsonProperty("value")
+        private double value;
+
+        public MetricPoint() {
+        }
+
+        public MetricPoint(String timestamp, double value) {
+            this.timestamp = timestamp;
+            this.value = value;
+        }
+    }
+
+    @Data
+    public static class MetricTrendSummary {
+        @JsonProperty("min")
+        private double min;
+
+        @JsonProperty("max")
+        private double max;
+
+        @JsonProperty("avg")
+        private double avg;
+
+        @JsonProperty("latest")
+        private double latest;
+
+        @JsonProperty("direction")
+        private String direction;
+
+        @JsonProperty("anomalous")
+        private boolean anomalous;
     }
 }

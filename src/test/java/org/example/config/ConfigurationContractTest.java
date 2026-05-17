@@ -25,9 +25,48 @@ class ConfigurationContractTest {
         assertTrue(yaml.contains("port: ${MILVUS_PORT:19530}"));
         assertTrue(yaml.contains("path: ${FILE_UPLOAD_PATH:./uploads}"));
         assertTrue(yaml.contains("base-url: ${PROMETHEUS_BASE_URL:http://localhost:9090}"));
+        assertTrue(yaml.contains("mock-enabled: ${PROMETHEUS_MOCK_ENABLED:false}"));
+        assertTrue(yaml.contains("mock-enabled: ${CLS_MOCK_ENABLED:false}"));
         assertTrue(yaml.contains("search-ef: ${RAG_SEARCH_EF:64}"));
         assertTrue(yaml.contains("enabled: ${APP_SECURITY_ENABLED:false}"));
         assertTrue(yaml.contains("webhook-secret: ${APP_WEBHOOK_SECRET:}"));
+    }
+
+    @Test
+    void applicationDevYaml_shouldEnableLocalAIOpsMocks() throws Exception {
+        String yaml = Files.readString(Path.of("src/main/resources/application-dev.yml"));
+
+        assertTrue(yaml.contains("simulate-enabled: true"));
+        assertTrue(yaml.contains("prometheus:"));
+        assertTrue(yaml.contains("mock-enabled: ${PROMETHEUS_MOCK_ENABLED:true}"));
+        assertTrue(yaml.contains("cls:"));
+        assertTrue(yaml.contains("mock-enabled: ${CLS_MOCK_ENABLED:true}"));
+    }
+
+    @Test
+    void applicationMcpYaml_shouldConfigureTavilyAndDbHubStdioConnections() throws Exception {
+        String yaml = Files.readString(Path.of("src/main/resources/application-mcp.yml"));
+
+        assertTrue(yaml.contains("enabled: ${MCP_CLIENT_ENABLED:true}"));
+        assertTrue(yaml.contains("tavily:"));
+        assertTrue(yaml.contains("tavily-mcp@latest"));
+        assertTrue(yaml.contains("TAVILY_API_KEY: ${TAVILY_API_KEY:}"));
+        assertTrue(yaml.contains("dbhub:"));
+        assertTrue(yaml.contains("@bytebase/dbhub@latest"));
+        assertTrue(yaml.contains("--config"));
+        assertTrue(yaml.contains("${MCP_DBHUB_CONFIG:./config/dbhub.toml}"));
+    }
+
+    @Test
+    void dbHubConfig_shouldProvideReadonlyMultiDatabaseExamples() throws Exception {
+        String config = Files.readString(Path.of("config/dbhub.toml"));
+
+        assertTrue(config.contains("readonly = true"));
+        assertTrue(config.contains("sqlite:///:memory:"));
+        assertTrue(config.contains("postgres://"));
+        assertTrue(config.contains("mysql://"));
+        assertTrue(config.contains("mariadb://"));
+        assertTrue(config.contains("sqlserver://"));
     }
 
     @Test
@@ -64,6 +103,8 @@ class ConfigurationContractTest {
 
         assertTrue(compose.contains("milvus:\n        condition: service_healthy"));
         assertTrue(compose.contains("redis:\n        condition: service_healthy"));
+        assertTrue(compose.contains("PROMETHEUS_MOCK_ENABLED: ${PROMETHEUS_MOCK_ENABLED:-true}"));
+        assertTrue(compose.contains("CLS_MOCK_ENABLED: ${CLS_MOCK_ENABLED:-true}"));
     }
 
     @Test
@@ -73,5 +114,18 @@ class ConfigurationContractTest {
 
         assertTrue(index.contains("dompurify"));
         assertTrue(app.contains("DOMPurify.sanitize"));
+    }
+
+    @Test
+    void frontend_shouldRenderMetricTrendChartForTrendEvidence() throws Exception {
+        String app = Files.readString(Path.of("src/main/resources/static/app.js"));
+        String styles = Files.readString(Path.of("src/main/resources/static/styles.css"));
+
+        assertTrue(app.contains("renderMetricTrendChart"));
+        assertTrue(app.contains("extractMetricTrendPayload"));
+        assertTrue(app.contains("queryMetricTrend"));
+        assertTrue(app.contains("trend-chart-svg"));
+        assertTrue(styles.contains(".metric-trend-chart"));
+        assertTrue(styles.contains(".trend-chart-svg"));
     }
 }

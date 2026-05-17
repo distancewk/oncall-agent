@@ -7,7 +7,9 @@ import org.example.dto.DiagnosisRunRecord;
 import org.example.dto.IncidentRecord;
 import org.example.service.AiOpsService;
 import org.example.service.AlertService;
+import org.example.service.IncidentCaseService;
 import org.example.service.IncidentService;
+import org.example.service.MetricTrendPrefetchService;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.ai.tool.ToolCallback;
@@ -37,6 +39,12 @@ public class WebhookController {
 
     @Autowired
     private IncidentService incidentService;
+
+    @Autowired(required = false)
+    private MetricTrendPrefetchService metricTrendPrefetchService;
+
+    @Autowired(required = false)
+    private IncidentCaseService incidentCaseService;
 
     @Autowired
     @Qualifier("dashScopeChatModelAiOps")
@@ -71,9 +79,12 @@ public class WebhookController {
                         alertId, incident.getId(), run.getRunId());
                 incidentService.markRunRunning(incident.getId(), run.getRunId());
                 DashScopeChatModel chatModel = dashScopeChatModel;
+                String diagnosisContext = prefetchSimilarCasesContext(incident, run, alertContext);
+                diagnosisContext = prefetchMetricTrendContext(incident, run, diagnosisContext);
 
                 ToolCallback[] toolCallbacks = tools != null ? tools.getToolCallbacks() : new ToolCallback[0];
-                Optional<OverAllState> overAllStateOptional = aiOpsService.executeAiOpsAnalysis(chatModel, toolCallbacks, alertContext);
+                Optional<OverAllState> overAllStateOptional = aiOpsService.executeAiOpsAnalysis(
+                        chatModel, toolCallbacks, diagnosisContext, incident.getId(), run.getRunId());
 
                 if (overAllStateOptional.isPresent()) {
                     Optional<String> finalReport = aiOpsService.extractFinalReport(overAllStateOptional.get());
@@ -104,5 +115,39 @@ public class WebhookController {
         });
 
         return ResponseEntity.ok("Alert received and processing triggered.");
+    }
+
+    private String prefetchMetricTrendContext(IncidentRecord incident, DiagnosisRunRecord run, String alertContext) {
+        if (metricTrendPrefetchService == null) {
+            return alertContext;
+        }
+        try {
+            String enrichedContext = metricTrendPrefetchService.prefetchAndAppend(incident, run, alertContext);
+            if (!enrichedContext.equals(alertContext)) {
+                incidentService.updateRunAlertContext(incident.getId(), run.getRunId(), enrichedContext);
+            }
+            return enrichedContext;
+        } catch (Exception e) {
+            logger.warn("指标趋势预取失败，将使用原始告警上下文继续诊断, incidentId: {}, runId: {}",
+                    incident.getId(), run.getRunId(), e);
+            return alertContext;
+        }
+    }
+
+    private String prefetchSimilarCasesContext(IncidentRecord incident, DiagnosisRunRecord run, String alertContext) {
+        if (incidentCaseService == null) {
+            return alertContext;
+        }
+        try {
+            String enrichedContext = incidentCaseService.prefetchAndAppend(incident, run, alertContext);
+            if (!enrichedContext.equals(alertContext)) {
+                incidentService.updateRunAlertContext(incident.getId(), run.getRunId(), enrichedContext);
+            }
+            return enrichedContext;
+        } catch (Exception e) {
+            logger.warn("相似历史故障案例召回失败，将使用原始告警上下文继续诊断, incidentId: {}, runId: {}",
+                    incident.getId(), run.getRunId(), e);
+            return alertContext;
+        }
     }
 }

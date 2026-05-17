@@ -3,10 +3,12 @@ package org.example.agent.tool;
 import com.fasterxml.jackson.annotation.JsonProperty;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.Data;
+import org.example.service.DiagnosisEvidenceRecorder;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.ai.tool.annotation.Tool;
 import org.springframework.ai.tool.annotation.ToolParam;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
 
@@ -43,6 +45,9 @@ public class QueryLogsTools {
     
     @Value("${cls.mock-enabled:false}")
     private boolean mockEnabled;
+
+    @Autowired(required = false)
+    private DiagnosisEvidenceRecorder diagnosisEvidenceRecorder;
     
     private static final DateTimeFormatter FORMATTER = DateTimeFormatter
             .ofPattern("yyyy-MM-dd HH:mm:ss")
@@ -55,12 +60,23 @@ public class QueryLogsTools {
     
     /**
      * 获取可用的日志主题列表
-     * 用于查询前先了解有哪些日志主题可供查询
+     * 用于日志主题无法从告警类型推断时再发现可用主题
      */
     @Tool(description = "Get all available log topics and their descriptions. " +
-            "Call this tool first before querying logs to understand what log topics are available. " +
+            "Use this tool only when the log topic cannot be inferred from alert type or planner context. " +
             "Returns a list of log topics with their names, descriptions, and example queries.")
     public String getAvailableLogTopics() {
+        if (diagnosisEvidenceRecorder != null) {
+            return diagnosisEvidenceRecorder.recordToolCall(
+                    TOOL_GET_AVAILABLE_LOG_TOPICS,
+                    "{}",
+                    "available log topics",
+                    this::doGetAvailableLogTopics);
+        }
+        return doGetAvailableLogTopics();
+    }
+
+    private String doGetAvailableLogTopics() {
         logger.info("获取可用的日志主题列表");
         
         try {
@@ -155,7 +171,7 @@ public class QueryLogsTools {
     
     @Tool(description = "Query logs from Cloud Log Service (CLS). " +
             "Use this tool to search application logs, system metrics, and other log data. " +
-            "IMPORTANT: Before calling this tool, you should call getAvailableLogTopics to understand what log topics are available. " +
+            "Call getAvailableLogTopics only when the log topic cannot be inferred from the alert type or planner context. " +
             "Available log topics: " +
             "1) 'system-metrics' - System metrics logs (CPU, memory, disk usage, etc. Related to HighCPUUsage, HighMemoryUsage, HighDiskUsage alerts); " +
             "2) 'application-logs' - Application logs (error logs, slow request logs, downstream dependency logs. Related to ServiceUnavailable, SlowResponse alerts); " +
@@ -169,7 +185,17 @@ public class QueryLogsTools {
             @ToolParam(description = "日志主题，如 system-metrics, application-logs, database-slow-query, system-events，也支持 CLS TopicId") String logTopic,
             @ToolParam(description = "查询条件，支持 Lucene 语法，如 level:ERROR OR cpu_usage:>80；为空时返回该主题近 5 条核心日志") String query,
             @ToolParam(description = "返回日志条数，默认20，最大100") Integer limit) {
-        
+        if (diagnosisEvidenceRecorder != null) {
+            return diagnosisEvidenceRecorder.recordToolCall(
+                    TOOL_QUERY_LOGS,
+                    buildQueryParams(region, logTopic, query, limit),
+                    "recent logs",
+                    () -> doQueryLogs(region, logTopic, query, limit));
+        }
+        return doQueryLogs(region, logTopic, query, limit);
+    }
+
+    private String doQueryLogs(String region, String logTopic, String query, Integer limit) {
         int actualLimit = (limit == null || limit <= 0) ? 20 : Math.min(limit, 100);
         
         String safeQuery = query == null ? "" : query;
@@ -604,6 +630,23 @@ public class QueryLogsTools {
         } catch (Exception e) {
             return String.format("{\"success\":false,\"message\":\"%s\"}", message);
         }
+    }
+
+    private String buildQueryParams(String region, String logTopic, String query, Integer limit) {
+        try {
+            Map<String, Object> params = new HashMap<>();
+            params.put("region", region);
+            params.put("logTopic", logTopic);
+            params.put("query", query);
+            params.put("limit", limit);
+            return objectMapper.writeValueAsString(params);
+        } catch (Exception e) {
+            return "{\"logTopic\":\"" + escapeJson(logTopic) + "\",\"query\":\"" + escapeJson(query) + "\"}";
+        }
+    }
+
+    private String escapeJson(String value) {
+        return value == null ? "" : value.replace("\\", "\\\\").replace("\"", "\\\"");
     }
     
     // ==================== 数据模型 ====================

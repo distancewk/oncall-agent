@@ -1,0 +1,78 @@
+[[sources]]
+id = "demo_sqlite"
+description = "Safe in-memory SQLite source for local MCP startup tests"
+dsn = "sqlite:///:memory:"
+
+[[tools]]
+name = "execute_sql"
+source = "demo_sqlite"
+readonly = true
+max_rows = 200
+
+[[tools]]
+name = "search_objects"
+source = "demo_sqlite"
+
+# Example: PostgreSQL
+# [[sources]]
+# id = "prod_postgres"
+# description = "Production PostgreSQL read-only connection"
+# dsn = "postgres://readonly_user:password@postgres.example.com:5432/app?sslmode=require"
+#
+# [[tools]]
+# name = "execute_sql"
+# source = "prod_postgres"
+# readonly = true
+# max_rows = 200
+#
+# [[tools]]
+# name = "search_objects"
+# source = "prod_postgres"
+
+# Example: MySQL
+# [[sources]]
+# id = "prod_mysql"
+# description = "Production MySQL read-only connection"
+# dsn = "mysql://readonly_user:password@mysql.example.com:3306/app"
+#
+# [[tools]]
+# name = "execute_sql"
+# source = "prod_mysql"
+# readonly = true
+# max_rows = 200
+#
+# [[tools]]
+# name = "search_objects"
+# source = "prod_mysql"
+
+# Example: MariaDB
+# [[sources]]
+# id = "prod_mariadb"
+# description = "Production MariaDB read-only connection"
+# dsn = "mariadb://readonly_user:password@mariadb.example.com:3306/app"
+#
+# [[tools]]
+# name = "execute_sql"
+# source = "prod_mariadb"
+# readonly = true
+# max_rows = 200
+#
+# [[tools]]
+# name = "search_objects"
+# source = "prod_mariadb"
+
+# Example: SQL Server
+# [[sources]]
+# id = "prod_sqlserver"
+# description = "Production SQL Server read-only connection"
+# dsn = "sqlserver://readonly_user:password@sqlserver.example.com:1433?database=app"
+#
+# [[tools]]
+# name = "execute_sql"
+# source = "prod_sqlserver"
+# readonly = true
+# max_rows = 200
+#
+# [[tools]]
+# name = "search_objects"
+# source = "prod_sqlserver"

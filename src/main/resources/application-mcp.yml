@@ -1,0 +1,27 @@
+spring:
+  ai:
+    mcp:
+      client:
+        enabled: ${MCP_CLIENT_ENABLED:true}
+        name: superbizagent-mcp-client
+        version: 1.0.0
+        type: sync
+        request-timeout: ${MCP_REQUEST_TIMEOUT:60s}
+        stdio:
+          connections:
+            tavily:
+              command: ${MCP_TAVILY_COMMAND:npx}
+              args:
+                - -y
+                - tavily-mcp@latest
+              env:
+                TAVILY_API_KEY: ${TAVILY_API_KEY:}
+            dbhub:
+              command: ${MCP_DBHUB_COMMAND:npx}
+              args:
+                - -y
+                - @bytebase/dbhub@latest
+                - --transport
+                - stdio
+                - --config
+                - ${MCP_DBHUB_CONFIG:./config/dbhub.toml}

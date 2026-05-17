@@ -16,7 +16,11 @@ public class MilvusConstants {
 
     public static final String DOC_TYPE_CHAT_MEMORY = "chat_memory";
 
+    public static final String DOC_TYPE_INCIDENT_CASE = "incident_case";
+
     public static final String DOCUMENT_FILTER_EXPR = "metadata[\"doc_type\"] == \"document\"";
+
+    public static final String INCIDENT_CASE_FILTER_EXPR = "metadata[\"doc_type\"] == \"incident_case\"";
 
     public static String chatMemoryFilterExpr(String sessionId) {
         return "metadata[\"doc_type\"] == \"chat_memory\" && metadata[\"session_id\"] == \""

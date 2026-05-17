@@ -1,6 +1,7 @@
 package org.example.agent.tool;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import org.example.service.DiagnosisEvidenceRecorder;
 import org.example.service.VectorSearchService;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -11,6 +12,8 @@ import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
 
 import java.util.List;
+import java.util.HashMap;
+import java.util.Map;
 
 /**
  * 内部文档查询工具
@@ -30,6 +33,9 @@ public class InternalDocsTools {
     private int topK = 3; // 默认值
     
     private final ObjectMapper objectMapper = new ObjectMapper();
+
+    @Autowired(required = false)
+    private DiagnosisEvidenceRecorder diagnosisEvidenceRecorder;
     
     /**
      * 构造函数注入依赖
@@ -53,8 +59,17 @@ public class InternalDocsTools {
     public String queryInternalDocs(
             @ToolParam(description = "Search query describing what information you are looking for") 
             String query) {
-        
+        if (diagnosisEvidenceRecorder != null) {
+            return diagnosisEvidenceRecorder.recordToolCall(
+                    TOOL_QUERY_INTERNAL_DOCS,
+                    buildQueryParams(query),
+                    "知识库相似文档",
+                    () -> doQueryInternalDocs(query));
+        }
+        return doQueryInternalDocs(query);
+    }
 
+    private String doQueryInternalDocs(String query) {
         try {
             // 使用向量搜索服务检索相关文档
             List<VectorSearchService.SearchResult> searchResults = 
@@ -74,6 +89,17 @@ public class InternalDocsTools {
             logger.error("[工具错误] queryInternalDocs 执行失败", e);
             return String.format("{\"status\": \"error\", \"message\": \"Failed to query internal docs: %s\"}", 
                     e.getMessage());
+        }
+    }
+
+    private String buildQueryParams(String query) {
+        try {
+            Map<String, Object> params = new HashMap<>();
+            params.put("query", query);
+            params.put("topK", topK);
+            return objectMapper.writeValueAsString(params);
+        } catch (Exception e) {
+            return "{\"query\":\"" + (query == null ? "" : query.replace("\"", "\\\"")) + "\"}";
         }
     }
 }

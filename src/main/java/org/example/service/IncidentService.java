@@ -7,6 +7,7 @@ import org.example.dto.DiagnosisEvidence;
 import org.example.dto.DiagnosisRunRecord;
 import org.example.dto.IncidentRecord;
 import org.example.dto.IncidentSummary;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Service;
 
 import java.util.ArrayList;
@@ -22,10 +23,19 @@ public class IncidentService {
 
     private final IncidentStore incidentStore;
     private final ObjectMapper objectMapper;
+    private final DiagnosisReportService diagnosisReportService;
 
     public IncidentService(IncidentStore incidentStore, ObjectMapper objectMapper) {
+        this(incidentStore, objectMapper, null);
+    }
+
+    @Autowired
+    public IncidentService(IncidentStore incidentStore,
+                           ObjectMapper objectMapper,
+                           DiagnosisReportService diagnosisReportService) {
         this.incidentStore = incidentStore;
         this.objectMapper = objectMapper;
+        this.diagnosisReportService = diagnosisReportService;
     }
 
     public synchronized IncidentRecord recordAlert(AlertPayload payload) {
@@ -69,9 +79,32 @@ public class IncidentService {
         run.setStatus("QUEUED");
         run.setCreatedAt(now);
         run.setAlertContext(alertContext);
+        run.setCurrentStep("等待诊断任务开始");
+        run.setProgressMessage("诊断任务已入队");
         run.getEvidence().add(DiagnosisEvidence.of("alert_context", "注入给 AI 的告警上下文", alertContext, now));
 
         incident.getDiagnosisRuns().add(run);
+        incident.setUpdatedAt(now);
+        incidentStore.save(incident);
+        return run;
+    }
+
+    public synchronized DiagnosisRunRecord updateRunAlertContext(String incidentId, String runId, String alertContext) {
+        IncidentRecord incident = requireIncident(incidentId);
+        DiagnosisRunRecord run = requireRun(incident, runId);
+        long now = System.currentTimeMillis();
+        run.setAlertContext(alertContext);
+        Optional<DiagnosisEvidence> contextEvidence = run.getEvidence().stream()
+                .filter(evidence -> "alert_context".equals(evidence.getType()))
+                .findFirst();
+        if (contextEvidence.isPresent()) {
+            DiagnosisEvidence evidence = contextEvidence.get();
+            evidence.setContent(alertContext);
+            evidence.setSummary(alertContext);
+            evidence.setRawFragment(alertContext);
+        } else {
+            run.getEvidence().add(DiagnosisEvidence.of("alert_context", "注入给 AI 的告警上下文", alertContext, now));
+        }
         incident.setUpdatedAt(now);
         incidentStore.save(incident);
         return run;
@@ -83,6 +116,44 @@ public class IncidentService {
         long now = System.currentTimeMillis();
         run.setStatus("RUNNING");
         run.setStartedAt(now);
+        run.setCurrentStep("正在拆解诊断任务");
+        run.setProgressMessage("AI Ops 诊断已开始");
+        run.setCurrentTool(null);
+        incident.setUpdatedAt(now);
+        incidentStore.save(incident);
+        return run;
+    }
+
+    public synchronized DiagnosisRunRecord markRunWaitingTool(String incidentId,
+                                                              String runId,
+                                                              String toolName,
+                                                              String queryParams) {
+        IncidentRecord incident = requireIncident(incidentId);
+        DiagnosisRunRecord run = requireRun(incident, runId);
+        long now = System.currentTimeMillis();
+        if (run.getStartedAt() == 0L) {
+            run.setStartedAt(now);
+        }
+        run.setStatus("WAITING_TOOL");
+        run.setCurrentTool(toolName);
+        run.setCurrentStep("正在调用工具 " + toolName);
+        run.setProgressMessage(queryParams);
+        incident.setUpdatedAt(now);
+        incidentStore.save(incident);
+        return run;
+    }
+
+    public synchronized DiagnosisRunRecord addToolEvidence(String incidentId,
+                                                           String runId,
+                                                           DiagnosisEvidence evidence) {
+        IncidentRecord incident = requireIncident(incidentId);
+        DiagnosisRunRecord run = requireRun(incident, runId);
+        long now = System.currentTimeMillis();
+        run.getEvidence().add(evidence);
+        run.setStatus("RUNNING");
+        run.setCurrentTool(null);
+        run.setCurrentStep("已完成工具调用 " + evidence.getToolName());
+        run.setProgressMessage(evidence.getSummary());
         incident.setUpdatedAt(now);
         incidentStore.save(incident);
         return run;
@@ -97,9 +168,14 @@ public class IncidentService {
         }
         run.setStatus("COMPLETED");
         run.setCompletedAt(now);
-        run.setReport(report);
+        String guardedReport = diagnosisReportService == null
+                ? report
+                : diagnosisReportService.guardReport(report, run);
+        run.setReport(guardedReport);
         run.setErrorMessage(null);
-        run.getEvidence().add(DiagnosisEvidence.of("final_report", "最终诊断报告", report, now));
+        run.setCurrentTool(null);
+        run.setCurrentStep("诊断完成");
+        run.setProgressMessage("已生成诊断报告");
         incident.setUpdatedAt(now);
         incidentStore.save(incident);
         return run;
@@ -115,6 +191,9 @@ public class IncidentService {
         run.setStatus("FAILED");
         run.setCompletedAt(now);
         run.setErrorMessage(errorMessage);
+        run.setCurrentTool(null);
+        run.setCurrentStep("诊断失败");
+        run.setProgressMessage(errorMessage);
         run.getEvidence().add(DiagnosisEvidence.of("failure_reason", "诊断失败原因", errorMessage, now));
         incident.setUpdatedAt(now);
         incidentStore.save(incident);

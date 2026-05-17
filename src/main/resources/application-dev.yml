@@ -1,3 +1,9 @@
 app:
   alerts:
     simulate-enabled: true
+
+prometheus:
+  mock-enabled: ${PROMETHEUS_MOCK_ENABLED:true}
+
+cls:
+  mock-enabled: ${CLS_MOCK_ENABLED:true}

@@ -61,4 +61,66 @@ class AiOpsServiceTest {
         Optional<String> report = aiOpsService.extractFinalReport(state);
         assertTrue(report.isEmpty());
     }
+
+    @Test
+    void prompts_shouldRequireMetricTrendEvidenceForResourceDiagnosis() {
+        String plannerPrompt = ReflectionTestUtils.invokeMethod(aiOpsService, "buildPlannerPrompt");
+        String executorPrompt = ReflectionTestUtils.invokeMethod(aiOpsService, "buildExecutorPrompt");
+
+        assertNotNull(plannerPrompt);
+        assertNotNull(executorPrompt);
+        assertTrue(plannerPrompt.contains("queryMetricTrend"));
+        assertTrue(executorPrompt.contains("queryMetricTrend"));
+        assertTrue(plannerPrompt.contains("趋势"));
+        assertTrue(executorPrompt.contains("趋势"));
+    }
+
+    @Test
+    void plannerPrompt_shouldRequireEvidenceBoundConfidenceAndMissingEvidence() {
+        String plannerPrompt = ReflectionTestUtils.invokeMethod(aiOpsService, "buildPlannerPrompt");
+
+        assertNotNull(plannerPrompt);
+        assertTrue(plannerPrompt.contains("证据不足"));
+        assertTrue(plannerPrompt.contains("置信度"));
+        assertTrue(plannerPrompt.contains("缺失证据"));
+        assertTrue(plannerPrompt.contains("evidence id"));
+    }
+
+    @Test
+    void prompts_shouldTreatActiveAlertQueryAsConditionalWhenIncidentContextExists() {
+        String plannerPrompt = ReflectionTestUtils.invokeMethod(aiOpsService, "buildPlannerPrompt");
+        String executorPrompt = ReflectionTestUtils.invokeMethod(aiOpsService, "buildExecutorPrompt");
+
+        assertNotNull(plannerPrompt);
+        assertNotNull(executorPrompt);
+        assertTrue(plannerPrompt.contains("当前 Incident 告警上下文是首要事实源"));
+        assertTrue(plannerPrompt.contains("queryPrometheusAlerts 是条件工具"));
+        assertTrue(plannerPrompt.contains("不要把 queryPrometheusAlerts 作为默认第一步"));
+        assertTrue(executorPrompt.contains("已有明确告警上下文时，不要重复查询活动告警"));
+    }
+
+    @Test
+    void prompts_shouldOnlyDiscoverLogTopicsWhenTopicCannotBeInferred() {
+        String plannerPrompt = ReflectionTestUtils.invokeMethod(aiOpsService, "buildPlannerPrompt");
+        String executorPrompt = ReflectionTestUtils.invokeMethod(aiOpsService, "buildExecutorPrompt");
+
+        assertNotNull(plannerPrompt);
+        assertNotNull(executorPrompt);
+        assertTrue(plannerPrompt.contains("只有无法根据告警类型推断日志主题时，才调用 getAvailableLogTopics"));
+        assertTrue(executorPrompt.contains("能从告警类型推断日志主题时，直接调用 queryLogs"));
+    }
+
+    @Test
+    void prompts_shouldConstrainTavilyAndDatabaseMcpTools() {
+        String plannerPrompt = ReflectionTestUtils.invokeMethod(aiOpsService, "buildPlannerPrompt");
+        String executorPrompt = ReflectionTestUtils.invokeMethod(aiOpsService, "buildExecutorPrompt");
+
+        assertNotNull(plannerPrompt);
+        assertNotNull(executorPrompt);
+        assertTrue(plannerPrompt.contains("Tavily MCP"));
+        assertTrue(plannerPrompt.contains("数据库 MCP"));
+        assertTrue(plannerPrompt.contains("只读"));
+        assertTrue(executorPrompt.contains("禁止执行 INSERT"));
+        assertTrue(executorPrompt.contains("UPDATE / DELETE / DROP / ALTER / TRUNCATE"));
+    }
 }

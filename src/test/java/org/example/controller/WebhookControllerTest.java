@@ -7,6 +7,7 @@ import org.example.dto.IncidentRecord;
 import org.example.service.AiOpsService;
 import org.example.service.AlertService;
 import org.example.service.IncidentService;
+import org.example.service.MetricTrendPrefetchService;
 import org.junit.jupiter.api.Test;
 import org.springframework.ai.tool.ToolCallbackProvider;
 import org.springframework.http.HttpStatus;
@@ -46,7 +47,7 @@ class WebhookControllerTest {
         when(alertService.storeAlert(payload, "incident-1")).thenReturn("alert-1");
         when(incidentService.buildAlertContext(incident)).thenReturn("告警上下文");
         when(incidentService.createDiagnosisRun("incident-1", "告警上下文")).thenReturn(run);
-        when(aiOpsService.executeAiOpsAnalysis(eq(chatModel), any(), eq("告警上下文")))
+        when(aiOpsService.executeAiOpsAnalysis(eq(chatModel), any(), eq("告警上下文"), eq("incident-1"), eq("run-1")))
                 .thenReturn(Optional.empty());
 
         WebhookController controller = new WebhookController();
@@ -64,6 +65,53 @@ class WebhookControllerTest {
         verify(incidentService).markRunRunning("incident-1", "run-1");
         verify(incidentService).failRun("incident-1", "run-1", "告警分析执行失败，未获取到有效结果");
         verify(alertService).storeReport("alert-1", "告警分析执行失败，未获取到有效结果");
+    }
+
+    @Test
+    void receiveAlert_shouldPrefetchMetricTrendsAndUseEnrichedContextForAiOps() throws Exception {
+        AiOpsService aiOpsService = mock(AiOpsService.class);
+        AlertService alertService = mock(AlertService.class);
+        IncidentService incidentService = mock(IncidentService.class);
+        MetricTrendPrefetchService prefetchService = mock(MetricTrendPrefetchService.class);
+        DashScopeChatModel chatModel = mock(DashScopeChatModel.class);
+        ToolCallbackProvider tools = mock(ToolCallbackProvider.class);
+
+        IncidentRecord incident = new IncidentRecord();
+        incident.setId("incident-1");
+        DiagnosisRunRecord run = new DiagnosisRunRecord();
+        run.setRunId("run-1");
+        run.setIncidentId("incident-1");
+
+        AlertPayload payload = alertPayload();
+        when(incidentService.recordAlert(payload)).thenReturn(incident);
+        when(alertService.storeAlert(payload, "incident-1")).thenReturn("alert-1");
+        when(incidentService.buildAlertContext(incident)).thenReturn("基础告警上下文");
+        when(incidentService.createDiagnosisRun("incident-1", "基础告警上下文")).thenReturn(run);
+        when(prefetchService.prefetchAndAppend(incident, run, "基础告警上下文"))
+                .thenReturn("基础告警上下文\n\n## 预取指标趋势证据");
+        when(incidentService.updateRunAlertContext("incident-1", "run-1", "基础告警上下文\n\n## 预取指标趋势证据"))
+                .thenReturn(run);
+        when(aiOpsService.executeAiOpsAnalysis(
+                eq(chatModel), any(), eq("基础告警上下文\n\n## 预取指标趋势证据"), eq("incident-1"), eq("run-1")))
+                .thenReturn(Optional.empty());
+
+        WebhookController controller = new WebhookController();
+        ReflectionTestUtils.setField(controller, "aiOpsService", aiOpsService);
+        ReflectionTestUtils.setField(controller, "alertService", alertService);
+        ReflectionTestUtils.setField(controller, "incidentService", incidentService);
+        ReflectionTestUtils.setField(controller, "metricTrendPrefetchService", prefetchService);
+        ReflectionTestUtils.setField(controller, "dashScopeChatModel", chatModel);
+        ReflectionTestUtils.setField(controller, "tools", tools);
+        ReflectionTestUtils.setField(controller, "executor", (Executor) Runnable::run);
+
+        ResponseEntity<String> response = controller.receiveAlert(payload);
+
+        assertEquals(HttpStatus.OK, response.getStatusCode());
+        verify(prefetchService).prefetchAndAppend(incident, run, "基础告警上下文");
+        verify(incidentService).updateRunAlertContext("incident-1", "run-1",
+                "基础告警上下文\n\n## 预取指标趋势证据");
+        verify(aiOpsService).executeAiOpsAnalysis(
+                eq(chatModel), any(), eq("基础告警上下文\n\n## 预取指标趋势证据"), eq("incident-1"), eq("run-1"));
     }
 
     private AlertPayload alertPayload() {
