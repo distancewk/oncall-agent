@@ -37,7 +37,7 @@ SuperBizAgent 是一个基于 Spring Boot、Spring AI Alibaba、DashScope、Milv
 
 - Java 17
 - Maven 3.6+
-- Node.js 18+（仅启用 MCP profile 时需要，用于 `npx` 启动 Tavily/DBHub MCP）
+- Node.js 20+（仅启用 MCP profile 时需要，用于 `npx` 启动 Tavily/DBHub MCP）
 - Docker 和 Docker Compose
 - DashScope API Key
 
@@ -82,23 +82,32 @@ mvn spring-boot:run
 - Attu (Milvus 管理界面): http://localhost:8000
 - Milvus 健康检查: http://localhost:9900/milvus/health
 
-### 3.1 可选：启用 Tavily 和数据库 MCP
+### 3.1 可选：启用 MCP
 
-默认启动不启用 MCP。需要联网查询和数据库查询时，使用 `mcp` profile：
+默认启动不启用 MCP。需要联网查询时，使用 `mcp` profile：
 
 ```bash
 export SPRING_PROFILES_ACTIVE=dev,mcp
 export TAVILY_API_KEY=your-tavily-api-key
-export MCP_DBHUB_CONFIG=./config/dbhub.toml
 mvn spring-boot:run
 ```
 
-`application-mcp.yml` 会通过 stdio 启动两个 MCP server：
+`application-mcp.yml` 会通过 stdio 启动 Tavily MCP server：
 
-- `tavily`: `npx -y tavily-mcp@latest`，用于公开互联网搜索。
-- `dbhub`: `npx -y @bytebase/dbhub@latest --transport stdio --config ${MCP_DBHUB_CONFIG}`，用于多数据库只读查询。
+- `tavily`: `npx -y ${MCP_TAVILY_PACKAGE}`，默认 `tavily-mcp@0.2.9`，用于公开互联网搜索。
 
-默认 [config/dbhub.toml](config/dbhub.toml) 只包含一个内存 SQLite 示例源。生产环境应将真实数据库配置放到仓库外部文件，并通过 `MCP_DBHUB_CONFIG` 指向该文件。DBHub 配置中可以同时添加 PostgreSQL、MySQL、MariaDB、SQL Server 等多个 source；建议全部使用只读账号。
+需要数据库 MCP 时，再额外启用 `mcp-db` profile，并把 `MCP_DBHUB_CONFIG` 指向真实数据库配置：
+
+```bash
+export SPRING_PROFILES_ACTIVE=dev,mcp,mcp-db
+export TAVILY_API_KEY=your-tavily-api-key
+export MCP_DBHUB_CONFIG=/path/to/dbhub.toml
+mvn spring-boot:run
+```
+
+- `dbhub`: `npx -y ${MCP_DBHUB_PACKAGE} --transport stdio --config ${MCP_DBHUB_CONFIG}`，默认 `@bytebase/dbhub@0.21.2`，用于多数据库只读查询。
+
+默认 [config/dbhub.toml](config/dbhub.toml) 是模板文件，不包含活跃数据源。不要把内存 SQLite 作为默认启动源：DBHub 的 SQLite connector 依赖可选原生包 `better-sqlite3`，在 `npx` 临时安装场景下可能不存在，并导致应用启动失败。实际使用时建议把 PostgreSQL、MySQL、MariaDB、SQL Server 等真实数据库配置放到仓库外部文件，并全部使用只读账号。
 
 ### 4. 容器化启动
 
@@ -314,23 +323,25 @@ curl -X POST http://localhost:9900/api/incidents/{incidentId}/diagnose
 | `APP_PRIVATE_MEMORY_RECALL_ENABLED` | `true` | 私人记忆召回开关 |
 | `APP_PRIVATE_MEMORY_RECALL_TOP_K` | `3` | 私人记忆召回数量 |
 | `RAG_SEARCH_EF` | `64` | Milvus HNSW 搜索 ef 参数 |
-| `MCP_CLIENT_ENABLED` | `true` | `mcp` profile 下 MCP Client 开关 |
+| `MCP_CLIENT_ENABLED` | `true` | MCP profile 下 MCP Client 开关 |
 | `MCP_REQUEST_TIMEOUT` | `60s` | MCP 工具请求超时 |
 | `MCP_TAVILY_COMMAND` | `npx` | Tavily MCP 启动命令 |
+| `MCP_TAVILY_PACKAGE` | `tavily-mcp@0.2.9` | Tavily MCP npm 包版本 |
 | `TAVILY_API_KEY` | 空 | Tavily API Key，启用 Tavily MCP 时必需 |
 | `MCP_DBHUB_COMMAND` | `npx` | DBHub MCP 启动命令 |
+| `MCP_DBHUB_PACKAGE` | `@bytebase/dbhub@0.21.2` | DBHub MCP npm 包版本 |
 | `MCP_DBHUB_CONFIG` | `./config/dbhub.toml` | DBHub 多数据库配置文件路径 |
 
 ## MCP 工具
 
-项目通过 Spring AI MCP Client 接入外部 MCP 工具。默认关闭；启用 `mcp` profile 后，`ToolCallbackProvider` 会把 MCP server 暴露的工具注入到 Chat Agent 和 AIOps Agent。
+项目通过 Spring AI MCP Client 接入外部 MCP 工具。默认关闭；启用对应 MCP profile 后，`ToolCallbackProvider` 会把 MCP server 暴露的工具注入到 Chat Agent 和 AIOps Agent。
 
 当前预置两个 stdio MCP server：
 
-| MCP Server | 用途 | 默认命令 |
-|------------|------|----------|
-| Tavily | 联网查公开资料、官方文档、错误码和版本差异 | `npx -y tavily-mcp@latest` |
-| DBHub | 多数据库 schema / 只读 SQL 查询 | `npx -y @bytebase/dbhub@latest --transport stdio --config ./config/dbhub.toml` |
+| MCP Server | Profile | 用途 | 默认命令 |
+|------------|---------|------|----------|
+| Tavily | `mcp` | 联网查公开资料、官方文档、错误码和版本差异 | `npx -y tavily-mcp@0.2.9` |
+| DBHub | `mcp-db` | 多数据库 schema / 只读 SQL 查询 | `npx -y @bytebase/dbhub@0.21.2 --transport stdio --config ${MCP_DBHUB_CONFIG}` |
 
 诊断流程中的约束：
 

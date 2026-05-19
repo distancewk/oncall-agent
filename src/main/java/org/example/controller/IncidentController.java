@@ -9,6 +9,7 @@ import org.example.dto.IncidentSummary;
 import org.example.service.AiOpsService;
 import org.example.service.IncidentCaseService;
 import org.example.service.IncidentService;
+import org.example.service.MetricTrendPrefetchService;
 import org.example.service.VectorSearchService;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -42,6 +43,9 @@ public class IncidentController {
 
     @Autowired
     private IncidentCaseService incidentCaseService;
+
+    @Autowired(required = false)
+    private MetricTrendPrefetchService metricTrendPrefetchService;
 
     @Autowired
     @Qualifier("dashScopeChatModelAiOps")
@@ -102,6 +106,7 @@ public class IncidentController {
             logger.info("开始执行 Incident 诊断, incidentId: {}, runId: {}", incidentId, runId);
             incidentService.markRunRunning(incidentId, runId);
             String diagnosisContext = prefetchSimilarCasesContext(incidentId, runId, alertContext);
+            diagnosisContext = prefetchMetricTrendContext(incidentId, runId, diagnosisContext);
             ToolCallback[] toolCallbacks = tools != null ? tools.getToolCallbacks() : new ToolCallback[0];
             Optional<OverAllState> stateOptional = aiOpsService.executeAiOpsAnalysis(
                     dashScopeChatModelAiOps, toolCallbacks, diagnosisContext, incidentId, runId);
@@ -139,6 +144,31 @@ public class IncidentController {
             return enriched;
         } catch (Exception e) {
             logger.warn("相似历史故障案例召回失败，将继续使用原始告警上下文, incidentId: {}, runId: {}",
+                    incidentId, runId, e);
+            return alertContext;
+        }
+    }
+
+    private String prefetchMetricTrendContext(String incidentId, String runId, String alertContext) {
+        if (metricTrendPrefetchService == null) {
+            return alertContext;
+        }
+        try {
+            Optional<IncidentRecord> incidentOptional = incidentService.getIncident(incidentId);
+            Optional<DiagnosisRunRecord> runOptional = incidentService.getDiagnosisRuns(incidentId)
+                    .flatMap(runs -> runs.stream()
+                            .filter(run -> runId.equals(run.getRunId()))
+                            .findFirst());
+            if (incidentOptional.isEmpty() || runOptional.isEmpty()) {
+                return alertContext;
+            }
+            String enriched = metricTrendPrefetchService.prefetchAndAppend(incidentOptional.get(), runOptional.get(), alertContext);
+            if (!enriched.equals(alertContext)) {
+                incidentService.updateRunAlertContext(incidentId, runId, enriched);
+            }
+            return enriched;
+        } catch (Exception e) {
+            logger.warn("指标趋势预取失败，将继续使用当前告警上下文, incidentId: {}, runId: {}",
                     incidentId, runId, e);
             return alertContext;
         }

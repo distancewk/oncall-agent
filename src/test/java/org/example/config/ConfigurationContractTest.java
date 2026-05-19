@@ -2,6 +2,7 @@ package org.example.config;
 
 import org.junit.jupiter.api.Test;
 import org.springframework.boot.context.properties.bind.Binder;
+import org.springframework.boot.context.properties.bind.Bindable;
 import org.springframework.boot.env.YamlPropertySourceLoader;
 import org.springframework.core.env.ConfigurableEnvironment;
 import org.springframework.core.env.StandardEnvironment;
@@ -44,17 +45,48 @@ class ConfigurationContractTest {
     }
 
     @Test
-    void applicationMcpYaml_shouldConfigureTavilyAndDbHubStdioConnections() throws Exception {
+    void applicationMcpYaml_shouldConfigureTavilyStdioConnectionOnly() throws Exception {
         String yaml = Files.readString(Path.of("src/main/resources/application-mcp.yml"));
 
         assertTrue(yaml.contains("enabled: ${MCP_CLIENT_ENABLED:true}"));
         assertTrue(yaml.contains("tavily:"));
-        assertTrue(yaml.contains("tavily-mcp@latest"));
+        assertTrue(yaml.contains("${MCP_TAVILY_PACKAGE:tavily-mcp@"));
         assertTrue(yaml.contains("TAVILY_API_KEY: ${TAVILY_API_KEY:}"));
+        assertTrue(!yaml.contains("dbhub:"));
+    }
+
+    @Test
+    void applicationMcpDbYaml_shouldConfigureDbHubStdioConnectionSeparately() throws Exception {
+        String yaml = Files.readString(Path.of("src/main/resources/application-mcp-db.yml"));
+
         assertTrue(yaml.contains("dbhub:"));
-        assertTrue(yaml.contains("@bytebase/dbhub@latest"));
+        assertTrue(yaml.contains("${MCP_DBHUB_PACKAGE:@bytebase/dbhub@"));
         assertTrue(yaml.contains("--config"));
         assertTrue(yaml.contains("${MCP_DBHUB_CONFIG:./config/dbhub.toml}"));
+    }
+
+    @Test
+    void applicationMcpYaml_shouldBindDisabledProfileWithoutStartingMcpServers() throws Exception {
+        ConfigurableEnvironment environment = new StandardEnvironment();
+        environment.getPropertySources().addFirst(new SystemEnvironmentPropertySource(
+                "test-env",
+                Map.of("MCP_CLIENT_ENABLED", "false")
+        ));
+
+        YamlPropertySourceLoader loader = new YamlPropertySourceLoader();
+        loader.load("application-mcp", new FileSystemResource("src/main/resources/application-mcp.yml"))
+                .forEach(propertySource -> environment.getPropertySources().addLast(propertySource));
+
+        Binder binder = Binder.get(environment);
+        Boolean enabled = binder.bind("spring.ai.mcp.client.enabled", Boolean.class)
+                .orElseThrow(() -> new IllegalStateException("mcp enabled property did not bind"));
+        Map<String, Object> tavily = binder.bind("spring.ai.mcp.client.stdio.connections.tavily",
+                        Bindable.mapOf(String.class, Object.class))
+                .orElseThrow(() -> new IllegalStateException("tavily connection did not bind"));
+
+        assertEquals(false, enabled);
+        assertEquals("npx", tavily.get("command"));
+        assertTrue(String.valueOf(tavily.get("args")).contains("tavily-mcp@"));
     }
 
     @Test
@@ -62,7 +94,7 @@ class ConfigurationContractTest {
         String config = Files.readString(Path.of("config/dbhub.toml"));
 
         assertTrue(config.contains("readonly = true"));
-        assertTrue(config.contains("sqlite:///:memory:"));
+        assertTrue(!config.contains("dsn = \"sqlite:///:memory:\""));
         assertTrue(config.contains("postgres://"));
         assertTrue(config.contains("mysql://"));
         assertTrue(config.contains("mariadb://"));

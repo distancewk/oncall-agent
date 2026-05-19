@@ -1,17 +1,27 @@
-[[sources]]
-id = "demo_sqlite"
-description = "Safe in-memory SQLite source for local MCP startup tests"
-dsn = "sqlite:///:memory:"
-
-[[tools]]
-name = "execute_sql"
-source = "demo_sqlite"
-readonly = true
-max_rows = 200
-
-[[tools]]
-name = "search_objects"
-source = "demo_sqlite"
+# DBHub configuration template.
+#
+# This file intentionally contains no active source. Enable the `mcp-db`
+# profile only after pointing MCP_DBHUB_CONFIG to a real read-only database
+# config. Do not use an in-memory SQLite demo by default: DBHub's SQLite
+# connector depends on optional native package `better-sqlite3`, which may be
+# unavailable in transient npx installs and can prevent the Spring app from
+# starting.
+#
+# Example: SQLite
+# [[sources]]
+# id = "local_sqlite"
+# description = "Local SQLite database"
+# dsn = "sqlite:////absolute/path/to/app.db"
+#
+# [[tools]]
+# name = "execute_sql"
+# source = "local_sqlite"
+# readonly = true
+# max_rows = 200
+#
+# [[tools]]
+# name = "search_objects"
+# source = "local_sqlite"
 
 # Example: PostgreSQL
 # [[sources]]
