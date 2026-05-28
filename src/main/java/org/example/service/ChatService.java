@@ -3,13 +3,13 @@ package org.example.service;
 import com.alibaba.cloud.ai.dashscope.chat.DashScopeChatModel;
 import com.alibaba.cloud.ai.graph.agent.ReactAgent;
 import com.alibaba.cloud.ai.graph.exception.GraphRunnerException;
+import org.example.exception.DependencyUnavailableException;
 import org.example.agent.tool.DateTimeTools;
 import org.example.agent.tool.InternalDocsTools;
-import org.example.agent.tool.QueryLogsTools;
-import org.example.agent.tool.QueryMetricsTools;
 import org.example.util.ToolUtils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.ai.chat.messages.AssistantMessage;
 import org.springframework.ai.tool.ToolCallback;
 import org.springframework.ai.tool.ToolCallbackProvider;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -20,6 +20,7 @@ import org.springframework.stereotype.Service;
 import java.io.BufferedReader;
 import java.io.InputStreamReader;
 import java.nio.charset.StandardCharsets;
+import java.util.Arrays;
 import java.util.List;
 import java.util.Map;
 import java.util.stream.Collectors;
@@ -39,17 +40,17 @@ public class ChatService {
     @Autowired
     private DateTimeTools dateTimeTools;
 
-    @Autowired
-    private QueryMetricsTools queryMetricsTools;
-
-    @Autowired(required = false)  // Mock 模式下才注册，所以设置为 optional,真实环境通过mcp配置注入
-    private QueryLogsTools queryLogsTools;
-
     @Autowired(required = false)
     private ToolCallbackProvider tools;
 
     @Autowired
     private ResourceLoader resourceLoader;
+
+    @Autowired(required = false)
+    private DependencyGuard dependencyGuard;
+
+    @Autowired(required = false)
+    private McpToolCallbackGuard mcpToolCallbackGuard;
 
     /**
      * 构建系统提示词（包含历史消息）
@@ -113,7 +114,7 @@ public class ChatService {
      * 根据 cls.mock-enabled 决定是否包含 QueryLogsTools
      */
     public Object[] buildMethodToolsArray() {
-        return ToolUtils.buildMethodToolsArray(dateTimeTools, internalDocsTools, queryMetricsTools, queryLogsTools);
+        return ToolUtils.buildGeneralChatMethodToolsArray(dateTimeTools, internalDocsTools);
     }
 
     /**
@@ -123,7 +124,10 @@ public class ChatService {
         if (tools == null) {
             return new ToolCallback[0];
         }
-        return tools.getToolCallbacks();
+        ToolCallback[] callbacks = Arrays.stream(tools.getToolCallbacks())
+                .filter(this::isGeneralChatMcpTool)
+                .toArray(ToolCallback[]::new);
+        return mcpToolCallbackGuard == null ? callbacks : mcpToolCallbackGuard.wrapCallbacks(callbacks);
     }
 
     /**
@@ -134,11 +138,21 @@ public class ChatService {
             logger.info("MCP工具未配置，无可用工具");
             return;
         }
-        ToolCallback[] toolCallbacks = tools.getToolCallbacks();
-        logger.info("可用工具列表:");
+        ToolCallback[] toolCallbacks = getToolCallbacks();
+        logger.info("普通聊天可用 MCP 工具列表:");
         for (ToolCallback toolCallback : toolCallbacks) {
             logger.info(">>> {}", toolCallback.getToolDefinition().name());
         }
+    }
+
+    private boolean isGeneralChatMcpTool(ToolCallback toolCallback) {
+        if (toolCallback == null || toolCallback.getToolDefinition() == null) {
+            return false;
+        }
+        String haystack = (toolCallback.getToolDefinition().name() + " "
+                + toolCallback.getToolDefinition().description() + " "
+                + toolCallback.getClass().getName()).toLowerCase();
+        return haystack.contains("tavily");
     }
 
     /**
@@ -165,7 +179,7 @@ public class ChatService {
      */
     public String executeChat(ReactAgent agent, String question) throws GraphRunnerException {
         logger.info("执行 ReactAgent.call() - 自动处理工具调用");
-        var response = agent.call(question);
+        AssistantMessage response = callAgent(agent, question);
         String answer = "";
         if (response != null) {
             String responseText = response.getText();
@@ -175,5 +189,43 @@ public class ChatService {
         }
         logger.info("ReactAgent 对话完成，答案长度: {}", answer.length());
         return answer;
+    }
+
+    private AssistantMessage callAgent(ReactAgent agent, String question) throws GraphRunnerException {
+        if (dependencyGuard == null) {
+            return agent.call(question);
+        }
+        try {
+            return dependencyGuard.execute("dashscope-chat", "chatAgentCall",
+                    () -> {
+                        try {
+                            return agent.call(question);
+                        } catch (GraphRunnerException e) {
+                            throw new GraphRunnerCallException(e);
+                        }
+                    },
+                    error -> {
+                        if (error instanceof DependencyUnavailableException unavailable) {
+                            throw unavailable;
+                        }
+                        throw new DependencyUnavailableException(
+                                "dashscope-chat", "chatAgentCall", "DEPENDENCY_ERROR", error);
+                    });
+        } catch (GraphRunnerCallException e) {
+            throw e.getGraphRunnerException();
+        }
+    }
+
+    private static class GraphRunnerCallException extends RuntimeException {
+        private final GraphRunnerException graphRunnerException;
+
+        private GraphRunnerCallException(GraphRunnerException graphRunnerException) {
+            super(graphRunnerException);
+            this.graphRunnerException = graphRunnerException;
+        }
+
+        private GraphRunnerException getGraphRunnerException() {
+            return graphRunnerException;
+        }
     }
 }

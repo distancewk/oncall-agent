@@ -28,12 +28,16 @@ class AiOpsServiceTest {
     @Mock
     private org.example.agent.tool.QueryMetricsTools queryMetricsTools;
 
+    @Mock
+    private org.example.agent.tool.QueryLogsTools queryLogsTools;
+
     @BeforeEach
     void setUp() {
         aiOpsService = new AiOpsService();
         ReflectionTestUtils.setField(aiOpsService, "dateTimeTools", dateTimeTools);
         ReflectionTestUtils.setField(aiOpsService, "internalDocsTools", internalDocsTools);
         ReflectionTestUtils.setField(aiOpsService, "queryMetricsTools", queryMetricsTools);
+        ReflectionTestUtils.setField(aiOpsService, "queryLogsTools", queryLogsTools);
     }
 
     @Test
@@ -73,6 +77,18 @@ class AiOpsServiceTest {
         assertTrue(executorPrompt.contains("queryMetricTrend"));
         assertTrue(plannerPrompt.contains("趋势"));
         assertTrue(executorPrompt.contains("趋势"));
+    }
+
+    @Test
+    void buildMethodToolsArray_shouldKeepDiagnosisToolsForAiOps() {
+        Object[] methodTools = ReflectionTestUtils.invokeMethod(aiOpsService, "buildMethodToolsArray");
+
+        assertNotNull(methodTools);
+        assertEquals(4, methodTools.length);
+        assertSame(dateTimeTools, methodTools[0]);
+        assertSame(internalDocsTools, methodTools[1]);
+        assertSame(queryMetricsTools, methodTools[2]);
+        assertSame(queryLogsTools, methodTools[3]);
     }
 
     @Test

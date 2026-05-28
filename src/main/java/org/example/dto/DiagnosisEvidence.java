@@ -16,6 +16,7 @@ public class DiagnosisEvidence {
     private String rawFragment;
     private boolean success;
     private String errorMessage;
+    private String errorCode;
     private long createdAt;
 
     public String getId() {
@@ -106,6 +107,14 @@ public class DiagnosisEvidence {
         this.errorMessage = errorMessage;
     }
 
+    public String getErrorCode() {
+        return errorCode;
+    }
+
+    public void setErrorCode(String errorCode) {
+        this.errorCode = errorCode;
+    }
+
     public long getCreatedAt() {
         return createdAt;
     }
@@ -147,6 +156,7 @@ public class DiagnosisEvidence {
         evidence.setRawFragment(rawFragment);
         evidence.setSuccess(success);
         evidence.setErrorMessage(errorMessage);
+        evidence.setErrorCode(null);
         evidence.setCreatedAt(createdAt);
         return evidence;
     }

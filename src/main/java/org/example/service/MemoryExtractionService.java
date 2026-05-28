@@ -7,6 +7,7 @@ import io.milvus.param.RpcStatus;
 import io.milvus.param.collection.LoadCollectionParam;
 import io.milvus.param.dml.InsertParam;
 import org.example.constant.MilvusConstants;
+import org.example.exception.DependencyUnavailableException;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.ai.chat.model.ChatResponse;
@@ -14,6 +15,7 @@ import org.springframework.ai.chat.prompt.Prompt;
 import org.springframework.ai.chat.messages.SystemMessage;
 import org.springframework.ai.chat.messages.UserMessage;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.context.annotation.Lazy;
 import org.springframework.stereotype.Service;
 
 import com.alibaba.cloud.ai.dashscope.chat.DashScopeChatModel;
@@ -36,10 +38,14 @@ public class MemoryExtractionService {
     private VectorEmbeddingService embeddingService;
 
     @Autowired
+    @Lazy
     private MilvusServiceClient milvusClient;
 
     @Autowired
     private MilvusInsertHelper insertHelper = new MilvusInsertHelper();
+
+    @Autowired(required = false)
+    private DependencyGuard dependencyGuard;
 
     /**
      * 提炼对话并存储
@@ -74,7 +80,7 @@ public class MemoryExtractionService {
             // 3. 调用大模型进行提炼
             DashScopeChatModel chatModel = dashScopeChatModel;
             
-            ChatResponse response = chatModel.call(prompt);
+            ChatResponse response = callChatModel(prompt);
             String responseText = response.getResult().getOutput().getText();
             if (responseText == null) {
                 logger.warn("会话 {} 的记忆提炼响应为空", sessionId);
@@ -121,11 +127,11 @@ public class MemoryExtractionService {
             metadata.put("timestamp", System.currentTimeMillis());
 
             // 确保 collection 已加载
-            R<RpcStatus> loadResponse = milvusClient.loadCollection(
-                LoadCollectionParam.newBuilder()
-                    .withCollectionName(MilvusConstants.MILVUS_COLLECTION_NAME)
-                    .build()
-            );
+            R<RpcStatus> loadResponse = guardedMilvus("storeMemoryLoadCollection", () -> milvusClient.loadCollection(
+                    LoadCollectionParam.newBuilder()
+                            .withCollectionName(MilvusConstants.MILVUS_COLLECTION_NAME)
+                            .build()
+            ));
 
             if (loadResponse.getStatus() != 0 && loadResponse.getStatus() != 65535) {
                 logger.error("加载 collection 失败: {}", loadResponse.getMessage());
@@ -143,7 +149,8 @@ public class MemoryExtractionService {
                     List.of(metadata)
             );
 
-            R<MutationResult> insertResponse = milvusClient.insert(insertParam);
+            R<MutationResult> insertResponse = guardedMilvus("storeMemoryInsert",
+                    () -> milvusClient.insert(insertParam));
 
             if (insertResponse.getStatus() != 0) {
                 logger.error("长期记忆写入 Milvus 失败: {}", insertResponse.getMessage());
@@ -154,5 +161,45 @@ public class MemoryExtractionService {
         } catch (Exception e) {
             logger.error("长期记忆写入 Milvus 时发生异常", e);
         }
+    }
+
+    private ChatResponse callChatModel(Prompt prompt) {
+        if (dependencyGuard == null) {
+            return dashScopeChatModel.call(prompt);
+        }
+        return dependencyGuard.execute("dashscope-chat", "memoryExtraction",
+                () -> dashScopeChatModel.call(prompt),
+                error -> {
+                    if (error instanceof DependencyUnavailableException unavailable) {
+                        throw unavailable;
+                    }
+                    if (error instanceof RuntimeException runtimeException) {
+                        throw runtimeException;
+                    }
+                    throw new RuntimeException(error);
+                });
+    }
+
+    private <T> R<T> guardedMilvus(String operation, java.util.function.Supplier<R<T>> call) {
+        if (dependencyGuard == null) {
+            return call.get();
+        }
+        return dependencyGuard.execute("milvus", operation,
+                () -> {
+                    R<T> response = call.get();
+                    if (response.getStatus() != 0 && response.getStatus() != 65535) {
+                        throw new RuntimeException(response.getMessage());
+                    }
+                    return response;
+                },
+                error -> {
+                    if (error instanceof DependencyUnavailableException unavailable) {
+                        throw unavailable;
+                    }
+                    if (error instanceof RuntimeException runtimeException) {
+                        throw runtimeException;
+                    }
+                    throw new RuntimeException(error);
+                });
     }
 }

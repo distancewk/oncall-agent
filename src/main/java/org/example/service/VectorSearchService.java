@@ -7,9 +7,11 @@ import io.milvus.response.SearchResultsWrapper;
 import lombok.Getter;
 import lombok.Setter;
 import org.example.constant.MilvusConstants;
+import org.example.exception.DependencyUnavailableException;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.context.annotation.Lazy;
 import org.springframework.stereotype.Service;
 
 import java.util.ArrayList;
@@ -26,6 +28,7 @@ public class VectorSearchService {
     private static final Logger logger = LoggerFactory.getLogger(VectorSearchService.class);
 
     @Autowired
+    @Lazy
     private MilvusServiceClient milvusClient;
 
     @Autowired
@@ -33,6 +36,9 @@ public class VectorSearchService {
 
     @Autowired
     private VectorRerankService rerankService;
+
+    @Autowired(required = false)
+    private DependencyGuard dependencyGuard;
 
     @org.springframework.beans.factory.annotation.Value("${rag.candidate-k:10}")
     private int candidateK;
@@ -128,7 +134,7 @@ public class VectorSearchService {
                     .build();
 
             // 3. 执行混合搜索 (粗排)
-            R<SearchResults> searchResponse = milvusClient.hybridSearch(hybridSearchParam);
+            R<SearchResults> searchResponse = executeMilvusHybridSearch(hybridSearchParam);
 
             if (searchResponse.getStatus() != 0) {
                 throw new RuntimeException("向量搜索失败: " + searchResponse.getMessage());
@@ -162,10 +168,37 @@ public class VectorSearchService {
             trace.setResults(finalResults);
             return trace;
 
+        } catch (DependencyUnavailableException e) {
+            logger.error("Milvus 搜索依赖不可用: {}", searchLabel, e);
+            throw e;
         } catch (RuntimeException e) {
             logger.error("搜索相似文档失败", e);
             throw new RuntimeException("搜索失败: " + e.getMessage(), e);
         }
+    }
+
+    private R<SearchResults> executeMilvusHybridSearch(io.milvus.param.dml.HybridSearchParam hybridSearchParam) {
+        if (dependencyGuard == null) {
+            return milvusClient.hybridSearch(hybridSearchParam);
+        }
+
+        return dependencyGuard.execute("milvus", "hybridSearch",
+                () -> {
+                    R<SearchResults> response = milvusClient.hybridSearch(hybridSearchParam);
+                    if (response.getStatus() != 0) {
+                        throw new RuntimeException("向量搜索失败: " + response.getMessage());
+                    }
+                    return response;
+                },
+                error -> {
+                    if (error instanceof DependencyUnavailableException unavailable) {
+                        throw unavailable;
+                    }
+                    if (error instanceof RuntimeException runtimeException) {
+                        throw runtimeException;
+                    }
+                    throw new RuntimeException(error);
+                });
     }
 
     /**

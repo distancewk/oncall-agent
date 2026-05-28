@@ -7,6 +7,7 @@ import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
+import org.springframework.context.annotation.Lazy;
 
 import jakarta.annotation.PreDestroy;
 
@@ -30,6 +31,7 @@ public class MilvusConfig {
      * @return MilvusServiceClient 实例
      */
     @Bean
+    @Lazy
     public MilvusServiceClient milvusServiceClient() {
         logger.info("正在初始化 Milvus 客户端...");
         milvusClient = milvusClientFactory.createClient();

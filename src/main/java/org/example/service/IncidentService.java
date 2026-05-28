@@ -2,6 +2,7 @@ package org.example.service;
 
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import org.example.config.AppIncidentProperties;
 import org.example.dto.AlertPayload;
 import org.example.dto.DiagnosisEvidence;
 import org.example.dto.DiagnosisRunRecord;
@@ -24,18 +25,27 @@ public class IncidentService {
     private final IncidentStore incidentStore;
     private final ObjectMapper objectMapper;
     private final DiagnosisReportService diagnosisReportService;
+    private final AppIncidentProperties incidentProperties;
 
     public IncidentService(IncidentStore incidentStore, ObjectMapper objectMapper) {
         this(incidentStore, objectMapper, null);
     }
 
-    @Autowired
     public IncidentService(IncidentStore incidentStore,
                            ObjectMapper objectMapper,
                            DiagnosisReportService diagnosisReportService) {
+        this(incidentStore, objectMapper, diagnosisReportService, new AppIncidentProperties());
+    }
+
+    @Autowired
+    public IncidentService(IncidentStore incidentStore,
+                           ObjectMapper objectMapper,
+                           DiagnosisReportService diagnosisReportService,
+                           AppIncidentProperties incidentProperties) {
         this.incidentStore = incidentStore;
         this.objectMapper = objectMapper;
         this.diagnosisReportService = diagnosisReportService;
+        this.incidentProperties = incidentProperties == null ? new AppIncidentProperties() : incidentProperties;
     }
 
     public synchronized IncidentRecord recordAlert(AlertPayload payload) {
@@ -87,6 +97,51 @@ public class IncidentService {
         incident.setUpdatedAt(now);
         incidentStore.save(incident);
         return run;
+    }
+
+    public synchronized Optional<DiagnosisRunRecord> createReusedDiagnosisRunIfAvailable(String incidentId,
+                                                                                         String alertContext) {
+        IncidentRecord incident = requireIncident(incidentId);
+        long now = System.currentTimeMillis();
+        if (!incidentProperties.isDiagnosisReuseEnabled()) {
+            return Optional.empty();
+        }
+        Optional<DiagnosisRunRecord> sourceOptional = latestReusableCompletedRun(incident, now);
+        if (sourceOptional.isEmpty()) {
+            return Optional.empty();
+        }
+
+        DiagnosisRunRecord source = sourceOptional.get();
+        DiagnosisRunRecord run = new DiagnosisRunRecord();
+        run.setRunId("run-" + UUID.randomUUID().toString().substring(0, 12));
+        run.setIncidentId(incidentId);
+        run.setStatus("COMPLETED");
+        run.setCreatedAt(now);
+        run.setStartedAt(now);
+        run.setCompletedAt(now);
+        run.setAlertContext(alertContext);
+        run.setReport(source.getReport());
+        run.setErrorMessage(null);
+        run.setCurrentTool(null);
+        run.setCurrentStep("复用历史诊断报告");
+
+        String sourceRunId = notBlank(source.getReusedFromRunId())
+                ? source.getReusedFromRunId()
+                : source.getRunId();
+        String reason = "同一 Incident 已存在完成诊断，告警聚合键一致，复用历史报告: " + sourceRunId;
+        run.setReusedFromRunId(sourceRunId);
+        run.setReuseReason(reason);
+        run.setReuseConfidence(1.0d);
+        run.setReuseValidatedAt(now);
+        run.setProgressMessage(reason);
+        run.getEvidence().add(DiagnosisEvidence.of("alert_context", "注入给 AI 的告警上下文", alertContext, now));
+        run.getEvidence().add(DiagnosisEvidence.of("diagnosis_reuse", "复用历史诊断报告",
+                buildReuseEvidenceContent(incident, source, sourceRunId, reason), now));
+
+        incident.getDiagnosisRuns().add(run);
+        incident.setUpdatedAt(now);
+        incidentStore.save(incident);
+        return Optional.of(run);
     }
 
     public synchronized DiagnosisRunRecord updateRunAlertContext(String incidentId, String runId, String alertContext) {
@@ -273,6 +328,45 @@ public class IncidentService {
                 .filter(run -> runId.equals(run.getRunId()))
                 .findFirst()
                 .orElseThrow(() -> new IllegalArgumentException("DiagnosisRun 不存在: " + runId));
+    }
+
+    private Optional<DiagnosisRunRecord> latestReusableCompletedRun(IncidentRecord incident, long now) {
+        List<DiagnosisRunRecord> runs = incident.getDiagnosisRuns();
+        for (int i = runs.size() - 1; i >= 0; i--) {
+            DiagnosisRunRecord run = runs.get(i);
+            if ("COMPLETED".equals(run.getStatus())
+                    && notBlank(run.getReport())
+                    && isWithinReuseWindow(run, now)) {
+                return Optional.of(run);
+            }
+        }
+        return Optional.empty();
+    }
+
+    private boolean isWithinReuseWindow(DiagnosisRunRecord run, long now) {
+        long windowMillis = incidentProperties.getDiagnosisReuseWindowMillis();
+        if (windowMillis <= 0) {
+            return false;
+        }
+        long completedAt = run.getCompletedAt();
+        return completedAt > 0 && now - completedAt <= windowMillis;
+    }
+
+    private String buildReuseEvidenceContent(IncidentRecord incident,
+                                             DiagnosisRunRecord source,
+                                             String sourceRunId,
+                                             String reason) {
+        try {
+            return objectMapper.writeValueAsString(Map.of(
+                    "sourceIncidentId", incident.getId(),
+                    "sourceRunId", sourceRunId,
+                    "reusedFromLatestRunId", source.getRunId(),
+                    "aggregationKey", incident.getAggregationKey(),
+                    "reason", reason
+            ));
+        } catch (JsonProcessingException e) {
+            return reason;
+        }
     }
 
     private IncidentSummary summary(IncidentRecord record) {

@@ -17,6 +17,10 @@ public class DiagnosisRunRecord {
     private String currentStep;
     private String progressMessage;
     private String currentTool;
+    private String reusedFromRunId;
+    private String reuseReason;
+    private double reuseConfidence;
+    private long reuseValidatedAt;
     private List<DiagnosisEvidence> evidence = new ArrayList<>();
 
     public String getRunId() {
@@ -113,6 +117,38 @@ public class DiagnosisRunRecord {
 
     public void setCurrentTool(String currentTool) {
         this.currentTool = currentTool;
+    }
+
+    public String getReusedFromRunId() {
+        return reusedFromRunId;
+    }
+
+    public void setReusedFromRunId(String reusedFromRunId) {
+        this.reusedFromRunId = reusedFromRunId;
+    }
+
+    public String getReuseReason() {
+        return reuseReason;
+    }
+
+    public void setReuseReason(String reuseReason) {
+        this.reuseReason = reuseReason;
+    }
+
+    public double getReuseConfidence() {
+        return reuseConfidence;
+    }
+
+    public void setReuseConfidence(double reuseConfidence) {
+        this.reuseConfidence = reuseConfidence;
+    }
+
+    public long getReuseValidatedAt() {
+        return reuseValidatedAt;
+    }
+
+    public void setReuseValidatedAt(long reuseValidatedAt) {
+        this.reuseValidatedAt = reuseValidatedAt;
     }
 
     public List<DiagnosisEvidence> getEvidence() {

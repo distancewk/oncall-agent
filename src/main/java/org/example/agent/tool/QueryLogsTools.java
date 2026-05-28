@@ -3,6 +3,8 @@ package org.example.agent.tool;
 import com.fasterxml.jackson.annotation.JsonProperty;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.Data;
+import org.example.exception.DependencyUnavailableException;
+import org.example.service.DependencyGuard;
 import org.example.service.DiagnosisEvidenceRecorder;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -48,6 +50,9 @@ public class QueryLogsTools {
 
     @Autowired(required = false)
     private DiagnosisEvidenceRecorder diagnosisEvidenceRecorder;
+
+    @Autowired(required = false)
+    private DependencyGuard dependencyGuard;
     
     private static final DateTimeFormatter FORMATTER = DateTimeFormatter
             .ofPattern("yyyy-MM-dd HH:mm:ss")
@@ -210,7 +215,7 @@ public class QueryLogsTools {
                 logger.info("使用 Mock 数据，返回 {} 条日志", logEntries.size());
             } else {
                 // 真实模式：调用 CLS API（这里预留接口，后续实现）
-                return buildErrorResponse("CLS 真实查询尚未实现，请启用 mock 模式进行测试");
+                logEntries = queryClsLogs(region, logTopic, safeQuery, actualLimit);
             }
             
             // 构建成功响应
@@ -228,10 +233,26 @@ public class QueryLogsTools {
             
             return jsonResult;
             
+        } catch (DependencyUnavailableException e) {
+            logger.warn("CLS 日志查询被熔断, dependency: {}, operation: {}",
+                    e.getDependency(), e.getOperation());
+            return buildErrorResponse("CLS 日志查询熔断，证据缺失", e.getMessage(), e.getErrorCode());
         } catch (Exception e) {
             logger.error("查询日志失败", e);
-            return buildErrorResponse("查询失败: " + e.getMessage());
+            return buildErrorResponse("查询日志失败: " + e.getMessage(), e.getMessage(), "DEPENDENCY_ERROR");
         }
+    }
+
+    private List<LogEntry> queryClsLogs(String region, String logTopic, String query, int limit) throws Exception {
+        if (dependencyGuard != null) {
+            return executeGuarded("cls-logs", TOOL_QUERY_LOGS,
+                    () -> queryClsLogsDirect(region, logTopic, query, limit));
+        }
+        return queryClsLogsDirect(region, logTopic, query, limit);
+    }
+
+    private List<LogEntry> queryClsLogsDirect(String region, String logTopic, String query, int limit) {
+        throw new UnsupportedOperationException("CLS 真实查询尚未实现，请启用 mock 模式进行测试");
     }
 
     /**
@@ -622,13 +643,59 @@ public class QueryLogsTools {
      * 构建错误响应
      */
     private String buildErrorResponse(String message) {
+        return buildErrorResponse(message, message, null);
+    }
+
+    private String buildErrorResponse(String message, String error, String errorCode) {
         try {
             QueryLogsOutput output = new QueryLogsOutput();
             output.setSuccess(false);
             output.setMessage(message);
+            output.setError(error);
+            output.setErrorCode(errorCode);
             return objectMapper.writerWithDefaultPrettyPrinter().writeValueAsString(output);
         } catch (Exception e) {
-            return String.format("{\"success\":false,\"message\":\"%s\"}", message);
+            return String.format("{\"success\":false,\"message\":\"%s\",\"error\":\"%s\",\"errorCode\":\"%s\"}",
+                    message, error, errorCode);
+        }
+    }
+
+    private <T> T executeGuarded(String dependency, String operation, CheckedSupplier<T> supplier) throws Exception {
+        try {
+            return dependencyGuard.execute(dependency, operation,
+                    () -> {
+                        try {
+                            return supplier.get();
+                        } catch (Exception e) {
+                            throw new GuardedDependencyException(e);
+                        }
+                    },
+                    error -> {
+                        if (error instanceof DependencyUnavailableException unavailable) {
+                            throw unavailable;
+                        }
+                        if (error instanceof RuntimeException runtimeException) {
+                            throw runtimeException;
+                        }
+                        throw new GuardedDependencyException(error);
+                    });
+        } catch (GuardedDependencyException e) {
+            Throwable cause = e.getCause();
+            if (cause instanceof Exception exception) {
+                throw exception;
+            }
+            throw e;
+        }
+    }
+
+    @FunctionalInterface
+    private interface CheckedSupplier<T> {
+        T get() throws Exception;
+    }
+
+    private static class GuardedDependencyException extends RuntimeException {
+        GuardedDependencyException(Throwable cause) {
+            super(cause);
         }
     }
 
@@ -700,6 +767,12 @@ public class QueryLogsTools {
         
         @JsonProperty("message")
         private String message;
+
+        @JsonProperty("error")
+        private String error;
+
+        @JsonProperty("errorCode")
+        private String errorCode;
     }
     
     /**

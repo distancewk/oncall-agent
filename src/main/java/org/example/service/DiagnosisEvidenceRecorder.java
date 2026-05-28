@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import org.example.dto.DiagnosisEvidence;
+import org.example.exception.DependencyUnavailableException;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.ai.chat.model.ToolContext;
@@ -84,6 +85,7 @@ public class DiagnosisEvidenceRecorder {
                 errorMessage,
                 System.currentTimeMillis()
         );
+        evidence.setErrorCode(extractErrorCode(rawResult, runtimeFailure));
         addEvidence(run, evidence);
 
         if (runtimeFailure != null) {
@@ -152,6 +154,25 @@ public class DiagnosisEvidenceRecorder {
             return !normalized.contains("\"success\":false");
         }
         return true;
+    }
+
+    private String extractErrorCode(String rawResult, RuntimeException runtimeFailure) {
+        if (runtimeFailure instanceof DependencyUnavailableException unavailable) {
+            return unavailable.getErrorCode();
+        }
+        if (rawResult == null || rawResult.isBlank()) {
+            return null;
+        }
+        try {
+            JsonNode json = objectMapper.readTree(rawResult);
+            JsonNode errorCode = json.get("errorCode");
+            if (errorCode != null && errorCode.isTextual() && !errorCode.asText().isBlank()) {
+                return errorCode.asText();
+            }
+        } catch (Exception ignored) {
+            return null;
+        }
+        return null;
     }
 
     private String summarize(String rawResult, String errorMessage) {

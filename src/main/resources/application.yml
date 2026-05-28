@@ -87,6 +87,38 @@ cls:
   mock-enabled: ${CLS_MOCK_ENABLED:false}  # 是否启用 Mock 模式（用于测试，设为 true 返回与告警关联的模拟日志数据）
 
 app:
+  resilience:
+    enabled: ${APP_RESILIENCE_ENABLED:true}
+    default-config:
+      failure-rate-threshold: ${APP_RESILIENCE_FAILURE_RATE_THRESHOLD:50}
+      slow-call-rate-threshold: ${APP_RESILIENCE_SLOW_CALL_RATE_THRESHOLD:50}
+      slow-call-duration: ${APP_RESILIENCE_SLOW_CALL_DURATION:5s}
+      minimum-calls: ${APP_RESILIENCE_MINIMUM_CALLS:5}
+      permitted-half-open-calls: ${APP_RESILIENCE_HALF_OPEN_CALLS:2}
+      open-duration: ${APP_RESILIENCE_OPEN_DURATION:30s}
+    instances:
+      prometheus:
+        minimum-calls: 3
+        open-duration: 20s
+      cls-logs:
+        minimum-calls: 3
+        open-duration: 30s
+      dashscope-chat:
+        minimum-calls: 5
+        slow-call-duration: 30s
+        open-duration: 60s
+      dashscope-embedding:
+        minimum-calls: 5
+        open-duration: 60s
+      milvus:
+        minimum-calls: 3
+        open-duration: 30s
+      mcp-tavily:
+        minimum-calls: 2
+        open-duration: 60s
+      mcp-dbhub:
+        minimum-calls: 2
+        open-duration: 60s
   cors:
     allowed-origins: ${APP_CORS_ALLOWED_ORIGINS:http://localhost:9900,http://127.0.0.1:9900}
   security:
@@ -99,6 +131,8 @@ app:
     path: ${APP_CHAT_HISTORY_PATH:./data/chat-history}
   incidents:
     path: ${APP_INCIDENTS_PATH:./data/incidents}
+    diagnosis-reuse-enabled: ${APP_DIAGNOSIS_REUSE_ENABLED:true}
+    diagnosis-reuse-window-millis: ${APP_DIAGNOSIS_REUSE_WINDOW_MILLIS:3600000}
   memory:
     private-recall-enabled: ${APP_PRIVATE_MEMORY_RECALL_ENABLED:true}
     private-recall-top-k: ${APP_PRIVATE_MEMORY_RECALL_TOP_K:3}

@@ -69,7 +69,7 @@ class DiagnosisReportGuardTest {
         String report = "# 告警分析报告\n\nCPU 使用率异常 [evidence: ev-log-1]";
         String result = guard.constrainReport(report, List.of(logs));
 
-        assertTrue(result.contains("资源类结论缺少 queryMetricTrend 趋势 evidence"));
+        assertTrue(result.contains("资源类结论缺少成功的 queryMetricTrend 趋势 evidence"));
         assertTrue(result.contains("置信度: 中"));
     }
 

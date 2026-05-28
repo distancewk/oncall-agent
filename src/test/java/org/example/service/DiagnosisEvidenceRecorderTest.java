@@ -3,15 +3,18 @@ package org.example.service;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.example.dto.DiagnosisEvidence;
+import org.example.exception.DependencyUnavailableException;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verify;
-import static org.mockito.ArgumentMatchers.eq;
 
 class DiagnosisEvidenceRecorderTest {
 
@@ -57,5 +60,50 @@ class DiagnosisEvidenceRecorderTest {
         String result = recorder.recordToolCall("queryLogs", "{}", "recent", () -> "plain text");
 
         assertEquals("plain text", result);
+    }
+
+    @Test
+    void recordToolCall_shouldCaptureErrorCodeFromFailedJsonResult() throws Exception {
+        IncidentService incidentService = mock(IncidentService.class);
+        DiagnosisEvidenceRecorder recorder = new DiagnosisEvidenceRecorder(incidentService, objectMapper);
+
+        recorder.withRun("inc-1", "run-1", () -> recorder.recordToolCall(
+                "queryMetricTrend",
+                "{\"metric\":\"cpu_usage\"}",
+                "1h",
+                () -> "{\"success\":false,\"errorCode\":\"CIRCUIT_OPEN\",\"message\":\"Prometheus 熔断\"}"
+        ));
+
+        ArgumentCaptor<DiagnosisEvidence> evidenceCaptor = ArgumentCaptor.forClass(DiagnosisEvidence.class);
+        verify(incidentService).addToolEvidence(eq("inc-1"), eq("run-1"), evidenceCaptor.capture());
+        DiagnosisEvidence evidence = evidenceCaptor.getValue();
+
+        assertEquals("CIRCUIT_OPEN", evidence.getErrorCode());
+        assertFalse(evidence.isSuccess());
+    }
+
+    @Test
+    void recordToolCall_shouldCaptureErrorCodeFromDependencyUnavailableException() {
+        IncidentService incidentService = mock(IncidentService.class);
+        DiagnosisEvidenceRecorder recorder = new DiagnosisEvidenceRecorder(incidentService, objectMapper);
+
+        DependencyUnavailableException thrown = assertThrows(DependencyUnavailableException.class,
+                () -> recorder.withRun("inc-1", "run-1", () -> recorder.recordToolCall(
+                        "queryMetricTrend",
+                        "{\"metric\":\"cpu_usage\"}",
+                        "1h",
+                        () -> {
+                            throw new DependencyUnavailableException(
+                                    "prometheus", "queryMetricTrend", "CIRCUIT_OPEN", null);
+                        }
+                )));
+
+        ArgumentCaptor<DiagnosisEvidence> evidenceCaptor = ArgumentCaptor.forClass(DiagnosisEvidence.class);
+        verify(incidentService).addToolEvidence(eq("inc-1"), eq("run-1"), evidenceCaptor.capture());
+        DiagnosisEvidence evidence = evidenceCaptor.getValue();
+
+        assertEquals("CIRCUIT_OPEN", thrown.getErrorCode());
+        assertEquals("CIRCUIT_OPEN", evidence.getErrorCode());
+        assertFalse(evidence.isSuccess());
     }
 }

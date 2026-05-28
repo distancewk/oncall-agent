@@ -8,10 +8,13 @@ import io.milvus.param.dml.HybridSearchParam;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
+import org.example.config.AppResilienceProperties;
+import org.example.exception.DependencyUnavailableException;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 import org.springframework.test.util.ReflectionTestUtils;
 
+import java.time.Duration;
 import java.util.Collections;
 import java.util.List;
 import java.util.TreeMap;
@@ -151,5 +154,32 @@ class VectorSearchServiceTest {
         for (AnnSearchParam request : param.getSearchRequests()) {
             assertEquals("metadata[\"doc_type\"] == \"incident_case\"", request.getExpr());
         }
+    }
+
+    @Test
+    void searchIncidentCases_shouldThrowCircuitOpenWithoutCallingMilvusAgain_whenBreakerIsOpen() {
+        AppResilienceProperties properties = new AppResilienceProperties();
+        properties.getDefaultConfig().setMinimumCalls(1);
+        properties.getDefaultConfig().setFailureRateThreshold(50.0f);
+        properties.getDefaultConfig().setOpenDuration(Duration.ofSeconds(30));
+        ReflectionTestUtils.setField(vectorSearchService, "dependencyGuard", new DependencyGuard(properties));
+
+        when(embeddingService.generateQueryVector("cpu incident")).thenReturn(List.of(0.1f, 0.2f));
+        TreeMap<Long, Float> sparseVector = new TreeMap<>();
+        sparseVector.put(1L, 0.5f);
+        when(embeddingService.generateSparseVector("cpu incident")).thenReturn(sparseVector);
+
+        R<SearchResults> errorResponse = R.failed(R.Status.UnexpectedError, "search failed");
+        when(milvusClient.hybridSearch(any(HybridSearchParam.class))).thenReturn(errorResponse);
+
+        assertThrows(RuntimeException.class, () ->
+                vectorSearchService.searchIncidentCases("cpu incident", 3));
+
+        RuntimeException open = assertThrows(RuntimeException.class, () ->
+                vectorSearchService.searchIncidentCases("cpu incident", 3));
+
+        assertInstanceOf(DependencyUnavailableException.class, open);
+        assertEquals("CIRCUIT_OPEN", ((DependencyUnavailableException) open).getErrorCode());
+        verify(milvusClient, times(1)).hybridSearch(any(HybridSearchParam.class));
     }
 }

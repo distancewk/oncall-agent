@@ -1,6 +1,7 @@
 package org.example.agent.tool;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import org.example.exception.DependencyUnavailableException;
 import org.example.service.DiagnosisEvidenceRecorder;
 import org.example.service.VectorSearchService;
 import org.slf4j.Logger;
@@ -85,6 +86,9 @@ public class InternalDocsTools {
 
             return resultJson;
             
+        } catch (DependencyUnavailableException e) {
+            logger.error("[工具错误] queryInternalDocs 依赖熔断", e);
+            return buildDependencyError(e);
         } catch (Exception e) {
             logger.error("[工具错误] queryInternalDocs 执行失败", e);
             return String.format("{\"status\": \"error\", \"message\": \"Failed to query internal docs: %s\"}", 
@@ -101,5 +105,23 @@ public class InternalDocsTools {
         } catch (Exception e) {
             return "{\"query\":\"" + (query == null ? "" : query.replace("\"", "\\\"")) + "\"}";
         }
+    }
+
+    private String buildDependencyError(DependencyUnavailableException e) {
+        try {
+            Map<String, Object> error = new HashMap<>();
+            error.put("success", false);
+            error.put("status", "error");
+            error.put("errorCode", e.getErrorCode());
+            error.put("message", e.getMessage());
+            return objectMapper.writeValueAsString(error);
+        } catch (Exception jsonError) {
+            return "{\"success\":false,\"status\":\"error\",\"errorCode\":\""
+                    + escapeJson(e.getErrorCode()) + "\",\"message\":\"" + escapeJson(e.getMessage()) + "\"}";
+        }
+    }
+
+    private String escapeJson(String value) {
+        return value == null ? "" : value.replace("\\", "\\\\").replace("\"", "\\\"");
     }
 }

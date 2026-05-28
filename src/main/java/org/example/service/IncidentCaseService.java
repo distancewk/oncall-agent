@@ -13,7 +13,9 @@ import org.example.dto.AlertPayload;
 import org.example.dto.DiagnosisEvidence;
 import org.example.dto.DiagnosisRunRecord;
 import org.example.dto.IncidentRecord;
+import org.example.exception.DependencyUnavailableException;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.context.annotation.Lazy;
 import org.springframework.stereotype.Service;
 
 import java.nio.charset.StandardCharsets;
@@ -38,9 +40,12 @@ public class IncidentCaseService {
     private final MilvusInsertHelper insertHelper;
     private final ObjectMapper objectMapper = new ObjectMapper();
 
+    @Autowired(required = false)
+    private DependencyGuard dependencyGuard;
+
     @Autowired
     public IncidentCaseService(IncidentService incidentService,
-                               MilvusServiceClient milvusClient,
+                               @Lazy MilvusServiceClient milvusClient,
                                VectorEmbeddingService embeddingService,
                                VectorSearchService vectorSearchService,
                                MilvusInsertHelper insertHelper) {
@@ -84,6 +89,20 @@ public class IncidentCaseService {
         List<VectorSearchService.SearchResult> cases;
         try {
             cases = findSimilarCases(incident, 3);
+        } catch (DependencyUnavailableException e) {
+            DiagnosisEvidence evidence = DiagnosisEvidence.toolCall(
+                    TOOL_SEARCH_SIMILAR_CASES,
+                    buildSearchParams(incident, 3),
+                    "历史故障案例",
+                    "相似历史故障案例召回失败: " + e.getErrorCode(),
+                    buildFailureRaw(e),
+                    false,
+                    e.getMessage(),
+                    System.currentTimeMillis());
+            evidence.setErrorCode(e.getErrorCode());
+            incidentService.addToolEvidence(incident.getId(), run.getRunId(), evidence);
+            return alertContext + "\n\n## 相似历史故障案例\n- 召回失败 [evidence: "
+                    + evidence.getId() + "]: " + e.getErrorCode() + " " + e.getMessage() + "\n";
         } catch (Exception e) {
             DiagnosisEvidence evidence = DiagnosisEvidence.toolCall(
                     TOOL_SEARCH_SIMILAR_CASES,
@@ -173,10 +192,10 @@ public class IncidentCaseService {
     private void deleteExistingCase(String incidentId) {
         String expr = "metadata[\"doc_type\"] == \"" + MilvusConstants.DOC_TYPE_INCIDENT_CASE
                 + "\" && metadata[\"incident_id\"] == \"" + escapeExpr(incidentId) + "\"";
-        R<MutationResult> response = milvusClient.delete(DeleteParam.newBuilder()
+        R<MutationResult> response = guardedMilvus("deleteExistingCase", () -> milvusClient.delete(DeleteParam.newBuilder()
                 .withCollectionName(MilvusConstants.MILVUS_COLLECTION_NAME)
                 .withExpr(expr)
-                .build());
+                .build()));
         if (response.getStatus() != 0) {
             throw new RuntimeException("删除旧历史案例失败: " + response.getMessage());
         }
@@ -191,10 +210,33 @@ public class IncidentCaseService {
                 List.of(vector),
                 List.of(sparseVector),
                 List.of(document.metadata()));
-        R<MutationResult> response = milvusClient.insert(insertParam);
+        R<MutationResult> response = guardedMilvus("insertCaseDocument", () -> milvusClient.insert(insertParam));
         if (response.getStatus() != 0) {
             throw new RuntimeException("写入历史案例失败: " + response.getMessage());
         }
+    }
+
+    private R<MutationResult> guardedMilvus(String operation, java.util.function.Supplier<R<MutationResult>> call) {
+        if (dependencyGuard == null) {
+            return call.get();
+        }
+        return dependencyGuard.execute("milvus", operation,
+                () -> {
+                    R<MutationResult> response = call.get();
+                    if (response.getStatus() != 0) {
+                        throw new RuntimeException(response.getMessage());
+                    }
+                    return response;
+                },
+                error -> {
+                    if (error instanceof DependencyUnavailableException unavailable) {
+                        throw unavailable;
+                    }
+                    if (error instanceof RuntimeException runtimeException) {
+                        throw runtimeException;
+                    }
+                    throw new RuntimeException(error);
+                });
     }
 
     private Optional<DiagnosisRunRecord> latestCompletedRun(IncidentRecord incident) {
@@ -275,6 +317,20 @@ public class IncidentCaseService {
             return objectMapper.writeValueAsString(value);
         } catch (Exception e) {
             return String.valueOf(value);
+        }
+    }
+
+    private String buildFailureRaw(DependencyUnavailableException e) {
+        try {
+            Map<String, Object> raw = new LinkedHashMap<>();
+            raw.put("success", false);
+            raw.put("status", "error");
+            raw.put("errorCode", e.getErrorCode());
+            raw.put("message", e.getMessage());
+            return objectMapper.writeValueAsString(raw);
+        } catch (Exception jsonError) {
+            return "{\"success\":false,\"status\":\"error\",\"errorCode\":\""
+                    + escapeJson(e.getErrorCode()) + "\",\"message\":\"" + escapeJson(e.getMessage()) + "\"}";
         }
     }
 

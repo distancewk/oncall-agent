@@ -13,6 +13,7 @@ import java.util.List;
 import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -159,17 +160,74 @@ class IncidentServiceTest {
         assertTrue(completed.getReport().contains("已引用证据: ev-cpu-guard"));
     }
 
+    @Test
+    void createReusedDiagnosisRunIfAvailable_shouldReuseLatestCompletedReportForSameIncident() {
+        IncidentService service = newIncidentService();
+        IncidentRecord incident = service.recordAlert(alertPayload("fp-cpu-reuse", "HighCPUUsage", "payment-service"));
+        DiagnosisRunRecord original = service.createDiagnosisRun(incident.getId(), "原始告警上下文");
+        DiagnosisRunRecord completed = service.completeRun(
+                incident.getId(),
+                original.getRunId(),
+                "# 告警分析报告\n\nCPU 持续高水位");
+
+        DiagnosisRunRecord reused = service.createReusedDiagnosisRunIfAvailable(
+                incident.getId(), "重复告警上下文").orElseThrow();
+
+        assertEquals("COMPLETED", reused.getStatus());
+        assertEquals(completed.getReport(), reused.getReport());
+        assertEquals(completed.getRunId(), reused.getReusedFromRunId());
+        assertEquals(1.0d, reused.getReuseConfidence());
+        assertTrue(reused.getReuseValidatedAt() > 0);
+        assertTrue(reused.getReuseReason().contains("同一 Incident 已存在完成诊断"));
+        assertEquals("复用历史诊断报告", reused.getCurrentStep());
+        assertEquals(List.of("alert_context", "diagnosis_reuse"), reused.getEvidence().stream()
+                .map(evidence -> evidence.getType())
+                .toList());
+
+        IncidentRecord restored = newIncidentService().getIncident(incident.getId()).orElseThrow();
+        assertEquals(2, restored.getDiagnosisRuns().size());
+        assertEquals(completed.getRunId(), restored.getDiagnosisRuns().get(1).getReusedFromRunId());
+    }
+
+    @Test
+    void createReusedDiagnosisRunIfAvailable_shouldReturnEmptyWhenNoCompletedReportExists() {
+        IncidentService service = newIncidentService();
+        IncidentRecord incident = service.recordAlert(alertPayload("fp-cpu-no-reuse", "HighCPUUsage", "payment-service"));
+        service.createDiagnosisRun(incident.getId(), "告警上下文");
+
+        assertFalse(service.createReusedDiagnosisRunIfAvailable(incident.getId(), "重复告警上下文").isPresent());
+    }
+
+    @Test
+    void createReusedDiagnosisRunIfAvailable_shouldReturnEmptyWhenReuseIsDisabled() {
+        AppIncidentProperties properties = incidentProperties();
+        properties.setDiagnosisReuseEnabled(false);
+        IncidentService service = newIncidentService(null, properties);
+        IncidentRecord incident = service.recordAlert(alertPayload("fp-cpu-reuse-disabled", "HighCPUUsage", "payment-service"));
+        DiagnosisRunRecord original = service.createDiagnosisRun(incident.getId(), "原始告警上下文");
+        service.completeRun(incident.getId(), original.getRunId(), "# 告警分析报告");
+
+        assertFalse(service.createReusedDiagnosisRunIfAvailable(incident.getId(), "重复告警上下文").isPresent());
+    }
+
     private IncidentService newIncidentService() {
         return newIncidentService(null);
     }
 
     private IncidentService newIncidentService(DiagnosisReportService reportService) {
+        return newIncidentService(reportService, incidentProperties());
+    }
+
+    private IncidentService newIncidentService(DiagnosisReportService reportService,
+                                               AppIncidentProperties properties) {
+        IncidentStore store = new IncidentStore(properties, new ObjectMapper());
+        return new IncidentService(store, new ObjectMapper(), reportService, properties);
+    }
+
+    private AppIncidentProperties incidentProperties() {
         AppIncidentProperties properties = new AppIncidentProperties();
         properties.setPath(tempDir.resolve("incidents").toString());
-        IncidentStore store = new IncidentStore(properties, new ObjectMapper());
-        return reportService == null
-                ? new IncidentService(store, new ObjectMapper())
-                : new IncidentService(store, new ObjectMapper(), reportService);
+        return properties;
     }
 
     private AlertPayload alertPayload(String fingerprint, String alertName, String service) {

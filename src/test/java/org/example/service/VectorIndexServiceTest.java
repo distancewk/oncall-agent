@@ -7,12 +7,15 @@ import io.milvus.param.RpcStatus;
 import io.milvus.param.collection.LoadCollectionParam;
 import io.milvus.param.dml.DeleteParam;
 import io.milvus.param.dml.InsertParam;
+import org.example.config.AppResilienceProperties;
 import org.example.dto.DocumentChunk;
+import org.example.exception.DependencyUnavailableException;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 import org.mockito.ArgumentCaptor;
 import org.springframework.test.util.ReflectionTestUtils;
 
+import java.time.Duration;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.List;
@@ -21,9 +24,11 @@ import java.util.SortedMap;
 import java.util.TreeMap;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -100,6 +105,41 @@ class VectorIndexServiceTest {
         assertEquals(2, fieldValues(insertParam, "vector").size());
         assertEquals(2, fieldValues(insertParam, "sparse_vector").size());
         assertEquals(2, fieldValues(insertParam, "metadata").size());
+    }
+
+    @Test
+    void indexSingleFile_shouldGuardCollectionLoadAndShortCircuitSecondAttempt_whenMilvusLoadFails() throws Exception {
+        Path file = tempDir.resolve("runbook.md");
+        Files.writeString(file, "# Runbook");
+
+        MilvusServiceClient milvusClient = mock(MilvusServiceClient.class);
+        VectorEmbeddingService embeddingService = mock(VectorEmbeddingService.class);
+        DocumentChunkService chunkService = mock(DocumentChunkService.class);
+
+        @SuppressWarnings("unchecked")
+        R<RpcStatus> loadResponse = mock(R.class);
+        when(loadResponse.getStatus()).thenReturn(1);
+        when(loadResponse.getMessage()).thenReturn("load failed");
+        when(milvusClient.loadCollection(any(LoadCollectionParam.class))).thenReturn(loadResponse);
+
+        AppResilienceProperties properties = new AppResilienceProperties();
+        properties.getDefaultConfig().setMinimumCalls(1);
+        properties.getDefaultConfig().setFailureRateThreshold(50.0f);
+        properties.getDefaultConfig().setOpenDuration(Duration.ofSeconds(30));
+
+        VectorIndexService service = new VectorIndexService();
+        ReflectionTestUtils.setField(service, "milvusClient", milvusClient);
+        ReflectionTestUtils.setField(service, "embeddingService", embeddingService);
+        ReflectionTestUtils.setField(service, "chunkService", chunkService);
+        ReflectionTestUtils.setField(service, "dependencyGuard", new DependencyGuard(properties));
+
+        assertThrows(RuntimeException.class, () -> service.indexSingleFile(file.toString()));
+
+        DependencyUnavailableException open = assertThrows(DependencyUnavailableException.class,
+                () -> service.indexSingleFile(file.toString()));
+
+        assertEquals("CIRCUIT_OPEN", open.getErrorCode());
+        verify(milvusClient, times(1)).loadCollection(any(LoadCollectionParam.class));
     }
 
     private List<?> fieldValues(InsertParam insertParam, String fieldName) {

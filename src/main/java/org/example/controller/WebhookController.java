@@ -70,6 +70,16 @@ public class WebhookController {
         logger.info("告警已存储, alertId: {}, incidentId: {}", alertId, incident.getId());
 
         String alertContext = incidentService.buildAlertContext(incident);
+        Optional<DiagnosisRunRecord> reusedRun = incidentService.createReusedDiagnosisRunIfAvailable(
+                incident.getId(), alertContext);
+        if (reusedRun.isPresent()) {
+            DiagnosisRunRecord run = reusedRun.get();
+            alertService.storeReport(alertId, run.getReport());
+            logger.info("告警命中可复用诊断报告, alertId: {}, incidentId: {}, runId: {}, sourceRunId: {}",
+                    alertId, incident.getId(), run.getRunId(), run.getReusedFromRunId());
+            return ResponseEntity.ok("Alert received and reused existing diagnosis report.");
+        }
+
         DiagnosisRunRecord run = incidentService.createDiagnosisRun(incident.getId(), alertContext);
 
         // 异步触发 AiOps 分析流程

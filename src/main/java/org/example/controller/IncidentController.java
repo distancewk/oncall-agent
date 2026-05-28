@@ -85,6 +85,13 @@ public class IncidentController {
         }
 
         String alertContext = incidentService.buildAlertContext(incidentOptional.get());
+        Optional<DiagnosisRunRecord> reusedRun = incidentService.createReusedDiagnosisRunIfAvailable(incidentId, alertContext);
+        if (reusedRun.isPresent()) {
+            logger.info("复用历史诊断报告, incidentId: {}, runId: {}, sourceRunId: {}",
+                    incidentId, reusedRun.get().getRunId(), reusedRun.get().getReusedFromRunId());
+            return ResponseEntity.ok(ApiResponse.success(reusedRun.get()));
+        }
+
         DiagnosisRunRecord run = incidentService.createDiagnosisRun(incidentId, alertContext);
         executor.execute(() -> executeDiagnosisRun(incidentId, run.getRunId(), alertContext));
         return ResponseEntity.ok(ApiResponse.success(run));

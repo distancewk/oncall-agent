@@ -12,9 +12,11 @@ import org.example.config.AppMemoryProperties;
 import org.example.dto.ApiResponse;
 import org.example.dto.ChatSessionRecord;
 import org.example.dto.ChatSessionSummary;
+import org.example.exception.DependencyUnavailableException;
 import org.example.service.AiOpsService;
 import org.example.service.AlertService;
 import org.example.service.ChatService;
+import org.example.service.DependencyGuard;
 import org.example.service.SessionManager;
 import org.example.service.VectorSearchService;
 import org.slf4j.Logger;
@@ -74,6 +76,9 @@ public class ChatController {
     @Autowired(required = false)
     private AppMemoryProperties appMemoryProperties;
 
+    @Autowired(required = false)
+    private DependencyGuard dependencyGuard;
+
     /**
      * 普通对话接口（支持工具调用）
      * 与 /chat_react 逻辑一致，但直接返回完整结果而非流式输出
@@ -125,7 +130,7 @@ public class ChatController {
 
         } catch (Exception e) {
             logger.error("对话失败", e);
-            return ResponseEntity.ok(ApiResponse.success(ChatResponse.error(e.getMessage())));
+            return ResponseEntity.ok(ApiResponse.success(ChatResponse.error(errorMessage(e))));
         }
     }
 
@@ -207,7 +212,18 @@ public class ChatController {
                 StringBuilder fullAnswerBuilder = new StringBuilder();
                 
                 // 使用 agent.stream() 进行流式对话
-                Flux<NodeOutput> stream = agent.stream(request.getQuestion());
+                Flux<NodeOutput> stream;
+                try {
+                    if (dependencyGuard != null) {
+                        dependencyGuard.assertAvailable("dashscope-chat", "chatAgentStream");
+                    }
+                    stream = agent.stream(request.getQuestion());
+                } catch (Exception e) {
+                    if (!(e instanceof DependencyUnavailableException) && dependencyGuard != null) {
+                        dependencyGuard.recordFailure("dashscope-chat", "chatAgentStream", e);
+                    }
+                    throw dashscopeDependencyError("chatAgentStream", e);
+                }
                 
                 stream.subscribe(
                     output -> {
@@ -249,18 +265,25 @@ public class ChatController {
                     error -> {
                         // 错误处理
                         logger.error("ReactAgent 流式对话失败", error);
+                        Throwable clientError = dashscopeDependencyError("chatAgentStream", error);
+                        if (!(error instanceof DependencyUnavailableException) && dependencyGuard != null) {
+                            dependencyGuard.recordFailure("dashscope-chat", "chatAgentStream", error);
+                        }
                         try {
                             emitter.send(SseEmitter.event()
                                     .name("message")
-                                    .data(SseMessage.error(error.getMessage()), MediaType.APPLICATION_JSON));
+                                    .data(SseMessage.error(errorMessage(clientError)), MediaType.APPLICATION_JSON));
                         } catch (IOException ex) {
                             logger.error("发送错误消息失败", ex);
                         }
-                        emitter.completeWithError(error);
+                        emitter.completeWithError(clientError);
                     },
                     () -> {
                         // 完成处理
                         try {
+                            if (dependencyGuard != null) {
+                                dependencyGuard.recordSuccess("dashscope-chat");
+                            }
                             String fullAnswer = fullAnswerBuilder.toString();
                             logger.info("ReactAgent 流式对话完成 - SessionId: {}, 答案长度: {}", 
                                 request.getId(), fullAnswer.length());
@@ -284,14 +307,15 @@ public class ChatController {
 
             } catch (Exception e) {
                 logger.error("ReactAgent 对话初始化失败", e);
+                Throwable clientError = dashscopeDependencyError("chatAgentStream", e);
                 try {
                     emitter.send(SseEmitter.event()
                             .name("message")
-                            .data(SseMessage.error(e.getMessage()), MediaType.APPLICATION_JSON));
+                            .data(SseMessage.error(errorMessage(clientError)), MediaType.APPLICATION_JSON));
                 } catch (IOException ex) {
                     logger.error("发送错误消息失败", ex);
                 }
-                emitter.completeWithError(e);
+                emitter.completeWithError(clientError);
             }
         });
 
@@ -469,6 +493,20 @@ public class ChatController {
             logger.warn("检索私人长期记忆失败，继续普通对话: {}", e.getMessage());
             return List.of();
         }
+    }
+
+    private String errorMessage(Throwable error) {
+        if (error instanceof DependencyUnavailableException unavailable) {
+            return unavailable.getErrorCode() + ": " + unavailable.getMessage();
+        }
+        return error.getMessage();
+    }
+
+    private DependencyUnavailableException dashscopeDependencyError(String operation, Throwable error) {
+        if (error instanceof DependencyUnavailableException unavailable) {
+            return unavailable;
+        }
+        return new DependencyUnavailableException("dashscope-chat", operation, "DEPENDENCY_ERROR", error);
     }
 
     // ==================== 内部类 ====================

@@ -23,6 +23,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -112,6 +113,47 @@ class WebhookControllerTest {
                 "基础告警上下文\n\n## 预取指标趋势证据");
         verify(aiOpsService).executeAiOpsAnalysis(
                 eq(chatModel), any(), eq("基础告警上下文\n\n## 预取指标趋势证据"), eq("incident-1"), eq("run-1"));
+    }
+
+    @Test
+    void receiveAlert_shouldReuseCompletedReportAndSkipAiOpsWhenSameIncidentHasReusableRun() throws Exception {
+        AiOpsService aiOpsService = mock(AiOpsService.class);
+        AlertService alertService = mock(AlertService.class);
+        IncidentService incidentService = mock(IncidentService.class);
+        DashScopeChatModel chatModel = mock(DashScopeChatModel.class);
+        ToolCallbackProvider tools = mock(ToolCallbackProvider.class);
+
+        IncidentRecord incident = new IncidentRecord();
+        incident.setId("incident-1");
+        DiagnosisRunRecord reused = new DiagnosisRunRecord();
+        reused.setRunId("run-reuse");
+        reused.setIncidentId("incident-1");
+        reused.setStatus("COMPLETED");
+        reused.setReport("# 复用报告");
+        reused.setReusedFromRunId("run-original");
+
+        AlertPayload payload = alertPayload();
+        when(incidentService.recordAlert(payload)).thenReturn(incident);
+        when(alertService.storeAlert(payload, "incident-1")).thenReturn("alert-1");
+        when(incidentService.buildAlertContext(incident)).thenReturn("告警上下文");
+        when(incidentService.createReusedDiagnosisRunIfAvailable("incident-1", "告警上下文"))
+                .thenReturn(Optional.of(reused));
+
+        WebhookController controller = new WebhookController();
+        ReflectionTestUtils.setField(controller, "aiOpsService", aiOpsService);
+        ReflectionTestUtils.setField(controller, "alertService", alertService);
+        ReflectionTestUtils.setField(controller, "incidentService", incidentService);
+        ReflectionTestUtils.setField(controller, "dashScopeChatModel", chatModel);
+        ReflectionTestUtils.setField(controller, "tools", tools);
+        ReflectionTestUtils.setField(controller, "executor", (Executor) Runnable::run);
+
+        ResponseEntity<String> response = controller.receiveAlert(payload);
+
+        assertEquals(HttpStatus.OK, response.getStatusCode());
+        assertEquals("Alert received and reused existing diagnosis report.", response.getBody());
+        verify(alertService).storeReport("alert-1", "# 复用报告");
+        verify(incidentService, never()).createDiagnosisRun(eq("incident-1"), any());
+        verify(aiOpsService, never()).executeAiOpsAnalysis(any(), any(), any(), any(), any());
     }
 
     private AlertPayload alertPayload() {

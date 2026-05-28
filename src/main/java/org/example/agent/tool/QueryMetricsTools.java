@@ -9,6 +9,8 @@ import okhttp3.OkHttpClient;
 import okhttp3.Request;
 import okhttp3.Response;
 import okhttp3.ResponseBody;
+import org.example.exception.DependencyUnavailableException;
+import org.example.service.DependencyGuard;
 import org.example.service.DiagnosisEvidenceRecorder;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -55,6 +57,9 @@ public class QueryMetricsTools {
 
     @Autowired(required = false)
     private DiagnosisEvidenceRecorder diagnosisEvidenceRecorder;
+
+    @Autowired(required = false)
+    private DependencyGuard dependencyGuard;
     
     @jakarta.annotation.PostConstruct
     public void init() {
@@ -128,7 +133,8 @@ public class QueryMetricsTools {
                 PrometheusAlertsResult result = fetchPrometheusAlerts();
                 
                 if (!"success".equals(result.getStatus())) {
-                    return buildErrorResponse("Prometheus API 返回非成功状态: " + result.getStatus(), result.getError());
+                    return buildErrorResponse("Prometheus API 返回非成功状态: " + result.getStatus(),
+                            result.getError(), "DEPENDENCY_ERROR");
                 }
                 
                 // 转换为简化格式，对于相同的 alertname，只保留第一个
@@ -168,9 +174,14 @@ public class QueryMetricsTools {
             
             return jsonResult;
             
+        } catch (DependencyUnavailableException e) {
+            logger.warn("Prometheus 告警查询被熔断, dependency: {}, operation: {}",
+                    e.getDependency(), e.getOperation());
+            return buildErrorResponse("Prometheus 熔断，证据缺失: 无法查询活动告警",
+                    e.getMessage(), e.getErrorCode());
         } catch (Exception e) {
             logger.error("查询 Prometheus 告警失败", e);
-            return buildErrorResponse("查询失败", e.getMessage());
+            return buildErrorResponse("查询 Prometheus 失败，证据缺失", e.getMessage(), "DEPENDENCY_ERROR");
         }
     }
 
@@ -203,9 +214,14 @@ public class QueryMetricsTools {
             logger.info("指标趋势查询完成, metric: {}, points: {}, anomalous: {}",
                     metric, points.size(), summary.isAnomalous());
             return objectMapper.writerWithDefaultPrettyPrinter().writeValueAsString(output);
+        } catch (DependencyUnavailableException e) {
+            logger.warn("Prometheus 指标趋势查询被熔断, metric: {}, dependency: {}, operation: {}",
+                    metric, e.getDependency(), e.getOperation());
+            return buildMetricTrendErrorResponse(metric, window, query,
+                    "Prometheus 熔断，证据缺失: 无法查询指标趋势", e.getMessage(), e.getErrorCode());
         } catch (Exception e) {
             logger.error("查询指标趋势失败, metric: {}, query: {}", metric, query, e);
-            return buildMetricTrendErrorResponse(metric, window, query, e.getMessage());
+            return buildMetricTrendErrorResponse(metric, window, query, e.getMessage(), e.getMessage(), "DEPENDENCY_ERROR");
         }
     }
     
@@ -264,6 +280,13 @@ public class QueryMetricsTools {
      * 从 Prometheus API 获取告警数据
      */
     private PrometheusAlertsResult fetchPrometheusAlerts() throws Exception {
+        if (dependencyGuard != null) {
+            return executeGuarded("prometheus", TOOL_QUERY_PROMETHEUS_ALERTS, this::fetchPrometheusAlertsDirect);
+        }
+        return fetchPrometheusAlertsDirect();
+    }
+
+    private PrometheusAlertsResult fetchPrometheusAlertsDirect() throws Exception {
         String apiUrl = prometheusBaseUrl + "/api/v1/alerts";
         logger.debug("请求 Prometheus API: {}", apiUrl);
         
@@ -283,11 +306,24 @@ public class QueryMetricsTools {
             }
 
             String responseBody = body.string();
-            return objectMapper.readValue(responseBody, PrometheusAlertsResult.class);
+            PrometheusAlertsResult result = objectMapper.readValue(responseBody, PrometheusAlertsResult.class);
+            if (!"success".equals(result.getStatus())) {
+                throw new RuntimeException("Prometheus API 返回非成功状态: "
+                        + result.getStatus() + ", " + result.getError());
+            }
+            return result;
         }
     }
 
     private List<MetricPoint> fetchPrometheusTrend(String query, String window, String step) throws Exception {
+        if (dependencyGuard != null) {
+            return executeGuarded("prometheus", TOOL_QUERY_METRIC_TREND,
+                    () -> fetchPrometheusTrendDirect(query, window, step));
+        }
+        return fetchPrometheusTrendDirect(query, window, step);
+    }
+
+    private List<MetricPoint> fetchPrometheusTrendDirect(String query, String window, String step) throws Exception {
         if (httpClient == null) {
             throw new IllegalStateException("OkHttpClient 未初始化，无法查询 Prometheus");
         }
@@ -584,6 +620,11 @@ public class QueryMetricsTools {
     }
 
     private String buildMetricTrendErrorResponse(String metric, String window, String query, String error) {
+        return buildMetricTrendErrorResponse(metric, window, query, error, error, null);
+    }
+
+    private String buildMetricTrendErrorResponse(String metric, String window, String query,
+                                                String message, String error, String errorCode) {
         try {
             MetricTrendOutput output = new MetricTrendOutput();
             output.setSuccess(false);
@@ -592,12 +633,41 @@ public class QueryMetricsTools {
             output.setQuery(query);
             output.setPoints(Collections.emptyList());
             output.setSummary(summarizeTrend(metric, Collections.emptyList()));
-            output.setMessage(error == null || error.isBlank() ? "查询指标趋势失败" : error);
+            output.setMessage(message == null || message.isBlank() ? "查询指标趋势失败" : message);
             output.setError(error);
+            output.setErrorCode(errorCode);
             return objectMapper.writerWithDefaultPrettyPrinter().writeValueAsString(output);
         } catch (Exception e) {
-            return String.format("{\"success\":false,\"metric\":\"%s\",\"window\":\"%s\",\"message\":\"%s\",\"error\":\"%s\"}",
-                    metric, window, error, error);
+            return String.format("{\"success\":false,\"metric\":\"%s\",\"window\":\"%s\",\"message\":\"%s\",\"error\":\"%s\",\"errorCode\":\"%s\"}",
+                    metric, window, message, error, errorCode);
+        }
+    }
+
+    private <T> T executeGuarded(String dependency, String operation, CheckedSupplier<T> supplier) throws Exception {
+        try {
+            return dependencyGuard.execute(dependency, operation,
+                    () -> {
+                        try {
+                            return supplier.get();
+                        } catch (Exception e) {
+                            throw new GuardedDependencyException(e);
+                        }
+                    },
+                    error -> {
+                        if (error instanceof DependencyUnavailableException unavailable) {
+                            throw unavailable;
+                        }
+                        if (error instanceof RuntimeException runtimeException) {
+                            throw runtimeException;
+                        }
+                        throw new GuardedDependencyException(error);
+                    });
+        } catch (GuardedDependencyException e) {
+            Throwable cause = e.getCause();
+            if (cause instanceof Exception exception) {
+                throw exception;
+            }
+            throw e;
         }
     }
 
@@ -643,15 +713,28 @@ public class QueryMetricsTools {
     /**
      * 构建错误响应
      */
-    private String buildErrorResponse(String message, String error) {
+    private String buildErrorResponse(String message, String error, String errorCode) {
         try {
             PrometheusAlertsOutput output = new PrometheusAlertsOutput();
             output.setSuccess(false);
             output.setMessage(message);
             output.setError(error);
+            output.setErrorCode(errorCode);
             return objectMapper.writerWithDefaultPrettyPrinter().writeValueAsString(output);
         } catch (Exception e) {
-            return String.format("{\"success\":false,\"message\":\"%s\",\"error\":\"%s\"}", message, error);
+            return String.format("{\"success\":false,\"message\":\"%s\",\"error\":\"%s\",\"errorCode\":\"%s\"}",
+                    message, error, errorCode);
+        }
+    }
+
+    @FunctionalInterface
+    private interface CheckedSupplier<T> {
+        T get() throws Exception;
+    }
+
+    private static class GuardedDependencyException extends RuntimeException {
+        GuardedDependencyException(Throwable cause) {
+            super(cause);
         }
     }
     
@@ -722,6 +805,9 @@ public class QueryMetricsTools {
         
         @JsonProperty("error")
         private String error;
+
+        @JsonProperty("errorCode")
+        private String errorCode;
     }
 
     @Data
@@ -752,6 +838,9 @@ public class QueryMetricsTools {
 
         @JsonProperty("error")
         private String error;
+
+        @JsonProperty("errorCode")
+        private String errorCode;
     }
 
     @Data

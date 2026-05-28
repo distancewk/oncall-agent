@@ -2,7 +2,16 @@ package org.example.agent.tool;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import okhttp3.Call;
+import okhttp3.MediaType;
+import okhttp3.OkHttpClient;
+import okhttp3.Protocol;
+import okhttp3.Request;
+import okhttp3.Response;
+import okhttp3.ResponseBody;
+import org.example.config.AppResilienceProperties;
 import org.example.dto.DiagnosisEvidence;
+import org.example.service.DependencyGuard;
 import org.example.service.DiagnosisEvidenceRecorder;
 import org.example.service.IncidentService;
 import org.junit.jupiter.api.BeforeEach;
@@ -10,12 +19,16 @@ import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
 import org.springframework.test.util.ReflectionTestUtils;
 
+import java.time.Duration;
+
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.when;
 
 class QueryMetricsToolsTest {
 
@@ -83,5 +96,74 @@ class QueryMetricsToolsTest {
 
         JsonNode json = objectMapper.readTree(result);
         assertEquals(evidence.getId(), json.path("_diagnosisEvidenceId").asText());
+    }
+
+    @Test
+    void queryMetricTrend_shouldReturnCircuitOpenAfterGuardedPrometheusFailure() throws Exception {
+        ReflectionTestUtils.setField(tools, "mockEnabled", false);
+        ReflectionTestUtils.setField(tools, "httpClient", null);
+        ReflectionTestUtils.setField(tools, "dependencyGuard", singleFailureGuard());
+
+        JsonNode first = objectMapper.readTree(tools.queryMetricTrend(
+                "cpu_usage", "payment-service", "pod-1", "15m", null));
+        assertFalse(first.path("success").asBoolean());
+        assertEquals("DEPENDENCY_ERROR", first.path("errorCode").asText());
+
+        JsonNode second = objectMapper.readTree(tools.queryMetricTrend(
+                "cpu_usage", "payment-service", "pod-1", "15m", null));
+        assertFalse(second.path("success").asBoolean());
+        assertEquals("CIRCUIT_OPEN", second.path("errorCode").asText());
+        assertTrue(second.path("message").asText().contains("Prometheus"));
+        assertTrue(second.path("message").asText().contains("熔断"));
+        assertTrue(second.path("message").asText().contains("证据缺失"));
+    }
+
+    @Test
+    void queryPrometheusAlerts_shouldOpenCircuitAfterPrometheusSemanticFailure() throws Exception {
+        OkHttpClient httpClient = mock(OkHttpClient.class);
+        Call firstCall = mock(Call.class);
+        Call secondCall = mock(Call.class);
+        when(httpClient.newCall(any(Request.class))).thenReturn(firstCall, secondCall);
+        when(firstCall.execute()).thenReturn(prometheusErrorResponse());
+        when(secondCall.execute()).thenReturn(prometheusErrorResponse());
+
+        ReflectionTestUtils.setField(tools, "mockEnabled", false);
+        ReflectionTestUtils.setField(tools, "httpClient", httpClient);
+        ReflectionTestUtils.setField(tools, "dependencyGuard", singleFailureGuard());
+
+        JsonNode first = objectMapper.readTree(tools.queryPrometheusAlerts());
+        assertFalse(first.path("success").asBoolean());
+        assertEquals("DEPENDENCY_ERROR", first.path("errorCode").asText());
+
+        JsonNode second = objectMapper.readTree(tools.queryPrometheusAlerts());
+        assertFalse(second.path("success").asBoolean());
+        assertEquals("CIRCUIT_OPEN", second.path("errorCode").asText());
+        assertTrue(second.path("message").asText().contains("Prometheus"));
+        assertTrue(second.path("message").asText().contains("熔断"));
+        assertTrue(second.path("message").asText().contains("证据缺失"));
+    }
+
+    private DependencyGuard singleFailureGuard() {
+        AppResilienceProperties properties = new AppResilienceProperties();
+        properties.getDefaultConfig().setMinimumCalls(1);
+        properties.getDefaultConfig().setFailureRateThreshold(1.0f);
+        properties.getDefaultConfig().setOpenDuration(Duration.ofSeconds(30));
+        return new DependencyGuard(properties);
+    }
+
+    private Response prometheusErrorResponse() {
+        Request request = new Request.Builder()
+                .url("http://localhost:9090/api/v1/alerts")
+                .build();
+        ResponseBody body = ResponseBody.create(
+                "{\"status\":\"error\",\"error\":\"bad query\"}",
+                MediaType.get("application/json"));
+        return new Response.Builder()
+                .request(request)
+                .protocol(Protocol.HTTP_1_1)
+                .code(200)
+                .message("OK")
+                .body(body)
+                .build();
     }
 }

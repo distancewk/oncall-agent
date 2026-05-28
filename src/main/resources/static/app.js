@@ -13,6 +13,8 @@ class SuperBizAgentApp {
         this.pendingAlertId = null; // 待查看的告警ID
         this.incidentDetailRefreshTimer = null;
         this.incidentDetailRenderSignature = null;
+        this.dependencies = [];
+        this.dependencyLoadError = '';
 
         this.initializeElements();
         this.initTheme();
@@ -1123,7 +1125,10 @@ class SuperBizAgentApp {
         this.knowledgePanelContent.innerHTML = this.renderKnowledgePanelShell();
         this.bindKnowledgePanelEvents();
 
-        await this.loadKnowledgeIndexTasks();
+        await Promise.all([
+            this.loadDependencies(),
+            this.loadKnowledgeIndexTasks()
+        ]);
     }
 
     renderKnowledgePanelShell() {
@@ -1140,6 +1145,12 @@ class SuperBizAgentApp {
                 </div>
                 <div id="knowledgeSearchResult" class="knowledge-search-result">
                     <div class="knowledge-muted">输入关键词后可查看过滤条件、粗排参数和命中文档。</div>
+                </div>
+            </div>
+            <div class="knowledge-section-block">
+                <div class="knowledge-section-title">依赖状态</div>
+                <div id="dependencyStatusList" class="dependency-status-list">
+                    <div class="alert-panel-loading">加载中...</div>
                 </div>
             </div>
             <div class="knowledge-section-block">
@@ -1167,6 +1178,78 @@ class SuperBizAgentApp {
             });
             setTimeout(() => searchInput.focus(), 0);
         }
+    }
+
+    async loadDependencies() {
+        const dependencyContainer = document.getElementById('dependencyStatusList');
+        if (!dependencyContainer) return;
+
+        this.dependencyLoadError = '';
+        try {
+            const response = await fetch(`${this.apiBaseUrl}/system/dependencies`);
+            if (!response.ok) throw new Error(`HTTP错误: ${response.status}`);
+
+            const payload = await response.json();
+            this.dependencies = Array.isArray(payload.data) ? payload.data : [];
+            this.renderDependencyStatus();
+        } catch (error) {
+            console.error('获取依赖状态失败:', error);
+            this.dependencies = [];
+            this.dependencyLoadError = error.message || '未知错误';
+            this.renderDependencyStatus();
+        }
+    }
+
+    renderDependencyStatus() {
+        const dependencyContainer = document.getElementById('dependencyStatusList');
+        if (!dependencyContainer) return;
+
+        if (this.dependencyLoadError) {
+            dependencyContainer.innerHTML =
+                '<div class="alert-panel-error">获取依赖状态失败: ' + this.escapeHtml(this.dependencyLoadError) + '</div>';
+            return;
+        }
+
+        if (!this.dependencies || this.dependencies.length === 0) {
+            dependencyContainer.innerHTML = '<div class="alert-panel-empty">暂无依赖状态</div>';
+            return;
+        }
+
+        dependencyContainer.innerHTML = this.dependencies.map(dependency => {
+            const name = dependency.name || dependency.dependencyName || dependency.id || '未知依赖';
+            const state = dependency.state || dependency.status || 'UNKNOWN';
+            const stateClass = this.dependencyStateClass(state);
+            const lastError = dependency.lastError || '';
+            const openedAtText = dependency.openedAt ? new Date(dependency.openedAt).toLocaleString('zh-CN') : '';
+            const failureRate = Number.isFinite(Number(dependency.failureRate)) ? Number(dependency.failureRate).toFixed(1) + '%' : '';
+            const slowCallRate = Number.isFinite(Number(dependency.slowCallRate)) ? Number(dependency.slowCallRate).toFixed(1) + '%' : '';
+            const bufferedCalls = Number.isFinite(Number(dependency.bufferedCalls)) ? String(dependency.bufferedCalls) : '';
+            const metaParts = [
+                lastError ? `最近错误: ${this.escapeHtml(lastError)}` : '',
+                openedAtText ? `打开时间: ${this.escapeHtml(openedAtText)}` : '',
+                failureRate ? `失败率: ${this.escapeHtml(failureRate)}` : '',
+                slowCallRate ? `慢调用率: ${this.escapeHtml(slowCallRate)}` : '',
+                bufferedCalls ? `样本数: ${this.escapeHtml(bufferedCalls)}` : ''
+            ].filter(Boolean);
+            return `
+                <div class="dependency-status-item ${stateClass}">
+                    <div class="dependency-status-main">
+                        <span class="dependency-status-name">${this.escapeHtml(name)}</span>
+                        <span class="dependency-status-badge ${stateClass}">${this.escapeHtml(state)}</span>
+                    </div>
+                    ${metaParts.length > 0 ? `<div class="dependency-status-meta">${metaParts.join(' · ')}</div>` : ''}
+                </div>
+            `;
+        }).join('');
+    }
+
+    dependencyStateClass(state) {
+        const normalized = String(state || '').toUpperCase();
+        if (normalized === 'OPEN') return 'dependency-state-open';
+        if (normalized === 'HALF_OPEN') return 'dependency-state-half-open';
+        if (normalized === 'CLOSED') return 'dependency-state-closed';
+        if (normalized === 'DISABLED') return 'dependency-state-disabled';
+        return 'dependency-state-unknown';
     }
 
     async loadKnowledgeIndexTasks() {
@@ -2000,11 +2083,12 @@ class SuperBizAgentApp {
     }
 
     renderDiagnosisEvidenceHighlight(item) {
-        const ok = item.success !== false;
+        const breakerOpen = item.errorCode === 'CIRCUIT_OPEN';
+        const ok = item.success !== false && !breakerOpen;
         const summary = item.summary || item.content || '无摘要';
         const groupLabel = this.getDiagnosisEvidenceGroupLabel(item);
         return `
-            <div class="diagnosis-evidence-highlight ${ok ? '' : 'failed'}">
+            <div class="diagnosis-evidence-highlight ${ok ? '' : 'failed'} ${breakerOpen ? 'breaker-open' : ''}">
                 <div class="diagnosis-evidence-highlight-head">
                     <span>${this.escapeHtml(groupLabel)}</span>
                     <span>${this.escapeHtml(item.id || '-')}</span>
@@ -2028,9 +2112,10 @@ class SuperBizAgentApp {
     }
 
     renderDiagnosisEvidenceItem(item) {
-        const ok = item.success !== false;
-        const statusText = ok ? 'SUCCESS' : 'FAILED';
-        const statusClass = ok ? 'success' : 'failed';
+        const breakerOpen = item.errorCode === 'CIRCUIT_OPEN';
+        const ok = item.success !== false && !breakerOpen;
+        const statusText = breakerOpen ? 'BREAKER OPEN' : (ok ? 'SUCCESS' : 'FAILED');
+        const statusClass = breakerOpen ? 'failed breaker-open' : (ok ? 'success' : 'failed');
         const title = item.toolName || item.title || item.type || 'evidence';
         const summary = item.summary || item.content || '无摘要';
         return `
@@ -2044,6 +2129,8 @@ class SuperBizAgentApp {
                 </div>
                 ${item.timeRange ? `<div class="diagnosis-evidence-time">时间范围: ${this.escapeHtml(item.timeRange)}</div>` : ''}
                 <div class="diagnosis-evidence-summary">${this.escapeHtml(summary)}</div>
+                ${item.errorCode ? `<div class="diagnosis-evidence-error-code">errorCode: ${this.escapeHtml(item.errorCode)}</div>` : ''}
+                ${breakerOpen ? '<div class="diagnosis-evidence-breaker-note">依赖熔断，相关证据缺失；报告不能基于该工具生成事实结论。</div>' : ''}
                 ${item.queryParams ? `
                     <details class="diagnosis-evidence-extra">
                         <summary>查看参数</summary>

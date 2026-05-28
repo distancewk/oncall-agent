@@ -10,6 +10,7 @@ import org.example.agent.tool.InternalDocsTools;
 import org.example.agent.tool.QueryLogsTools;
 import org.example.agent.tool.QueryMetricsTools;
 import org.example.dto.DiagnosisRunRecord;
+import org.example.exception.DependencyUnavailableException;
 import org.example.util.ToolUtils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -51,6 +52,12 @@ public class AiOpsService {
     @Autowired(required = false)
     private IncidentService incidentService;
 
+    @Autowired(required = false)
+    private DependencyGuard dependencyGuard;
+
+    @Autowired(required = false)
+    private McpToolCallbackGuard mcpToolCallbackGuard;
+
     /**
      * 执行 AI Ops 告警分析流程（向后兼容，无告警上下文）
      */
@@ -68,7 +75,7 @@ public class AiOpsService {
      * @throws GraphRunnerException 如果 Agent 执行失败
      */
     public Optional<OverAllState> executeAiOpsAnalysis(DashScopeChatModel chatModel, ToolCallback[] toolCallbacks, String alertContext) throws GraphRunnerException {
-        return executeAiOpsAnalysisInternal(chatModel, toolCallbacks, alertContext);
+        return executeAiOpsAnalysisInternal(chatModel, guardMcpToolCallbacks(toolCallbacks), alertContext);
     }
 
     public Optional<OverAllState> executeAiOpsAnalysis(DashScopeChatModel chatModel,
@@ -79,10 +86,10 @@ public class AiOpsService {
         String evidenceBoundContext = buildEvidenceBoundAlertContext(alertContext, incidentId, runId);
         if (diagnosisEvidenceRecorder == null || incidentId == null || incidentId.isBlank()
                 || runId == null || runId.isBlank()) {
-            return executeAiOpsAnalysisInternal(chatModel, toolCallbacks, evidenceBoundContext);
+            return executeAiOpsAnalysisInternal(chatModel, guardMcpToolCallbacks(toolCallbacks), evidenceBoundContext);
         }
         try {
-            ToolCallback[] recordingCallbacks = diagnosisEvidenceRecorder.wrapToolCallbacks(toolCallbacks);
+            ToolCallback[] recordingCallbacks = diagnosisEvidenceRecorder.wrapToolCallbacks(guardMcpToolCallbacks(toolCallbacks));
             return diagnosisEvidenceRecorder.withRun(incidentId, runId,
                     () -> executeAiOpsAnalysisInternal(chatModel, recordingCallbacks, evidenceBoundContext));
         } catch (GraphRunnerException e) {
@@ -137,7 +144,37 @@ public class AiOpsService {
         }
 
         logger.info("调用 Supervisor Agent 开始编排...");
-        return supervisorAgent.invoke(taskPrompt);
+        return invokeSupervisor(supervisorAgent, taskPrompt);
+    }
+
+    private Optional<OverAllState> invokeSupervisor(SupervisorAgent supervisorAgent, String taskPrompt)
+            throws GraphRunnerException {
+        if (dependencyGuard == null) {
+            return supervisorAgent.invoke(taskPrompt);
+        }
+        try {
+            return dependencyGuard.execute("dashscope-chat", "aiOpsSupervisorInvoke",
+                    () -> {
+                        try {
+                            return supervisorAgent.invoke(taskPrompt);
+                        } catch (GraphRunnerException e) {
+                            throw new GraphRunnerCallException(e);
+                        }
+                    },
+                    error -> {
+                        if (error instanceof DependencyUnavailableException unavailable) {
+                            throw unavailable;
+                        }
+                        throw new DependencyUnavailableException(
+                                "dashscope-chat", "aiOpsSupervisorInvoke", "DEPENDENCY_ERROR", error);
+                    });
+        } catch (GraphRunnerCallException e) {
+            throw e.getGraphRunnerException();
+        }
+    }
+
+    private ToolCallback[] guardMcpToolCallbacks(ToolCallback[] toolCallbacks) {
+        return mcpToolCallbackGuard == null ? toolCallbacks : mcpToolCallbackGuard.wrapCallbacks(toolCallbacks);
     }
 
     /**
@@ -203,7 +240,20 @@ public class AiOpsService {
      * 根据 cls.mock-enabled 决定是否包含 QueryLogsTools
      */
     private Object[] buildMethodToolsArray() {
-        return ToolUtils.buildMethodToolsArray(dateTimeTools, internalDocsTools, queryMetricsTools, queryLogsTools);
+        return ToolUtils.buildAiOpsMethodToolsArray(dateTimeTools, internalDocsTools, queryMetricsTools, queryLogsTools);
+    }
+
+    private static class GraphRunnerCallException extends RuntimeException {
+        private final GraphRunnerException graphRunnerException;
+
+        private GraphRunnerCallException(GraphRunnerException graphRunnerException) {
+            super(graphRunnerException);
+            this.graphRunnerException = graphRunnerException;
+        }
+
+        private GraphRunnerException getGraphRunnerException() {
+            return graphRunnerException;
+        }
     }
 
     /**

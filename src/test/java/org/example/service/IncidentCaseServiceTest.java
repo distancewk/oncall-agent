@@ -9,6 +9,7 @@ import org.example.dto.AlertPayload;
 import org.example.dto.DiagnosisEvidence;
 import org.example.dto.DiagnosisRunRecord;
 import org.example.dto.IncidentRecord;
+import org.example.exception.DependencyUnavailableException;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
 
@@ -114,6 +115,37 @@ class IncidentCaseServiceTest {
         assertEquals("searchSimilarIncidentCases", evidence.getToolName());
         assertEquals("历史故障案例", evidence.getTimeRange());
         assertTrue(evidence.getSummary().contains("召回 1 个相似历史故障案例"));
+    }
+
+    @Test
+    void prefetchAndAppend_shouldRecordCircuitOpenEvidence_whenSimilarCaseRecallBreakerOpen() {
+        IncidentService incidentService = mock(IncidentService.class);
+        VectorSearchService vectorSearchService = mock(VectorSearchService.class);
+
+        IncidentRecord incident = incident("incident-3");
+        DiagnosisRunRecord run = new DiagnosisRunRecord();
+        run.setRunId("run-3");
+        run.setIncidentId("incident-3");
+
+        when(vectorSearchService.searchIncidentCases(any(), any(Integer.class)))
+                .thenThrow(new DependencyUnavailableException("milvus", "hybridSearch", "CIRCUIT_OPEN", null));
+
+        IncidentCaseService service = new IncidentCaseService(
+                incidentService, mock(MilvusServiceClient.class), mock(VectorEmbeddingService.class),
+                vectorSearchService, new MilvusInsertHelper());
+
+        String enriched = service.prefetchAndAppend(incident, run, "基础上下文");
+
+        assertTrue(enriched.contains("召回失败"));
+        assertTrue(enriched.contains("CIRCUIT_OPEN"));
+
+        ArgumentCaptor<DiagnosisEvidence> evidenceCaptor = ArgumentCaptor.forClass(DiagnosisEvidence.class);
+        verify(incidentService).addToolEvidence(eq("incident-3"), eq("run-3"), evidenceCaptor.capture());
+        DiagnosisEvidence evidence = evidenceCaptor.getValue();
+        assertEquals(false, evidence.isSuccess());
+        assertEquals("CIRCUIT_OPEN", evidence.getErrorCode());
+        assertTrue(evidence.getRawFragment().contains("\"success\":false"));
+        assertTrue(evidence.getRawFragment().contains("\"errorCode\":\"CIRCUIT_OPEN\""));
     }
 
     private IncidentRecord incident(String incidentId) {

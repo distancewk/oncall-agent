@@ -16,7 +16,7 @@ public class ToolUtils {
      * When queryLogsTools is null (real mode), log querying is handled by MCP;
      * when present (mock mode), the local QueryLogsTools bean is included.
      */
-    public static Object[] buildMethodToolsArray(
+    public static Object[] buildAiOpsMethodToolsArray(
             DateTimeTools dateTimeTools,
             InternalDocsTools internalDocsTools,
             QueryMetricsTools queryMetricsTools,
@@ -26,5 +26,15 @@ public class ToolUtils {
         } else {
             return new Object[]{dateTimeTools, internalDocsTools, queryMetricsTools};
         }
+    }
+
+    /**
+     * Build the deliberately small tool surface for ordinary chat.
+     * Diagnostic tools stay in the AI Ops agent chain.
+     */
+    public static Object[] buildGeneralChatMethodToolsArray(
+            DateTimeTools dateTimeTools,
+            InternalDocsTools internalDocsTools) {
+        return new Object[]{dateTimeTools, internalDocsTools};
     }
 }

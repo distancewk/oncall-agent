@@ -23,6 +23,7 @@ import java.util.concurrent.Executor;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.doAnswer;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
@@ -112,6 +113,33 @@ class IncidentControllerTest {
                 .andExpect(jsonPath("$.data.status").value("QUEUED"));
 
         verify(executor).execute(any(Runnable.class));
+    }
+
+    @Test
+    void diagnoseIncident_shouldReuseCompletedReportAndSkipAsyncAnalysis() throws Exception {
+        IncidentRecord incident = new IncidentRecord();
+        incident.setId("incident-1");
+        incident.setTitle("HighCPUUsage payment-service");
+        when(incidentService.getIncident("incident-1")).thenReturn(Optional.of(incident));
+        when(incidentService.buildAlertContext(incident)).thenReturn("告警上下文");
+
+        DiagnosisRunRecord reused = new DiagnosisRunRecord();
+        reused.setRunId("run-reuse");
+        reused.setIncidentId("incident-1");
+        reused.setStatus("COMPLETED");
+        reused.setReport("# 已复用报告");
+        reused.setReusedFromRunId("run-original");
+        when(incidentService.createReusedDiagnosisRunIfAvailable("incident-1", "告警上下文"))
+                .thenReturn(Optional.of(reused));
+
+        mockMvc.perform(post("/api/incidents/incident-1/diagnose"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.data.runId").value("run-reuse"))
+                .andExpect(jsonPath("$.data.status").value("COMPLETED"))
+                .andExpect(jsonPath("$.data.reusedFromRunId").value("run-original"));
+
+        verify(incidentService, never()).createDiagnosisRun(eq("incident-1"), any());
+        verify(executor, never()).execute(any(Runnable.class));
     }
 
     @Test
