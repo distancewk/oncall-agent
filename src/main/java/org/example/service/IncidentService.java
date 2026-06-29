@@ -3,6 +3,7 @@ package org.example.service;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.example.config.AppIncidentProperties;
+import org.example.config.AppJobProperties;
 import org.example.dto.AlertPayload;
 import org.example.dto.DiagnosisEvidence;
 import org.example.dto.DiagnosisRunRecord;
@@ -13,6 +14,7 @@ import org.springframework.stereotype.Service;
 
 import java.util.ArrayList;
 import java.util.Comparator;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
@@ -26,6 +28,9 @@ public class IncidentService {
     private final ObjectMapper objectMapper;
     private final DiagnosisReportService diagnosisReportService;
     private final AppIncidentProperties incidentProperties;
+    private final BackgroundJobRepository backgroundJobRepository;
+    private final RunningJobRegistry runningJobRegistry;
+    private final AppJobProperties jobProperties;
 
     public IncidentService(IncidentStore incidentStore, ObjectMapper objectMapper) {
         this(incidentStore, objectMapper, null);
@@ -37,50 +42,71 @@ public class IncidentService {
         this(incidentStore, objectMapper, diagnosisReportService, new AppIncidentProperties());
     }
 
-    @Autowired
     public IncidentService(IncidentStore incidentStore,
                            ObjectMapper objectMapper,
                            DiagnosisReportService diagnosisReportService,
                            AppIncidentProperties incidentProperties) {
+        this(incidentStore, objectMapper, diagnosisReportService, incidentProperties,
+                null, null, new AppJobProperties());
+    }
+
+    @Autowired
+    public IncidentService(IncidentStore incidentStore,
+                           ObjectMapper objectMapper,
+                           DiagnosisReportService diagnosisReportService,
+                           AppIncidentProperties incidentProperties,
+                           BackgroundJobRepository backgroundJobRepository,
+                           RunningJobRegistry runningJobRegistry,
+                           AppJobProperties jobProperties) {
         this.incidentStore = incidentStore;
         this.objectMapper = objectMapper;
         this.diagnosisReportService = diagnosisReportService;
         this.incidentProperties = incidentProperties == null ? new AppIncidentProperties() : incidentProperties;
+        this.backgroundJobRepository = backgroundJobRepository;
+        this.runningJobRegistry = runningJobRegistry;
+        this.jobProperties = jobProperties == null ? new AppJobProperties() : jobProperties;
     }
 
-    public synchronized IncidentRecord recordAlert(AlertPayload payload) {
+    public IncidentRecord recordAlert(AlertPayload payload) {
         String aggregationKey = aggregationKey(payload);
         long now = System.currentTimeMillis();
-        IncidentRecord record = incidentStore.findByAggregationKey(aggregationKey)
-                .orElseGet(() -> newIncident(payload, aggregationKey, now));
-
-        record.setTitle(title(payload));
-        record.setSeverity(severity(payload));
-        record.setStatus(status(payload));
-        record.setUpdatedAt(now);
-        record.setLastAlertAt(now);
-        record.setAlertCount(record.getAlertCount() + 1);
-        record.getAlertPayloads().add(payload);
-        incidentStore.save(record);
-        return record;
+        IncidentRecord candidate = newIncident(payload, aggregationKey, now);
+        return incidentStore.recordAlert(candidate, payload, now);
     }
 
-    public synchronized List<IncidentSummary> listIncidents() {
+    public List<IncidentSummary> listIncidents() {
+        return listIncidents(null, null, null, null, null);
+    }
+
+    public List<IncidentSummary> listIncidents(String status,
+                                               String severity,
+                                               String latestRunStatus,
+                                               String query,
+                                               String humanReviewStatus) {
         return incidentStore.list().stream()
+                .filter(record -> matchesIncidentFilters(record, status, severity, latestRunStatus, query, humanReviewStatus))
                 .map(this::summary)
                 .sorted(Comparator.comparingLong(IncidentSummary::getUpdatedAt).reversed())
                 .toList();
     }
 
-    public synchronized Optional<IncidentRecord> getIncident(String incidentId) {
+    public Optional<IncidentRecord> getIncident(String incidentId) {
         return incidentStore.load(incidentId);
     }
 
-    public synchronized Optional<List<DiagnosisRunRecord>> getDiagnosisRuns(String incidentId) {
+    public Optional<List<DiagnosisRunRecord>> getDiagnosisRuns(String incidentId) {
         return getIncident(incidentId).map(record -> new ArrayList<>(record.getDiagnosisRuns()));
     }
 
-    public synchronized DiagnosisRunRecord createDiagnosisRun(String incidentId, String alertContext) {
+    public Optional<List<DiagnosisEvidence>> getRunEvidence(String incidentId, String runId) {
+        return getIncident(incidentId)
+                .flatMap(record -> record.getDiagnosisRuns().stream()
+                        .filter(run -> runId.equals(run.getRunId()))
+                        .findFirst()
+                        .map(run -> new ArrayList<>(run.getEvidence())));
+    }
+
+    public DiagnosisRunRecord createDiagnosisRun(String incidentId, String alertContext) {
         IncidentRecord incident = requireIncident(incidentId);
         long now = System.currentTimeMillis();
         DiagnosisRunRecord run = new DiagnosisRunRecord();
@@ -99,8 +125,61 @@ public class IncidentService {
         return run;
     }
 
-    public synchronized Optional<DiagnosisRunRecord> createReusedDiagnosisRunIfAvailable(String incidentId,
-                                                                                         String alertContext) {
+    public DiagnosisRunRecord createDiagnosisRunAndEnqueue(String incidentId,
+                                                           String alertContext) {
+        return createDiagnosisRunAndEnqueue(incidentId, alertContext, null);
+    }
+
+    public DiagnosisRunRecord createDiagnosisRunAndEnqueue(String incidentId,
+                                                           String alertContext,
+                                                           String alertId) {
+        if (backgroundJobRepository == null) {
+            throw new IllegalStateException("后台任务仓库未配置");
+        }
+        requireIncident(incidentId);
+        long now = System.currentTimeMillis();
+        DiagnosisRunRecord run = new DiagnosisRunRecord();
+        run.setRunId("run-" + UUID.randomUUID().toString().substring(0, 12));
+        run.setIncidentId(incidentId);
+        run.setStatus("QUEUED");
+        run.setCreatedAt(now);
+        run.setAlertContext(alertContext);
+        run.setCurrentStep("等待诊断任务开始");
+        run.setProgressMessage("诊断任务已入队");
+        DiagnosisEvidence initialEvidence = DiagnosisEvidence.of(
+                "alert_context", "注入给 AI 的告警上下文", alertContext, now);
+        initialEvidence.setId("ev-" + run.getRunId() + "-alert-context");
+        run.getEvidence().add(initialEvidence);
+
+        Map<String, String> jobPayload = new LinkedHashMap<>();
+        jobPayload.put("incidentId", incidentId);
+        jobPayload.put("runId", run.getRunId());
+        jobPayload.put("alertContext", alertContext == null ? "" : alertContext);
+        if (notBlank(alertId)) {
+            jobPayload.put("alertId", alertId);
+        }
+        String payload;
+        try {
+            payload = objectMapper.writeValueAsString(jobPayload);
+        } catch (JsonProcessingException e) {
+            throw new IllegalStateException("创建诊断后台任务失败: " + run.getRunId(), e);
+        }
+        return incidentStore.inTransaction(connection -> {
+            incidentStore.persistNewDiagnosisRun(connection, incidentId, run, now);
+            backgroundJobRepository.enqueue(
+                    connection,
+                    "DIAGNOSIS",
+                    run.getRunId(),
+                    payload,
+                    jobProperties.getDiagnosisMaxAttempts(),
+                    run.getCreatedAt()
+            );
+            return run;
+        });
+    }
+
+    public Optional<DiagnosisRunRecord> createReusedDiagnosisRunIfAvailable(String incidentId,
+                                                                            String alertContext) {
         IncidentRecord incident = requireIncident(incidentId);
         long now = System.currentTimeMillis();
         if (!incidentProperties.isDiagnosisReuseEnabled()) {
@@ -144,9 +223,12 @@ public class IncidentService {
         return Optional.of(run);
     }
 
-    public synchronized DiagnosisRunRecord updateRunAlertContext(String incidentId, String runId, String alertContext) {
+    public DiagnosisRunRecord updateRunAlertContext(String incidentId, String runId, String alertContext) {
         IncidentRecord incident = requireIncident(incidentId);
         DiagnosisRunRecord run = requireRun(incident, runId);
+        if (!isActiveRun(run)) {
+            return run;
+        }
         long now = System.currentTimeMillis();
         run.setAlertContext(alertContext);
         Optional<DiagnosisEvidence> contextEvidence = run.getEvidence().stream()
@@ -165,9 +247,12 @@ public class IncidentService {
         return run;
     }
 
-    public synchronized DiagnosisRunRecord markRunRunning(String incidentId, String runId) {
+    public DiagnosisRunRecord markRunRunning(String incidentId, String runId) {
         IncidentRecord incident = requireIncident(incidentId);
         DiagnosisRunRecord run = requireRun(incident, runId);
+        if (!isActiveRun(run)) {
+            return run;
+        }
         long now = System.currentTimeMillis();
         run.setStatus("RUNNING");
         run.setStartedAt(now);
@@ -179,12 +264,15 @@ public class IncidentService {
         return run;
     }
 
-    public synchronized DiagnosisRunRecord markRunWaitingTool(String incidentId,
-                                                              String runId,
-                                                              String toolName,
-                                                              String queryParams) {
+    public DiagnosisRunRecord markRunWaitingTool(String incidentId,
+                                                 String runId,
+                                                 String toolName,
+                                                 String queryParams) {
         IncidentRecord incident = requireIncident(incidentId);
         DiagnosisRunRecord run = requireRun(incident, runId);
+        if (!isActiveRun(run)) {
+            return run;
+        }
         long now = System.currentTimeMillis();
         if (run.getStartedAt() == 0L) {
             run.setStartedAt(now);
@@ -198,11 +286,14 @@ public class IncidentService {
         return run;
     }
 
-    public synchronized DiagnosisRunRecord addToolEvidence(String incidentId,
-                                                           String runId,
-                                                           DiagnosisEvidence evidence) {
+    public DiagnosisRunRecord addToolEvidence(String incidentId,
+                                              String runId,
+                                              DiagnosisEvidence evidence) {
         IncidentRecord incident = requireIncident(incidentId);
         DiagnosisRunRecord run = requireRun(incident, runId);
+        if (!isActiveRun(run)) {
+            return run;
+        }
         long now = System.currentTimeMillis();
         run.getEvidence().add(evidence);
         run.setStatus("RUNNING");
@@ -214,9 +305,12 @@ public class IncidentService {
         return run;
     }
 
-    public synchronized DiagnosisRunRecord completeRun(String incidentId, String runId, String report) {
+    public DiagnosisRunRecord completeRun(String incidentId, String runId, String report) {
         IncidentRecord incident = requireIncident(incidentId);
         DiagnosisRunRecord run = requireRun(incident, runId);
+        if (!isActiveRun(run)) {
+            return run;
+        }
         long now = System.currentTimeMillis();
         if (run.getStartedAt() == 0L) {
             run.setStartedAt(now);
@@ -227,6 +321,14 @@ public class IncidentService {
                 ? report
                 : diagnosisReportService.guardReport(report, run);
         run.setReport(guardedReport);
+        if (diagnosisReportService != null) {
+            DiagnosisReportService.QualityAssessment quality =
+                    diagnosisReportService.evaluateQuality(guardedReport, run.getEvidence());
+            run.setQualityScore(quality.score());
+            run.setQualityGrade(quality.grade());
+            run.setQualitySummary(quality.summary());
+            run.setQualityIssues(quality.issues());
+        }
         run.setErrorMessage(null);
         run.setCurrentTool(null);
         run.setCurrentStep("诊断完成");
@@ -236,9 +338,12 @@ public class IncidentService {
         return run;
     }
 
-    public synchronized DiagnosisRunRecord failRun(String incidentId, String runId, String errorMessage) {
+    public DiagnosisRunRecord failRun(String incidentId, String runId, String errorMessage) {
         IncidentRecord incident = requireIncident(incidentId);
         DiagnosisRunRecord run = requireRun(incident, runId);
+        if (!isActiveRun(run)) {
+            return run;
+        }
         long now = System.currentTimeMillis();
         if (run.getStartedAt() == 0L) {
             run.setStartedAt(now);
@@ -250,6 +355,110 @@ public class IncidentService {
         run.setCurrentStep("诊断失败");
         run.setProgressMessage(errorMessage);
         run.getEvidence().add(DiagnosisEvidence.of("failure_reason", "诊断失败原因", errorMessage, now));
+        incident.setUpdatedAt(now);
+        incidentStore.save(incident);
+        return run;
+    }
+
+    public DiagnosisRunRecord cancelRun(String incidentId, String runId, String reason) {
+        long now = System.currentTimeMillis();
+        String cancelReason = notBlank(reason) ? reason : "用户取消诊断";
+        DiagnosisEvidenceRepository evidenceRepository = new DiagnosisEvidenceRepository();
+        DiagnosisRunRepository runRepository =
+                new DiagnosisRunRepository(objectMapper, evidenceRepository);
+        DiagnosisRunRecord cancelled = incidentStore.inTransaction(connection -> {
+            boolean transitioned =
+                    runRepository.cancelActive(connection, incidentId, runId, cancelReason, now);
+            DiagnosisRunRecord current = runRepository.findById(connection, incidentId, runId)
+                    .orElseThrow(() -> new IllegalArgumentException("诊断运行不存在: " + runId));
+            if (!transitioned && !"CANCELLED".equals(current.getStatus())) {
+                throw new IllegalStateException("已结束的诊断不能取消: " + runId);
+            }
+            if (transitioned) {
+                DiagnosisEvidence evidence = DiagnosisEvidence.of(
+                        "diagnosis_cancelled", "诊断取消原因", cancelReason, now);
+                evidence.setId("ev-" + runId + "-cancelled");
+                evidenceRepository.insert(connection, runId, evidence);
+                current = runRepository.findById(connection, incidentId, runId).orElseThrow();
+            }
+            if (backgroundJobRepository != null) {
+                backgroundJobRepository.requestCancel(connection, "DIAGNOSIS", runId, now);
+            }
+            return current;
+        });
+        if (runningJobRegistry != null) {
+            runningJobRegistry.cancelByBusinessKey("DIAGNOSIS", runId);
+        }
+        return cancelled;
+    }
+
+    public DiagnosisRunRecord confirmRun(String incidentId, String runId, String comment) {
+        return reviewCompletedRun(incidentId, runId, "CONFIRMED", comment);
+    }
+
+    public DiagnosisRunRecord rejectRun(String incidentId, String runId, String comment) {
+        return reviewCompletedRun(incidentId, runId, "REJECTED", comment);
+    }
+
+    public DiagnosisRunRecord markRunCaseArchived(String incidentId,
+                                                  String runId,
+                                                  boolean archived,
+                                                  String documentId,
+                                                  String message) {
+        IncidentRecord incident = requireIncident(incidentId);
+        DiagnosisRunRecord run = requireRun(incident, runId);
+        long now = System.currentTimeMillis();
+        run.setCaseArchived(archived);
+        run.setCaseDocumentId(documentId);
+        run.setCaseArchiveMessage(message);
+        incident.setUpdatedAt(now);
+        incidentStore.save(incident);
+        return run;
+    }
+
+    public List<DiagnosisRunRecord> markStaleRunsFailed(long nowMillis) {
+        long timeoutMillis = incidentProperties.getStaleRunTimeoutMillis();
+        if (timeoutMillis <= 0) {
+            return List.of();
+        }
+        List<DiagnosisRunRecord> failedRuns = new ArrayList<>();
+        for (IncidentRecord incident : incidentStore.list()) {
+            for (DiagnosisRunRecord run : incident.getDiagnosisRuns()) {
+                if (!isActiveRun(run) || !isStaleRun(run, nowMillis, timeoutMillis)) {
+                    continue;
+                }
+                String message = "诊断任务超时，已自动标记失败";
+                DiagnosisEvidence evidence =
+                        DiagnosisEvidence.of("diagnosis_timeout", "诊断超时原因", message, nowMillis);
+                incidentStore.failStaleRunIfActive(
+                                incident.getId(),
+                                run.getRunId(),
+                                nowMillis,
+                                timeoutMillis,
+                                evidence)
+                        .ifPresent(failedRuns::add);
+            }
+        }
+        return failedRuns;
+    }
+
+    public List<DiagnosisRunRecord> markStaleRunsFailed() {
+        return markStaleRunsFailed(System.currentTimeMillis());
+    }
+
+    private DiagnosisRunRecord reviewCompletedRun(String incidentId,
+                                                  String runId,
+                                                  String reviewStatus,
+                                                  String comment) {
+        IncidentRecord incident = requireIncident(incidentId);
+        DiagnosisRunRecord run = requireRun(incident, runId);
+        if (!"COMPLETED".equals(run.getStatus())) {
+            throw new IllegalStateException("只有已完成诊断才能进行人工确认: " + runId);
+        }
+        long now = System.currentTimeMillis();
+        run.setHumanReviewStatus(reviewStatus);
+        run.setHumanReviewComment(comment);
+        run.setHumanReviewedAt(now);
         incident.setUpdatedAt(now);
         incidentStore.save(incident);
         return run;
@@ -343,6 +552,17 @@ public class IncidentService {
         return Optional.empty();
     }
 
+    private boolean isActiveRun(DiagnosisRunRecord run) {
+        return "QUEUED".equals(run.getStatus())
+                || "RUNNING".equals(run.getStatus())
+                || "WAITING_TOOL".equals(run.getStatus());
+    }
+
+    private boolean isStaleRun(DiagnosisRunRecord run, long nowMillis, long timeoutMillis) {
+        long baseline = run.getStartedAt() > 0L ? run.getStartedAt() : run.getCreatedAt();
+        return baseline > 0L && nowMillis - baseline > timeoutMillis;
+    }
+
     private boolean isWithinReuseWindow(DiagnosisRunRecord run, long now) {
         long windowMillis = incidentProperties.getDiagnosisReuseWindowMillis();
         if (windowMillis <= 0) {
@@ -380,11 +600,53 @@ public class IncidentService {
         summary.setUpdatedAt(record.getUpdatedAt());
         summary.setLastAlertAt(record.getLastAlertAt());
         if (!record.getDiagnosisRuns().isEmpty()) {
-            summary.setLatestRunStatus(record.getDiagnosisRuns()
-                    .get(record.getDiagnosisRuns().size() - 1)
-                    .getStatus());
+            DiagnosisRunRecord latestRun = record.getDiagnosisRuns().get(record.getDiagnosisRuns().size() - 1);
+            summary.setLatestRunId(latestRun.getRunId());
+            summary.setLatestRunStatus(latestRun.getStatus());
+            summary.setLatestRunQualityScore(latestRun.getQualityScore());
+            summary.setLatestRunQualityGrade(latestRun.getQualityGrade());
+            summary.setLatestRunHumanReviewStatus(latestRun.getHumanReviewStatus());
+            summary.setLatestRunCaseArchived(latestRun.isCaseArchived());
         }
         return summary;
+    }
+
+    private boolean matchesIncidentFilters(IncidentRecord record,
+                                           String status,
+                                           String severity,
+                                           String latestRunStatus,
+                                           String query,
+                                           String humanReviewStatus) {
+        DiagnosisRunRecord latestRun = latestRun(record).orElse(null);
+        return matchesIgnoreCase(record.getStatus(), status)
+                && matchesIgnoreCase(record.getSeverity(), severity)
+                && matchesIgnoreCase(latestRun == null ? null : latestRun.getStatus(), latestRunStatus)
+                && matchesIgnoreCase(latestRun == null ? null : latestRun.getHumanReviewStatus(), humanReviewStatus)
+                && matchesQuery(record, query);
+    }
+
+    private Optional<DiagnosisRunRecord> latestRun(IncidentRecord record) {
+        if (record.getDiagnosisRuns().isEmpty()) {
+            return Optional.empty();
+        }
+        return Optional.of(record.getDiagnosisRuns().get(record.getDiagnosisRuns().size() - 1));
+    }
+
+    private boolean matchesIgnoreCase(String actual, String expected) {
+        return !notBlank(expected) || value(actual).equalsIgnoreCase(expected.trim());
+    }
+
+    private boolean matchesQuery(IncidentRecord record, String query) {
+        if (!notBlank(query)) {
+            return true;
+        }
+        String normalizedQuery = query.trim().toLowerCase(Locale.ROOT);
+        String searchable = (value(record.getId()) + " "
+                + value(record.getTitle()) + " "
+                + value(record.getAggregationKey()) + " "
+                + value(record.getSeverity()) + " "
+                + value(record.getStatus())).toLowerCase(Locale.ROOT);
+        return searchable.contains(normalizedQuery);
     }
 
     private String aggregationKey(AlertPayload payload) {
@@ -393,12 +655,73 @@ public class IncidentService {
             return "fingerprint:" + alert.getFingerprint();
         }
 
-        Map<String, String> labels = alert != null ? alert.getLabels() : Map.of();
-        String alertName = label(labels, "alertname", "unknown-alert");
-        String service = label(labels, "service", label(labels, "job", "unknown-service"));
-        String instance = label(labels, "instance", "unknown-instance");
-        String severity = label(labels, "severity", severity(payload));
+        Map<String, String> labels = mergedLabels(payload, alert);
+        String alertName = normalizeAlertName(label(labels, "alertname", title(payload)));
+        String service = firstLabel(labels, "service", "job", "app", "application", "component", "workload");
+        if (!notBlank(service)) {
+            service = "unknown-service";
+        }
+        String instance = firstLabel(labels, "instance", "pod", "pod_name", "node", "host", "hostname");
+        if (!notBlank(instance)) {
+            instance = "unknown-instance";
+        }
+        String severity = firstLabel(labels, "severity");
+        if (!notBlank(severity)) {
+            severity = severity(payload);
+        }
         return String.join("|", alertName, service, instance, severity).toLowerCase(Locale.ROOT);
+    }
+
+    private Map<String, String> mergedLabels(AlertPayload payload, AlertPayload.Alert alert) {
+        Map<String, String> labels = new LinkedHashMap<>();
+        if (payload != null) {
+            putAllLabels(labels, payload.getGroupLabels());
+            putAllLabels(labels, payload.getCommonLabels());
+        }
+        if (alert != null) {
+            putAllLabels(labels, alert.getLabels());
+        }
+        return labels;
+    }
+
+    private void putAllLabels(Map<String, String> target, Map<String, String> source) {
+        if (source == null || source.isEmpty()) {
+            return;
+        }
+        source.forEach((key, value) -> {
+            if (key != null && value != null) {
+                target.put(key, value);
+            }
+        });
+    }
+
+    private String normalizeAlertName(String alertName) {
+        if (!notBlank(alertName)) {
+            return "unknown-alert";
+        }
+        String compact = alertName.replaceAll("[^A-Za-z0-9]", "").toLowerCase(Locale.ROOT);
+        return switch (compact) {
+            case "cpuhigh", "highcpu", "cpuusagehigh", "highcpuusage" -> "cpu_high";
+            case "memoryhigh", "highmemory", "memoryusagehigh", "highmemoryusage", "oomkilled" -> "memory_high";
+            case "errorratehigh", "higherrorrate", "highhttperror", "high5xxrate" -> "error_rate_high";
+            case "p99latencyhigh", "highp99latency", "latencyhigh", "slowresponse" -> "p99_latency_high";
+            case "restartcounthigh", "highrestartcount", "podrestart", "crashloopbackoff" -> "restart_count_high";
+            case "diskhigh", "highdisk", "diskusagehigh", "highdiskusage" -> "disk_high";
+            default -> alertName;
+        };
+    }
+
+    private String firstLabel(Map<String, String> labels, String... keys) {
+        if (labels == null || keys == null) {
+            return "";
+        }
+        for (String key : keys) {
+            String value = value(labels, key);
+            if (notBlank(value)) {
+                return value;
+            }
+        }
+        return "";
     }
 
     private String title(AlertPayload payload) {
@@ -473,6 +796,10 @@ public class IncidentService {
             return null;
         }
         return map.get(key);
+    }
+
+    private String value(String value) {
+        return value == null ? "" : value;
     }
 
     private boolean notBlank(String value) {

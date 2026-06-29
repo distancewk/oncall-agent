@@ -4,6 +4,7 @@ import org.example.dto.DiagnosisEvidence;
 import org.example.dto.DiagnosisRunRecord;
 import org.junit.jupiter.api.Test;
 
+import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -26,10 +27,52 @@ class DiagnosisReportServiceTest {
 
         String table = service.buildEvidenceTable(run);
 
-        assertTrue(table.contains("| Evidence ID | 类型 | 工具 | 时间范围 | 状态 | 摘要 |"));
+        assertTrue(table.contains("| Evidence ID | 类型 | 工具 | 时间范围 | 状态 | 尝试次数 | 耗时(ms) | 可重试 | 摘要 |"));
         assertTrue(table.contains("queryMetricTrend"));
         assertTrue(table.contains("cpu_usage 最近 15m 持续上升"));
         assertFalse(table.contains("raw payload"));
+    }
+
+    @Test
+    void buildEvidenceTableShouldRenderToolCallTelemetryForReportContext() {
+        DiagnosisRunRecord run = new DiagnosisRunRecord();
+        DiagnosisEvidence retriedTrend = DiagnosisEvidence.toolCall(
+                "queryMetricTrend",
+                "{\"metric\":\"cpu_usage\"}",
+                "1h",
+                "cpu_usage 最近 1h 持续上升",
+                "{\"success\":true}",
+                true,
+                null,
+                1L);
+        retriedTrend.setId("ev-retried");
+        retriedTrend.setAttemptCount(3);
+        retriedTrend.setDurationMs(1250);
+        retriedTrend.setRetryable(true);
+        run.getEvidence().add(retriedTrend);
+
+        DiagnosisEvidence failedLogs = DiagnosisEvidence.toolCall(
+                "queryLogs",
+                "{\"query\":\"ERROR\"}",
+                "15m",
+                "日志依赖熔断，未执行查询",
+                "{\"success\":false,\"errorCode\":\"CIRCUIT_OPEN\"}",
+                false,
+                "日志依赖熔断",
+                1L);
+        failedLogs.setId("ev-open");
+        failedLogs.setErrorCode("CIRCUIT_OPEN");
+        failedLogs.setAttemptCount(0);
+        failedLogs.setDurationMs(0);
+        failedLogs.setRetryable(true);
+        run.getEvidence().add(failedLogs);
+
+        String table = service.buildEvidenceTable(run);
+
+        assertTrue(table.contains("| Evidence ID | 类型 | 工具 | 时间范围 | 状态 | 尝试次数 | 耗时(ms) | 可重试 | 摘要 |"));
+        assertTrue(table.contains("| ev-retried | tool_call | queryMetricTrend | 1h | success | 3 | 1250 | true |"));
+        assertTrue(table.contains("| Evidence ID | 工具 | 状态 | 错误码 | 尝试次数 | 耗时(ms) | 可重试 | 摘要 |"));
+        assertTrue(table.contains("| ev-open | queryLogs | failed | CIRCUIT_OPEN | 0 | 0 | true |"));
     }
 
     @Test
@@ -286,5 +329,65 @@ class DiagnosisReportServiceTest {
         assertTrue(guarded.contains("校验状态: 失败"));
         assertTrue(guarded.contains("无效/失败证据: ev-doc-failed(DEPENDENCY_ERROR)"));
         assertFalse(guarded.contains("置信度: 高"));
+    }
+
+    @Test
+    void evaluateQuality_shouldScoreHighWhenReportCitesSuccessfulEvidence() {
+        DiagnosisEvidence trend = DiagnosisEvidence.toolCall(
+                "queryMetricTrend",
+                "{\"metric\":\"cpu_usage\"}",
+                "1h",
+                "cpu_usage 最近 1h 持续上升",
+                "{\"success\":true}",
+                true,
+                null,
+                1L);
+        trend.setId("ev-trend");
+        DiagnosisEvidence logs = DiagnosisEvidence.toolCall(
+                "queryLogs",
+                "{\"query\":\"ERROR\"}",
+                "15m",
+                "日志中有线程池耗尽错误",
+                "{\"success\":true}",
+                true,
+                null,
+                1L);
+        logs.setId("ev-log");
+
+        DiagnosisReportService.QualityAssessment quality = service.evaluateQuality("""
+                # 告警分析报告
+
+                CPU 使用率持续上升 [evidence: ev-trend]，日志显示线程池耗尽 [evidence: ev-log]。
+                """, java.util.List.of(trend, logs));
+
+        assertEquals("HIGH", quality.grade());
+        assertTrue(quality.score() >= 85);
+        assertTrue(quality.issues().isEmpty());
+    }
+
+    @Test
+    void evaluateQuality_shouldScoreLowWhenReportUsesFailedEvidenceAndMissesTrend() {
+        DiagnosisEvidence failedLogs = DiagnosisEvidence.toolCall(
+                "queryLogs",
+                "{\"query\":\"ERROR\"}",
+                "15m",
+                "日志查询失败",
+                "{\"success\":false,\"errorCode\":\"CIRCUIT_OPEN\"}",
+                false,
+                "日志熔断",
+                1L);
+        failedLogs.setId("ev-log-open");
+        failedLogs.setErrorCode("CIRCUIT_OPEN");
+
+        DiagnosisReportService.QualityAssessment quality = service.evaluateQuality("""
+                # 告警分析报告
+
+                CPU 使用率持续上升，日志显示异常 [evidence: ev-log-open]。
+                """, java.util.List.of(failedLogs));
+
+        assertEquals("LOW", quality.grade());
+        assertTrue(quality.score() < 60);
+        assertTrue(quality.issues().contains("引用了失败或不可用 evidence"));
+        assertTrue(quality.issues().contains("资源类结论缺少成功的趋势 evidence"));
     }
 }

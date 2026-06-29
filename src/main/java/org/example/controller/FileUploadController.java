@@ -5,11 +5,9 @@ import org.example.dto.ApiResponse;
 import org.example.dto.FileUploadRes;
 import org.example.dto.IndexTaskStatus;
 import org.example.service.IndexTaskStatusService;
-import org.example.service.VectorIndexService;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
-import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.util.StringUtils;
@@ -26,7 +24,6 @@ import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.util.Arrays;
 import java.util.List;
-import java.util.concurrent.Executor;
 
 @RestController
 public class FileUploadController {
@@ -37,14 +34,7 @@ public class FileUploadController {
     private FileUploadConfig fileUploadConfig;
 
     @Autowired
-    private VectorIndexService vectorIndexService;
-
-    @Autowired
-    private IndexTaskStatusService indexTaskStatusService = new IndexTaskStatusService();
-
-    @Autowired
-    @Qualifier("chatTaskExecutor")
-    private Executor executor;
+    private IndexTaskStatusService indexTaskStatusService;
 
     @PostMapping(value = "/api/upload", consumes = "multipart/form-data")
     public ResponseEntity<ApiResponse<FileUploadRes>> upload(@RequestParam("file") MultipartFile file) throws IOException {
@@ -90,24 +80,10 @@ public class FileUploadController {
 
         logger.info("文件上传成功: {}", filePath);
 
-        IndexTaskStatus indexTask = indexTaskStatusService.createTask(
+        IndexTaskStatus indexTask = indexTaskStatusService.createTaskAndEnqueue(
                 cleanFilename,
                 filePath.toString()
         );
-
-        // 文件落盘后，使用异步线程进行切片和向量化，不阻塞 HTTP 返回
-        executor.execute(() -> {
-            try {
-                indexTaskStatusService.markRunning(indexTask.getTaskId());
-                logger.info("异步开始为上传文件创建向量索引: {}", filePath);
-                vectorIndexService.indexSingleFile(filePath.toString());
-                indexTaskStatusService.markCompleted(indexTask.getTaskId());
-                logger.info("向量索引创建成功: {}", filePath);
-            } catch (Exception e) {
-                indexTaskStatusService.markFailed(indexTask.getTaskId(), e.getMessage());
-                logger.error("向量索引创建失败: {}, 错误: {}", filePath, e.getMessage(), e);
-            }
-        });
 
         FileUploadRes response = new FileUploadRes(
                 cleanFilename,

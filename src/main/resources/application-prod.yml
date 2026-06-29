@@ -1,3 +1,13 @@
 app:
   security:
     enabled: true
+  alerts:
+    simulate-enabled: false
+  incidents:
+    jdbc-initialization-fail-timeout-millis: ${APP_INCIDENT_JDBC_INITIALIZATION_FAIL_TIMEOUT_MILLIS:30000}
+
+prometheus:
+  mock-enabled: false
+
+cls:
+  mock-enabled: false

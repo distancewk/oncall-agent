@@ -49,7 +49,7 @@ public class McpToolCallbackGuard {
 
     @Nullable
     private String dependencyName(ToolCallback callback) {
-        ToolDefinition definition = callback.getToolDefinition();
+        ToolDefinition definition = toolDefinition(callback);
         String haystack = String.join(" ",
                         value(definition == null ? null : definition.name()),
                         value(definition == null ? null : definition.description()),
@@ -71,6 +71,11 @@ public class McpToolCallbackGuard {
             return "mcp-dbhub";
         }
         return null;
+    }
+
+    @Nullable
+    private ToolDefinition toolDefinition(ToolCallback callback) {
+        return callback.getToolDefinition();
     }
 
     private String guardedCall(ToolCallback delegate, String dependency, String operation, ToolCall call) {
@@ -154,8 +159,11 @@ public class McpToolCallbackGuard {
         }
 
         private String toolName() {
-            ToolDefinition definition = delegate.getToolDefinition();
-            return definition == null ? dependency : definition.name();
+            ToolDefinition definition = toolDefinition(delegate);
+            if (definition == null || definition.name() == null || definition.name().isBlank()) {
+                return dependency;
+            }
+            return definition.name();
         }
     }
 }

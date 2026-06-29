@@ -1,52 +1,57 @@
 package org.example.controller;
 
+import com.fasterxml.jackson.databind.ObjectMapper;
+import org.example.config.AppJobProperties;
 import org.example.config.FileUploadConfig;
 import org.example.dto.ApiResponse;
+import org.example.dto.BackgroundJobRecord;
 import org.example.dto.FileUploadRes;
 import org.example.dto.IndexTaskStatus;
+import org.example.service.BackgroundJobRepository;
+import org.example.service.IncidentSchemaMigrator;
 import org.example.service.IndexTaskStatusService;
-import org.example.service.VectorIndexService;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
-import org.mockito.Mock;
-import org.mockito.MockitoAnnotations;
+import org.springframework.jdbc.datasource.AbstractDataSource;
+import org.springframework.jdbc.datasource.DriverManagerDataSource;
 import org.springframework.mock.web.MockMultipartFile;
 import org.springframework.test.util.ReflectionTestUtils;
 
+import javax.sql.DataSource;
+import java.lang.reflect.InvocationTargetException;
+import java.lang.reflect.Proxy;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.util.concurrent.Executor;
+import java.sql.Connection;
+import java.sql.SQLException;
 
 import static org.junit.jupiter.api.Assertions.*;
-import static org.mockito.ArgumentMatchers.anyString;
-import static org.mockito.Mockito.doThrow;
-import static org.mockito.Mockito.verify;
-
 class FileUploadControllerTest {
 
     @TempDir
     private Path uploadDir;
-
-    @Mock
-    private VectorIndexService vectorIndexService;
 
     private FileUploadController controller;
     private IndexTaskStatusService indexTaskStatusService;
 
     @BeforeEach
     void setUp() {
-        MockitoAnnotations.openMocks(this);
         FileUploadConfig config = new FileUploadConfig();
         config.setPath(uploadDir.toString());
         config.setAllowedExtensions("txt,md");
 
         controller = new FileUploadController();
-        indexTaskStatusService = new IndexTaskStatusService();
+        DriverManagerDataSource dataSource = new DriverManagerDataSource();
+        dataSource.setUrl("jdbc:h2:" + uploadDir.resolve("index-db"));
+        dataSource.setUsername("");
+        dataSource.setPassword("");
+        IncidentSchemaMigrator migrator = new IncidentSchemaMigrator(dataSource);
+        indexTaskStatusService = new IndexTaskStatusService(
+                dataSource, migrator, new BackgroundJobRepository(dataSource, migrator),
+                new ObjectMapper(), new AppJobProperties());
         ReflectionTestUtils.setField(controller, "fileUploadConfig", config);
-        ReflectionTestUtils.setField(controller, "vectorIndexService", vectorIndexService);
         ReflectionTestUtils.setField(controller, "indexTaskStatusService", indexTaskStatusService);
-        ReflectionTestUtils.setField(controller, "executor", (Executor) Runnable::run);
     }
 
     @Test
@@ -61,7 +66,7 @@ class FileUploadControllerTest {
     }
 
     @Test
-    void upload_shouldPersistFileAndSubmitAsyncIndexing() throws Exception {
+    void upload_shouldPersistFileAndEnqueueIndexingWithoutDirectVectorCall() throws Exception {
         MockMultipartFile file = new MockMultipartFile(
                 "file", "runbook.md", "text/markdown", "# hello".getBytes());
 
@@ -74,11 +79,13 @@ class FileUploadControllerTest {
         assertEquals("INDEXING", data.getIndexStatus());
         assertEquals("文件已接收，索引处理中", data.getMessage());
         assertTrue(Files.exists(uploadDir.resolve("runbook.md")));
-        verify(vectorIndexService).indexSingleFile(uploadDir.resolve("runbook.md").toAbsolutePath().toString());
+        IndexTaskStatus storedTask = indexTaskStatusService.getStatus(data.getIndexTaskId()).orElseThrow();
+        assertEquals("INDEXING", storedTask.getStatus());
+        assertEquals("runbook.md", storedTask.getFileName());
     }
 
     @Test
-    void getUploadStatus_shouldExposeCompletedAsyncIndexingState() throws Exception {
+    void getUploadStatus_shouldExposeQueuedIndexingState() throws Exception {
         MockMultipartFile file = new MockMultipartFile(
                 "file", "runbook.md", "text/markdown", "# hello".getBytes());
 
@@ -86,23 +93,8 @@ class FileUploadControllerTest {
         ApiResponse<IndexTaskStatus> statusResponse = controller.getUploadStatus(data.getIndexTaskId()).getBody();
 
         assertNotNull(statusResponse);
-        assertEquals("COMPLETED", statusResponse.getData().getStatus());
-        assertEquals("索引完成", statusResponse.getData().getMessage());
-    }
-
-    @Test
-    void getUploadStatus_shouldExposeFailedAsyncIndexingState() throws Exception {
-        doThrow(new RuntimeException("boom")).when(vectorIndexService).indexSingleFile(anyString());
-        MockMultipartFile file = new MockMultipartFile(
-                "file", "runbook.md", "text/markdown", "# hello".getBytes());
-
-        FileUploadRes data = controller.upload(file).getBody().getData();
-        ApiResponse<IndexTaskStatus> statusResponse = controller.getUploadStatus(data.getIndexTaskId()).getBody();
-
-        assertNotNull(statusResponse);
-        assertEquals("FAILED", statusResponse.getData().getStatus());
-        assertEquals("索引失败", statusResponse.getData().getMessage());
-        assertTrue(statusResponse.getData().getErrorMessage().contains("boom"));
+        assertEquals("INDEXING", statusResponse.getData().getStatus());
+        assertEquals("文件已接收，索引处理中", statusResponse.getData().getMessage());
     }
 
     @Test
@@ -123,5 +115,177 @@ class FileUploadControllerTest {
         IllegalArgumentException ex = assertThrows(IllegalArgumentException.class, () -> controller.upload(file));
 
         assertTrue(ex.getMessage().contains("非法的路径格式"));
+    }
+
+    @Test
+    void createTaskAndEnqueue_shouldRollbackTaskWhenJobInsertFails() {
+        DriverManagerDataSource dataSource = new DriverManagerDataSource();
+        dataSource.setUrl("jdbc:h2:" + uploadDir.resolve("failing-jobs-db"));
+        dataSource.setUsername("");
+        dataSource.setPassword("");
+        IncidentSchemaMigrator migrator = new IncidentSchemaMigrator(dataSource);
+        IndexTaskStatusService service = new IndexTaskStatusService(
+                dataSource,
+                migrator,
+                new FailingBackgroundJobRepository(dataSource, migrator),
+                new ObjectMapper(),
+                new AppJobProperties()
+        );
+
+        assertThrows(IllegalStateException.class,
+                () -> service.createTaskAndEnqueue("runbook.md", "/tmp/runbook.md"));
+        assertTrue(service.listStatuses().isEmpty());
+    }
+
+    @Test
+    void createTaskAndEnqueue_shouldPreserveJobFailureWhenRollbackAlsoFails() {
+        DriverManagerDataSource delegate = dataSource("rollback-failure-db");
+        FailingTransactionDataSource dataSource = new FailingTransactionDataSource(delegate);
+        IncidentSchemaMigrator migrator = new IncidentSchemaMigrator(delegate);
+        IndexTaskStatusService service = new IndexTaskStatusService(
+                dataSource,
+                migrator,
+                new FailingBackgroundJobRepository(delegate, migrator),
+                new ObjectMapper(),
+                new AppJobProperties()
+        );
+        dataSource.failRollback();
+
+        IllegalStateException failure = assertThrows(IllegalStateException.class,
+                () -> service.createTaskAndEnqueue("runbook.md", "/tmp/runbook.md"));
+
+        assertEquals("simulated job insert failure", failure.getCause().getMessage());
+        assertEquals(1, failure.getCause().getSuppressed().length);
+        assertEquals("simulated rollback failure",
+                failure.getCause().getSuppressed()[0].getMessage());
+    }
+
+    @Test
+    void createTaskAndEnqueue_shouldPreserveConnectionOpenFailure() {
+        DriverManagerDataSource delegate = dataSource("connection-open-failure-db");
+        FailingTransactionDataSource dataSource = new FailingTransactionDataSource(delegate);
+        IncidentSchemaMigrator migrator = new IncidentSchemaMigrator(delegate);
+        IndexTaskStatusService service = new IndexTaskStatusService(
+                dataSource,
+                migrator,
+                new BackgroundJobRepository(delegate, migrator),
+                new ObjectMapper(),
+                new AppJobProperties()
+        );
+        dataSource.failConnectionOpen();
+
+        IllegalStateException failure = assertThrows(IllegalStateException.class,
+                () -> service.createTaskAndEnqueue("runbook.md", "/tmp/runbook.md"));
+
+        assertEquals("simulated connection open failure", failure.getCause().getMessage());
+    }
+
+    @Test
+    void createTaskAndEnqueue_shouldPreserveAutoCommitFailure() {
+        DriverManagerDataSource delegate = dataSource("auto-commit-failure-db");
+        FailingTransactionDataSource dataSource = new FailingTransactionDataSource(delegate);
+        IncidentSchemaMigrator migrator = new IncidentSchemaMigrator(delegate);
+        IndexTaskStatusService service = new IndexTaskStatusService(
+                dataSource,
+                migrator,
+                new BackgroundJobRepository(delegate, migrator),
+                new ObjectMapper(),
+                new AppJobProperties()
+        );
+        dataSource.failAutoCommit();
+
+        IllegalStateException failure = assertThrows(IllegalStateException.class,
+                () -> service.createTaskAndEnqueue("runbook.md", "/tmp/runbook.md"));
+
+        assertEquals("simulated auto-commit failure", failure.getCause().getMessage());
+    }
+
+    private DriverManagerDataSource dataSource(String name) {
+        DriverManagerDataSource dataSource = new DriverManagerDataSource();
+        dataSource.setUrl("jdbc:h2:" + uploadDir.resolve(name));
+        dataSource.setUsername("");
+        dataSource.setPassword("");
+        return dataSource;
+    }
+
+    private static final class FailingBackgroundJobRepository extends BackgroundJobRepository {
+
+        private FailingBackgroundJobRepository(DriverManagerDataSource dataSource,
+                                               IncidentSchemaMigrator migrator) {
+            super(dataSource, migrator);
+        }
+
+        @Override
+        public BackgroundJobRecord enqueue(
+                Connection connection,
+                String jobType,
+                String businessKey,
+                String payload,
+                int maxAttempts,
+                long now) throws SQLException {
+            throw new SQLException("simulated job insert failure");
+        }
+    }
+
+    private static final class FailingTransactionDataSource extends AbstractDataSource {
+
+        private final DataSource delegate;
+        private boolean failConnectionOpen;
+        private boolean failAutoCommit;
+        private boolean failRollback;
+
+        private FailingTransactionDataSource(DataSource delegate) {
+            this.delegate = delegate;
+        }
+
+        private void failRollback() {
+            failRollback = true;
+        }
+
+        private void failConnectionOpen() {
+            failConnectionOpen = true;
+        }
+
+        private void failAutoCommit() {
+            failAutoCommit = true;
+        }
+
+        @Override
+        public Connection getConnection() throws SQLException {
+            if (failConnectionOpen) {
+                throw new SQLException("simulated connection open failure");
+            }
+            return wrap(delegate.getConnection());
+        }
+
+        @Override
+        public Connection getConnection(String username, String password) throws SQLException {
+            if (failConnectionOpen) {
+                throw new SQLException("simulated connection open failure");
+            }
+            return wrap(delegate.getConnection(username, password));
+        }
+
+        private Connection wrap(Connection connection) {
+            return (Connection) Proxy.newProxyInstance(
+                    Connection.class.getClassLoader(),
+                    new Class<?>[]{Connection.class},
+                    (proxy, method, args) -> {
+                        if (failAutoCommit
+                                && method.getName().equals("setAutoCommit")
+                                && Boolean.FALSE.equals(args[0])) {
+                            throw new SQLException("simulated auto-commit failure");
+                        }
+                        if (failRollback && method.getName().equals("rollback")) {
+                            throw new SQLException("simulated rollback failure");
+                        }
+                        try {
+                            return method.invoke(connection, args);
+                        } catch (InvocationTargetException e) {
+                            throw e.getCause();
+                        }
+                    }
+            );
+        }
     }
 }

@@ -5,13 +5,8 @@ import com.alibaba.cloud.ai.graph.OverAllState;
 import com.alibaba.cloud.ai.graph.agent.ReactAgent;
 import com.alibaba.cloud.ai.graph.agent.flow.agent.SupervisorAgent;
 import com.alibaba.cloud.ai.graph.exception.GraphRunnerException;
-import org.example.agent.tool.DateTimeTools;
-import org.example.agent.tool.InternalDocsTools;
-import org.example.agent.tool.QueryLogsTools;
-import org.example.agent.tool.QueryMetricsTools;
 import org.example.dto.DiagnosisRunRecord;
 import org.example.exception.DependencyUnavailableException;
-import org.example.util.ToolUtils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.ai.chat.messages.AssistantMessage;
@@ -32,16 +27,7 @@ public class AiOpsService {
     private static final Logger logger = LoggerFactory.getLogger(AiOpsService.class);
 
     @Autowired
-    private DateTimeTools dateTimeTools;
-
-    @Autowired
-    private InternalDocsTools internalDocsTools;
-
-    @Autowired
-    private QueryMetricsTools queryMetricsTools;
-
-    @Autowired(required = false)  // Mock 模式下才注册
-    private QueryLogsTools queryLogsTools;
+    private AgentToolSurfaceService agentToolSurfaceService;
 
     @Autowired(required = false)
     private DiagnosisEvidenceRecorder diagnosisEvidenceRecorder;
@@ -54,9 +40,6 @@ public class AiOpsService {
 
     @Autowired(required = false)
     private DependencyGuard dependencyGuard;
-
-    @Autowired(required = false)
-    private McpToolCallbackGuard mcpToolCallbackGuard;
 
     /**
      * 执行 AI Ops 告警分析流程（向后兼容，无告警上下文）
@@ -75,7 +58,7 @@ public class AiOpsService {
      * @throws GraphRunnerException 如果 Agent 执行失败
      */
     public Optional<OverAllState> executeAiOpsAnalysis(DashScopeChatModel chatModel, ToolCallback[] toolCallbacks, String alertContext) throws GraphRunnerException {
-        return executeAiOpsAnalysisInternal(chatModel, guardMcpToolCallbacks(toolCallbacks), alertContext);
+        return executeAiOpsAnalysisInternal(chatModel, toolCallbacks, alertContext, false);
     }
 
     public Optional<OverAllState> executeAiOpsAnalysis(DashScopeChatModel chatModel,
@@ -86,12 +69,11 @@ public class AiOpsService {
         String evidenceBoundContext = buildEvidenceBoundAlertContext(alertContext, incidentId, runId);
         if (diagnosisEvidenceRecorder == null || incidentId == null || incidentId.isBlank()
                 || runId == null || runId.isBlank()) {
-            return executeAiOpsAnalysisInternal(chatModel, guardMcpToolCallbacks(toolCallbacks), evidenceBoundContext);
+            return executeAiOpsAnalysisInternal(chatModel, toolCallbacks, evidenceBoundContext, false);
         }
         try {
-            ToolCallback[] recordingCallbacks = diagnosisEvidenceRecorder.wrapToolCallbacks(guardMcpToolCallbacks(toolCallbacks));
             return diagnosisEvidenceRecorder.withRun(incidentId, runId,
-                    () -> executeAiOpsAnalysisInternal(chatModel, recordingCallbacks, evidenceBoundContext));
+                    () -> executeAiOpsAnalysisInternal(chatModel, toolCallbacks, evidenceBoundContext, true));
         } catch (GraphRunnerException e) {
             throw e;
         } catch (Exception e) {
@@ -120,12 +102,16 @@ public class AiOpsService {
         }
     }
 
-    private Optional<OverAllState> executeAiOpsAnalysisInternal(DashScopeChatModel chatModel, ToolCallback[] toolCallbacks, String alertContext) throws GraphRunnerException {
+    private Optional<OverAllState> executeAiOpsAnalysisInternal(DashScopeChatModel chatModel,
+                                                               ToolCallback[] toolCallbacks,
+                                                               String alertContext,
+                                                               boolean recordToolEvidence)
+            throws GraphRunnerException {
         logger.info("开始执行 AI Ops 多 Agent 协作流程");
 
         // 构建 Planner 和 Executor Agent
-        ReactAgent plannerAgent = buildPlannerAgent(chatModel, toolCallbacks);
-        ReactAgent executorAgent = buildExecutorAgent(chatModel, toolCallbacks);
+        ReactAgent plannerAgent = buildPlannerAgent(chatModel, toolCallbacks, recordToolEvidence);
+        ReactAgent executorAgent = buildExecutorAgent(chatModel, toolCallbacks, recordToolEvidence);
 
         // 构建 Supervisor Agent
         SupervisorAgent supervisorAgent = SupervisorAgent.builder()
@@ -147,6 +133,7 @@ public class AiOpsService {
         return invokeSupervisor(supervisorAgent, taskPrompt);
     }
 
+    @SuppressWarnings("PMD.PreserveStackTrace")
     private Optional<OverAllState> invokeSupervisor(SupervisorAgent supervisorAgent, String taskPrompt)
             throws GraphRunnerException {
         if (dependencyGuard == null) {
@@ -169,12 +156,9 @@ public class AiOpsService {
                                 "dashscope-chat", "aiOpsSupervisorInvoke", "DEPENDENCY_ERROR", error);
                     });
         } catch (GraphRunnerCallException e) {
-            throw e.getGraphRunnerException();
+            GraphRunnerException cause = e.getGraphRunnerException();
+            throw new GraphRunnerException(cause.getMessage(), cause);
         }
-    }
-
-    private ToolCallback[] guardMcpToolCallbacks(ToolCallback[] toolCallbacks) {
-        return mcpToolCallbackGuard == null ? toolCallbacks : mcpToolCallbackGuard.wrapCallbacks(toolCallbacks);
     }
 
     /**
@@ -208,14 +192,17 @@ public class AiOpsService {
     /**
      * 构建 Planner Agent
      */
-    private ReactAgent buildPlannerAgent(DashScopeChatModel chatModel, ToolCallback[] toolCallbacks) {
+    private ReactAgent buildPlannerAgent(DashScopeChatModel chatModel,
+                                         ToolCallback[] toolCallbacks,
+                                         boolean recordToolEvidence) {
         return ReactAgent.builder()
                 .name("planner_agent")
                 .description("负责拆解告警、规划与再规划步骤")
                 .model(chatModel)
                 .systemPrompt(buildPlannerPrompt())
-                .methodTools(buildMethodToolsArray())
-                .tools(toolCallbacks)
+                .methodTools(buildPlannerMethodToolsArray())
+                .tools(recordMcpEvidence(
+                        agentToolSurfaceService.aiOpsPlannerMcpTools(toolCallbacks), recordToolEvidence))
                 .outputKey("planner_plan")
                 .build();
     }
@@ -223,24 +210,34 @@ public class AiOpsService {
     /**
      * 构建 Executor Agent
      */
-    private ReactAgent buildExecutorAgent(DashScopeChatModel chatModel, ToolCallback[] toolCallbacks) {
+    private ReactAgent buildExecutorAgent(DashScopeChatModel chatModel,
+                                          ToolCallback[] toolCallbacks,
+                                          boolean recordToolEvidence) {
         return ReactAgent.builder()
                 .name("executor_agent")
                 .description("负责执行 Planner 的首个步骤并及时反馈")
                 .model(chatModel)
                 .systemPrompt(buildExecutorPrompt())
-                .methodTools(buildMethodToolsArray())
-                .tools(toolCallbacks)
+                .methodTools(buildExecutorMethodToolsArray())
+                .tools(recordMcpEvidence(
+                        agentToolSurfaceService.aiOpsExecutorMcpTools(toolCallbacks), recordToolEvidence))
                 .outputKey("executor_feedback")
                 .build();
     }
 
-    /**
-     * 动态构建方法工具数组
-     * 根据 cls.mock-enabled 决定是否包含 QueryLogsTools
-     */
-    private Object[] buildMethodToolsArray() {
-        return ToolUtils.buildAiOpsMethodToolsArray(dateTimeTools, internalDocsTools, queryMetricsTools, queryLogsTools);
+    private Object[] buildPlannerMethodToolsArray() {
+        return agentToolSurfaceService.aiOpsPlannerMethodTools();
+    }
+
+    private Object[] buildExecutorMethodToolsArray() {
+        return agentToolSurfaceService.aiOpsExecutorMethodTools();
+    }
+
+    private ToolCallback[] recordMcpEvidence(ToolCallback[] callbacks, boolean recordToolEvidence) {
+        if (!recordToolEvidence || diagnosisEvidenceRecorder == null) {
+            return callbacks;
+        }
+        return diagnosisEvidenceRecorder.wrapToolCallbacks(callbacks);
     }
 
     private static class GraphRunnerCallException extends RuntimeException {
@@ -267,7 +264,7 @@ public class AiOpsService {
                 3. 在执行阶段，输出 JSON，包含 decision (PLAN|EXECUTE|FINISH)、step 描述、预期要调用的工具、以及必要的上下文。
                 4. 调用任何腾讯云日志/主题相关工具时，region 参数必须使用连字符格式（如 ap-guangzhou），若不确定请省略以使用默认值。
                 5. 严格禁止编造数据，只能引用工具返回的真实内容；如果连续 3 次调用同一工具仍失败或返回空结果，需停止该方向并在最终报告的结论部分说明"无法完成"的原因。
-                6. 遇到 CPU、内存、错误率、P99 延迟、重启次数相关告警时，必须规划调用 queryMetricTrend 查询 15m/1h/6h 中最相关窗口的趋势，再基于趋势证据判断根因。
+                6. 遇到 CPU、内存、错误率、P99 延迟、重启次数相关告警时，必须先检查当前上下文是否已有成功的 queryMetricTrend evidence；只有 toolName=queryMetricTrend、success=true，且 metric、service、instance、window 与当前诊断目标匹配，并覆盖 15m/1h/6h 中最相关窗口时，才优先复用并引用 evidence id；缺失 15m/1h/6h 中最相关窗口或查询失败时才规划新的 queryMetricTrend 调用。
 
                 ## 工具调用策略（减少冗余）
 
@@ -276,6 +273,7 @@ public class AiOpsService {
                 - 推荐证据顺序：当前 Incident 告警上下文 -> 相似历史故障/已提供证据 -> queryMetricTrend -> queryLogs -> queryInternalDocs -> 条件性 queryPrometheusAlerts。
                 - 只有无法根据告警类型推断日志主题时，才调用 getAvailableLogTopics；能推断时直接规划 queryLogs。
                 - 日志主题推断规则：CPU/内存/磁盘使用率 -> system-metrics；错误率/服务不可用/慢响应/下游依赖 -> application-logs；慢 SQL/数据库性能 -> database-slow-query；OOMKilled/CrashLoop/重启/容器崩溃 -> system-events。
+                - 每个 DiagnosisRun 中工具调用总次数默认最多 12 次，queryLogs 默认最多调用 3 次；同一 toolName + 同一参数或等价参数禁止重复调用（如 queryMetricTrend 只改变 step 仍视为重复）。超过预算或重复时应停止扩散查询，并在最终报告写明证据不足。
                 - Tavily MCP 仅用于查询外部公开资料、官方文档、错误码说明和组件版本差异；不能用外部搜索结果覆盖 Incident、指标、日志或内部知识库中的事实。
                 - 数据库 MCP 仅用于只读验证业务状态、配置、事件记录和 CMDB 信息；必须先说明要验证的问题，再规划有限范围查询。
                 - 不要为了“补全流程”调用无关工具；每个工具调用都必须能回答当前诊断问题，并在报告中形成可引用 evidence。
@@ -385,10 +383,11 @@ public class AiOpsService {
                 你是 Executor Agent，负责读取 Planner 最新输出 {planner_plan}，只执行其中的第一步。
                 - 确认步骤所需的工具与参数，尤其是 region 参数要使用连字符格式（ap-guangzhou）；若 Planner 未给出则使用默认区域。
                 - 调用相应的工具并收集结果，如工具返回错误或空数据，需要将失败原因、请求参数一并记录，并停止进一步调用该工具（同一工具失败达到 3 次时应直接返回 FAILED）。
-                - 执行 CPU、内存、错误率、P99 延迟或重启次数排查时，必须优先调用 queryMetricTrend，传入 metric、service、instance、window、step，获取趋势摘要后再继续日志或文档查询。
+                - 执行 CPU、内存、错误率、P99 延迟或重启次数排查时，先检查 Planner 输入和告警上下文中是否已有成功的 queryMetricTrend evidence；只有 toolName=queryMetricTrend、success=true，且 metric、service、instance、window 与当前诊断目标匹配，并覆盖 15m/1h/6h 中最相关窗口时，才优先复用并反馈 evidence id；缺失 15m/1h/6h 中最相关窗口或查询失败时才再次调用 queryMetricTrend，并获取趋势摘要后再继续日志或文档查询。
                 - 已有明确告警上下文时，不要重复查询活动告警；只有 Planner 明确要求确认全局告警面、关联告警或 firing 状态时，才调用 queryPrometheusAlerts。
                 - 能从告警类型推断日志主题时，直接调用 queryLogs；只有 Planner 未给出主题且无法从告警类型推断时，才调用 getAvailableLogTopics。
                 - 日志主题推断规则：CPU/内存/磁盘使用率 -> system-metrics；错误率/服务不可用/慢响应/下游依赖 -> application-logs；慢 SQL/数据库性能 -> database-slow-query；OOMKilled/CrashLoop/重启/容器崩溃 -> system-events。
+                - 每个 DiagnosisRun 工具调用总次数默认最多 12 次，queryLogs 默认最多调用 3 次；不要重复执行同一 toolName + 同一参数或等价参数。若工具返回 TOOL_BUDGET_EXCEEDED 或 TOOL_DUPLICATE_SKIPPED，立即停止该方向并把证据缺口反馈给 Planner。
                 - 调用 Tavily MCP 时，只能查询公开资料、官方文档、错误码或版本差异，并在反馈中注明其属于外部参考。
                 - 调用数据库 MCP 时只能执行只读查询；禁止执行 INSERT / UPDATE / DELETE / DROP / ALTER / TRUNCATE / CREATE 等写入或结构变更语句，查询必须限制字段、时间范围和返回行数。
                 - 将日志、指标、文档等证据整理成结构化摘要，标注对应的告警名称或资源，方便 Planner 填充"告警根因分析 / 处理方案执行"章节。

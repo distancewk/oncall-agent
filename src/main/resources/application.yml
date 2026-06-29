@@ -50,6 +50,9 @@ spring:
         max-idle: 8
         min-idle: 0
 
+  flyway:
+    enabled: false
+
 # 自定义应用级配置（暂无）
 
 # 阿里云 DashScope Embedding API 配置
@@ -85,8 +88,21 @@ prometheus:
 # CLS 云日志服务配置
 cls:
   mock-enabled: ${CLS_MOCK_ENABLED:false}  # 是否启用 Mock 模式（用于测试，设为 true 返回与告警关联的模拟日志数据）
+  base-url: ${CLS_BASE_URL:}
+  query-path: ${CLS_QUERY_PATH:/api/v1/logs/query}
+  api-key: ${CLS_API_KEY:}
+  timeout: ${CLS_TIMEOUT:10}
 
 app:
+  jobs:
+    enabled: ${APP_JOBS_ENABLED:true}
+    poll-delay-millis: ${APP_JOB_POLL_DELAY_MILLIS:1000}
+    lease-duration-millis: ${APP_JOB_LEASE_DURATION_MILLIS:60000}
+    heartbeat-interval-millis: ${APP_JOB_HEARTBEAT_INTERVAL_MILLIS:15000}
+    recovery-delay-millis: ${APP_JOB_RECOVERY_DELAY_MILLIS:15000}
+    worker-concurrency: ${APP_JOB_WORKER_CONCURRENCY:4}
+    diagnosis-max-attempts: ${APP_JOB_DIAGNOSIS_MAX_ATTEMPTS:2}
+    index-max-attempts: ${APP_JOB_INDEX_MAX_ATTEMPTS:3}
   resilience:
     enabled: ${APP_RESILIENCE_ENABLED:true}
     default-config:
@@ -96,13 +112,19 @@ app:
       minimum-calls: ${APP_RESILIENCE_MINIMUM_CALLS:5}
       permitted-half-open-calls: ${APP_RESILIENCE_HALF_OPEN_CALLS:2}
       open-duration: ${APP_RESILIENCE_OPEN_DURATION:30s}
+      retry-max-attempts: ${APP_RESILIENCE_RETRY_MAX_ATTEMPTS:1}
+      retry-wait-duration: ${APP_RESILIENCE_RETRY_WAIT_DURATION:300ms}
     instances:
       prometheus:
         minimum-calls: 3
         open-duration: 20s
+        retry-max-attempts: ${APP_PROMETHEUS_RETRY_MAX_ATTEMPTS:2}
+        retry-wait-duration: ${APP_PROMETHEUS_RETRY_WAIT_DURATION:300ms}
       cls-logs:
         minimum-calls: 3
         open-duration: 30s
+        retry-max-attempts: ${APP_CLS_RETRY_MAX_ATTEMPTS:2}
+        retry-wait-duration: ${APP_CLS_RETRY_WAIT_DURATION:300ms}
       dashscope-chat:
         minimum-calls: 5
         slow-call-duration: 30s
@@ -116,9 +138,13 @@ app:
       mcp-tavily:
         minimum-calls: 2
         open-duration: 60s
+        retry-max-attempts: ${APP_MCP_TAVILY_RETRY_MAX_ATTEMPTS:2}
+        retry-wait-duration: ${APP_MCP_TAVILY_RETRY_WAIT_DURATION:500ms}
       mcp-dbhub:
         minimum-calls: 2
         open-duration: 60s
+        retry-max-attempts: ${APP_MCP_DBHUB_RETRY_MAX_ATTEMPTS:2}
+        retry-wait-duration: ${APP_MCP_DBHUB_RETRY_WAIT_DURATION:500ms}
   cors:
     allowed-origins: ${APP_CORS_ALLOWED_ORIGINS:http://localhost:9900,http://127.0.0.1:9900}
   security:
@@ -131,8 +157,26 @@ app:
     path: ${APP_CHAT_HISTORY_PATH:./data/chat-history}
   incidents:
     path: ${APP_INCIDENTS_PATH:./data/incidents}
+    jdbc-url: ${APP_INCIDENT_JDBC_URL:jdbc:postgresql://localhost:5432/superbizagent}
+    jdbc-username: ${APP_INCIDENT_JDBC_USERNAME:superbizagent}
+    jdbc-password: ${APP_INCIDENT_JDBC_PASSWORD:superbizagent}
+    jdbc-driver-class-name: ${APP_INCIDENT_JDBC_DRIVER_CLASS_NAME:}
+    jdbc-maximum-pool-size: ${APP_INCIDENT_JDBC_MAX_POOL_SIZE:10}
+    jdbc-minimum-idle: ${APP_INCIDENT_JDBC_MIN_IDLE:1}
+    jdbc-connection-timeout-millis: ${APP_INCIDENT_JDBC_CONNECTION_TIMEOUT_MILLIS:5000}
+    jdbc-initialization-fail-timeout-millis: ${APP_INCIDENT_JDBC_INITIALIZATION_FAIL_TIMEOUT_MILLIS:-1}
     diagnosis-reuse-enabled: ${APP_DIAGNOSIS_REUSE_ENABLED:true}
     diagnosis-reuse-window-millis: ${APP_DIAGNOSIS_REUSE_WINDOW_MILLIS:3600000}
+    tool-call-deduplication-enabled: ${APP_TOOL_CALL_DEDUPLICATION_ENABLED:true}
+    query-logs-max-calls-per-run: ${APP_QUERY_LOGS_MAX_CALLS_PER_RUN:3}
+    query-internal-docs-max-calls-per-run: ${APP_QUERY_INTERNAL_DOCS_MAX_CALLS_PER_RUN:3}
+    tavily-max-calls-per-run: ${APP_TAVILY_MAX_CALLS_PER_RUN:2}
+    dbhub-max-calls-per-run: ${APP_DBHUB_MAX_CALLS_PER_RUN:2}
+    max-tool-calls-per-run: ${APP_MAX_TOOL_CALLS_PER_RUN:12}
+    stale-run-timeout-millis: ${APP_STALE_RUN_TIMEOUT_MILLIS:600000}
+    stale-run-sweep-delay-millis: ${APP_STALE_RUN_SWEEP_DELAY_MILLIS:60000}
   memory:
     private-recall-enabled: ${APP_PRIVATE_MEMORY_RECALL_ENABLED:true}
     private-recall-top-k: ${APP_PRIVATE_MEMORY_RECALL_TOP_K:3}
+    private-recall-min-score: ${APP_PRIVATE_MEMORY_RECALL_MIN_SCORE:0.0}
+    private-recall-max-prompt-chars: ${APP_PRIVATE_MEMORY_RECALL_MAX_PROMPT_CHARS:1200}

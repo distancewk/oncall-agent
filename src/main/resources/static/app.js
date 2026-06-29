@@ -13,6 +13,13 @@ class SuperBizAgentApp {
         this.pendingAlertId = null; // 待查看的告警ID
         this.incidentDetailRefreshTimer = null;
         this.incidentDetailRenderSignature = null;
+        this.alertHistoryFilters = {
+            status: '',
+            severity: '',
+            latestRunStatus: '',
+            q: '',
+            humanReviewStatus: ''
+        };
         this.dependencies = [];
         this.dependencyLoadError = '';
 
@@ -1665,11 +1672,13 @@ class SuperBizAgentApp {
 
         this.alertHistoryPanel.style.display = 'flex';
         this.alertHistoryPanel.classList.add('open');
-        this.alertHistoryContent.innerHTML = '<div class="alert-panel-loading">加载中...</div>';
+        this.alertHistoryContent.innerHTML = this.renderAlertHistoryFilters()
+            + '<div class="alert-panel-loading">加载中...</div>';
+        this.bindAlertHistoryFilterEvents();
         this.alertHistoryContent.scrollTop = 0;
 
         try {
-            const response = await fetch(`${this.apiBaseUrl}/incidents`);
+            const response = await fetch(`${this.apiBaseUrl}/incidents${this.buildIncidentHistoryQuery()}`);
             if (!response.ok) throw new Error(`HTTP错误: ${response.status}`);
 
             const data = await response.json();
@@ -1685,7 +1694,9 @@ class SuperBizAgentApp {
         if (!this.alertHistoryContent) return;
 
         if (!incidents || incidents.length === 0) {
-            this.alertHistoryContent.innerHTML = '<div class="alert-panel-empty">暂无事故记录</div>';
+            this.alertHistoryContent.innerHTML = this.renderAlertHistoryFilters()
+                + '<div class="alert-panel-empty">暂无事故记录</div>';
+            this.bindAlertHistoryFilterEvents();
             return;
         }
 
@@ -1698,6 +1709,10 @@ class SuperBizAgentApp {
             const runText = incident.latestRunStatus
                 ? this.runStatusText(incident.latestRunStatus)
                 : '尚未诊断';
+            const qualityText = incident.latestRunQualityGrade
+                ? `${incident.latestRunQualityGrade} ${incident.latestRunQualityScore || 0}`
+                : '未评分';
+            const reviewText = this.humanReviewStatusText(incident.latestRunHumanReviewStatus);
 
             html += `
                 <div class="alert-card" data-incident-id="${this.escapeHtml(incident.id)}">
@@ -1707,9 +1722,15 @@ class SuperBizAgentApp {
                         <span class="alert-time">${time}</span>
                     </div>
                     <div class="alert-card-body">${this.escapeHtml(incident.title || '未知事故')}</div>
+                    <div class="alert-card-meta">
+                        <span>${this.escapeHtml(runText)}</span>
+                        <span>${this.escapeHtml(qualityText)}</span>
+                        <span>${this.escapeHtml(reviewText)}</span>
+                        ${incident.latestRunCaseArchived ? '<span class="alert-card-archived">已入库</span>' : ''}
+                    </div>
                     <div class="alert-card-footer">
                         <span class="${incident.latestRunStatus === 'COMPLETED' ? 'alert-has-report' : 'alert-no-report'}">
-                            ${this.escapeHtml(runText)} · ${incident.alertCount || 0} 次告警
+                            ${incident.alertCount || 0} 次告警
                         </span>
                         <button class="alert-view-btn" data-incident-id="${this.escapeHtml(incident.id)}">查看详情</button>
                     </div>
@@ -1717,7 +1738,9 @@ class SuperBizAgentApp {
             `;
         });
 
-        this.alertHistoryContent.innerHTML = '<div class="alert-card-list">' + html + '</div>';
+        this.alertHistoryContent.innerHTML = this.renderAlertHistoryFilters()
+            + '<div class="alert-card-list">' + html + '</div>';
+        this.bindAlertHistoryFilterEvents();
 
         this.alertHistoryContent.querySelectorAll('.alert-view-btn').forEach(btn => {
             btn.addEventListener('click', (e) => {
@@ -1729,6 +1752,109 @@ class SuperBizAgentApp {
                 }
             });
         });
+    }
+
+    renderAlertHistoryFilters() {
+        const filters = this.alertHistoryFilters || {};
+        return `
+            <div class="alert-history-filters">
+                <input class="alert-history-search" data-filter="q" type="search"
+                    placeholder="搜索标题、服务或 Incident"
+                    value="${this.escapeHtml(filters.q || '')}">
+                <select data-filter="status">
+                    <option value="">全部状态</option>
+                    <option value="OPEN" ${filters.status === 'OPEN' ? 'selected' : ''}>处理中</option>
+                    <option value="RESOLVED" ${filters.status === 'RESOLVED' ? 'selected' : ''}>已恢复</option>
+                </select>
+                <select data-filter="severity">
+                    <option value="">全部级别</option>
+                    <option value="critical" ${filters.severity === 'critical' ? 'selected' : ''}>critical</option>
+                    <option value="warning" ${filters.severity === 'warning' ? 'selected' : ''}>warning</option>
+                </select>
+                <select data-filter="latestRunStatus">
+                    <option value="">诊断状态</option>
+                    <option value="QUEUED" ${filters.latestRunStatus === 'QUEUED' ? 'selected' : ''}>排队中</option>
+                    <option value="RUNNING" ${filters.latestRunStatus === 'RUNNING' ? 'selected' : ''}>诊断中</option>
+                    <option value="WAITING_TOOL" ${filters.latestRunStatus === 'WAITING_TOOL' ? 'selected' : ''}>等待工具</option>
+                    <option value="COMPLETED" ${filters.latestRunStatus === 'COMPLETED' ? 'selected' : ''}>已完成</option>
+                    <option value="FAILED" ${filters.latestRunStatus === 'FAILED' ? 'selected' : ''}>失败</option>
+                    <option value="CANCELLED" ${filters.latestRunStatus === 'CANCELLED' ? 'selected' : ''}>已取消</option>
+                </select>
+                <select data-filter="humanReviewStatus">
+                    <option value="">人工确认</option>
+                    <option value="UNREVIEWED" ${filters.humanReviewStatus === 'UNREVIEWED' ? 'selected' : ''}>未确认</option>
+                    <option value="CONFIRMED" ${filters.humanReviewStatus === 'CONFIRMED' ? 'selected' : ''}>已确认</option>
+                    <option value="REJECTED" ${filters.humanReviewStatus === 'REJECTED' ? 'selected' : ''}>已驳回</option>
+                </select>
+                <button class="alert-history-filter-btn" type="button">筛选</button>
+                <button class="alert-history-reset-btn" type="button">重置</button>
+            </div>
+        `;
+    }
+
+    bindAlertHistoryFilterEvents() {
+        if (!this.alertHistoryContent) return;
+        const apply = () => {
+            this.readAlertHistoryFilters();
+            this.showAlertHistory();
+        };
+        this.alertHistoryContent.querySelectorAll('.alert-history-filters select').forEach(select => {
+            select.addEventListener('change', apply);
+        });
+        const searchInput = this.alertHistoryContent.querySelector('.alert-history-search');
+        if (searchInput) {
+            searchInput.addEventListener('keydown', (event) => {
+                if (event.key === 'Enter') {
+                    apply();
+                }
+            });
+        }
+        const applyBtn = this.alertHistoryContent.querySelector('.alert-history-filter-btn');
+        if (applyBtn) {
+            applyBtn.addEventListener('click', apply);
+        }
+        const resetBtn = this.alertHistoryContent.querySelector('.alert-history-reset-btn');
+        if (resetBtn) {
+            resetBtn.addEventListener('click', () => {
+                this.alertHistoryFilters = {
+                    status: '',
+                    severity: '',
+                    latestRunStatus: '',
+                    q: '',
+                    humanReviewStatus: ''
+                };
+                this.showAlertHistory();
+            });
+        }
+    }
+
+    readAlertHistoryFilters() {
+        if (!this.alertHistoryContent) return;
+        const filters = {
+            status: '',
+            severity: '',
+            latestRunStatus: '',
+            q: '',
+            humanReviewStatus: ''
+        };
+        this.alertHistoryContent.querySelectorAll('[data-filter]').forEach(control => {
+            const key = control.getAttribute('data-filter');
+            if (key) {
+                filters[key] = control.value || '';
+            }
+        });
+        this.alertHistoryFilters = filters;
+    }
+
+    buildIncidentHistoryQuery(filters = this.alertHistoryFilters) {
+        const params = new URLSearchParams();
+        Object.entries(filters || {}).forEach(([key, value]) => {
+            if (value !== null && value !== undefined && String(value).trim() !== '') {
+                params.set(key, String(value).trim());
+            }
+        });
+        const query = params.toString();
+        return query ? `?${query}` : '';
     }
 
     async showAlertDetail(incidentId, options = {}) {
@@ -1801,6 +1927,10 @@ class SuperBizAgentApp {
                         <div><strong>Run ID:</strong> ${this.escapeHtml(latestRun.runId)}</div>
                         <div><strong>状态:</strong> ${this.escapeHtml(this.runStatusText(latestRun.status))}</div>
                         <div><strong>更新时间:</strong> ${runTime ? new Date(runTime).toLocaleString('zh-CN') : '未知'}</div>
+                        <div><strong>质量评分:</strong> ${this.escapeHtml(this.qualityLabel(latestRun))}</div>
+                        <div><strong>人工确认:</strong> ${this.escapeHtml(this.humanReviewStatusText(latestRun.humanReviewStatus))}</div>
+                        ${latestRun.humanReviewComment ? `<div><strong>确认备注:</strong> ${this.escapeHtml(latestRun.humanReviewComment)}</div>` : ''}
+                        ${latestRun.caseArchiveMessage ? `<div><strong>案例入库:</strong> ${this.escapeHtml(latestRun.caseArchiveMessage)}</div>` : ''}
                         ${latestRun.currentStep ? `<div><strong>当前步骤:</strong> ${this.escapeHtml(latestRun.currentStep)}</div>` : ''}
                         ${latestRun.currentTool ? `<div><strong>当前工具:</strong> ${this.escapeHtml(latestRun.currentTool)}</div>` : ''}
                         ${latestRun.progressMessage ? `<div><strong>进度:</strong> ${this.escapeHtml(latestRun.progressMessage)}</div>` : ''}
@@ -1828,6 +1958,7 @@ class SuperBizAgentApp {
                 <div class="alert-detail-section">
                     <div class="alert-detail-info">
                         <div><strong>Incident ID:</strong> ${this.escapeHtml(detailData.id)}</div>
+                        <div><strong>聚合键:</strong> ${this.escapeHtml(detailData.aggregationKey || '未知')}</div>
                         <div><strong>标题:</strong> ${this.escapeHtml(detailData.title || '未知事故')}</div>
                         <div><strong>状态:</strong> ${this.escapeHtml(this.incidentStatusText(detailData.status))}</div>
                         <div><strong>级别:</strong> ${this.escapeHtml(detailData.severity || 'unknown')}</div>
@@ -1852,7 +1983,10 @@ class SuperBizAgentApp {
                     <div class="alert-report-content">${reportHtml}</div>
                     <div class="alert-detail-actions">
                         <button class="alert-aiops-btn" data-incident-id="${this.escapeHtml(incidentId)}">重新执行 AI Ops 诊断</button>
-                        ${latestRun && latestRun.status === 'COMPLETED' ? `<button class="alert-archive-case-btn" data-incident-id="${this.escapeHtml(incidentId)}">写入历史案例</button>` : ''}
+                        ${latestRun && ['QUEUED', 'RUNNING', 'WAITING_TOOL'].includes(latestRun.status) ? `<button class="alert-cancel-run-btn" data-incident-id="${this.escapeHtml(incidentId)}" data-run-id="${this.escapeHtml(latestRun.runId)}">取消诊断</button>` : ''}
+                        ${latestRun && latestRun.status === 'COMPLETED' && latestRun.humanReviewStatus !== 'CONFIRMED' ? `<button class="alert-confirm-run-btn" data-incident-id="${this.escapeHtml(incidentId)}" data-run-id="${this.escapeHtml(latestRun.runId)}">确认并入库</button>` : ''}
+                        ${latestRun && latestRun.status === 'COMPLETED' && latestRun.humanReviewStatus !== 'REJECTED' ? `<button class="alert-reject-run-btn" data-incident-id="${this.escapeHtml(incidentId)}" data-run-id="${this.escapeHtml(latestRun.runId)}">驳回诊断</button>` : ''}
+                        ${latestRun && latestRun.status === 'COMPLETED' && !latestRun.caseArchived ? `<button class="alert-archive-case-btn" data-incident-id="${this.escapeHtml(incidentId)}">手动写入历史案例</button>` : ''}
                     </div>
                 </div>
             `;
@@ -1864,6 +1998,33 @@ class SuperBizAgentApp {
                     if (id) {
                         this.triggerIncidentDiagnosis(id);
                     }
+                });
+            }
+            const cancelRunBtn = this.alertDetailContent.querySelector('.alert-cancel-run-btn');
+            if (cancelRunBtn) {
+                cancelRunBtn.addEventListener('click', () => {
+                    this.cancelDiagnosisRun(
+                        cancelRunBtn.getAttribute('data-incident-id'),
+                        cancelRunBtn.getAttribute('data-run-id')
+                    );
+                });
+            }
+            const confirmRunBtn = this.alertDetailContent.querySelector('.alert-confirm-run-btn');
+            if (confirmRunBtn) {
+                confirmRunBtn.addEventListener('click', () => {
+                    this.confirmDiagnosisRun(
+                        confirmRunBtn.getAttribute('data-incident-id'),
+                        confirmRunBtn.getAttribute('data-run-id')
+                    );
+                });
+            }
+            const rejectRunBtn = this.alertDetailContent.querySelector('.alert-reject-run-btn');
+            if (rejectRunBtn) {
+                rejectRunBtn.addEventListener('click', () => {
+                    this.rejectDiagnosisRun(
+                        rejectRunBtn.getAttribute('data-incident-id'),
+                        rejectRunBtn.getAttribute('data-run-id')
+                    );
                 });
             }
             const archiveCaseBtn = this.alertDetailContent.querySelector('.alert-archive-case-btn');
@@ -1949,6 +2110,66 @@ class SuperBizAgentApp {
         }
     }
 
+    async cancelDiagnosisRun(incidentId, runId) {
+        if (!incidentId || !runId) return;
+        await this.invokeDiagnosisRunAction(incidentId, runId, 'cancel', '用户取消诊断');
+    }
+
+    async confirmDiagnosisRun(incidentId, runId) {
+        if (!incidentId || !runId) return;
+        const comment = this.promptText('确认说明', '根因和处理建议已人工确认');
+        await this.invokeDiagnosisRunAction(incidentId, runId, 'confirm', comment);
+    }
+
+    async rejectDiagnosisRun(incidentId, runId) {
+        if (!incidentId || !runId) return;
+        const comment = this.promptText('驳回原因', '证据不足或结论不准确');
+        await this.invokeDiagnosisRunAction(incidentId, runId, 'reject', comment);
+    }
+
+    async invokeDiagnosisRunAction(incidentId, runId, action, comment) {
+        try {
+            const response = await fetch(this.incidentRunActionUrl(incidentId, runId, action, comment), {
+                method: 'POST'
+            });
+            if (!response.ok) throw new Error(`HTTP错误: ${response.status}`);
+            const data = await response.json();
+            if (data.code !== 200) {
+                throw new Error(data.message || '诊断操作失败');
+            }
+            const messages = {
+                cancel: '诊断已取消',
+                confirm: '诊断已确认，历史案例写入流程已执行',
+                reject: '诊断已驳回'
+            };
+            this.showNotification(messages[action] || '诊断操作完成', 'success');
+            this.showAlertDetail(incidentId, { preserveScroll: true });
+        } catch (error) {
+            console.error('诊断操作失败:', error);
+            this.showNotification('诊断操作失败: ' + error.message, 'error');
+        }
+    }
+
+    incidentRunActionUrl(incidentId, runId, action, comment) {
+        const safeIncidentId = encodeURIComponent(incidentId || '');
+        const safeRunId = encodeURIComponent(runId || '');
+        const safeAction = encodeURIComponent(action || '');
+        const params = new URLSearchParams();
+        if (comment && String(comment).trim() !== '') {
+            params.set(action === 'cancel' ? 'reason' : 'comment', String(comment).trim());
+        }
+        const query = params.toString();
+        return `${this.apiBaseUrl}/incidents/${safeIncidentId}/runs/${safeRunId}/${safeAction}${query ? `?${query}` : ''}`;
+    }
+
+    promptText(title, fallback) {
+        if (typeof window !== 'undefined' && typeof window.prompt === 'function') {
+            const value = window.prompt(title, fallback);
+            return value === null ? fallback : value;
+        }
+        return fallback;
+    }
+
     async triggerAIOps(alertId, alertContext) {
         if (this.isStreaming) {
             this.showNotification('请等待当前操作完成', 'warning');
@@ -1998,6 +2219,7 @@ class SuperBizAgentApp {
             .sort((a, b) => this.evidenceImportanceScore(b) - this.evidenceImportanceScore(a))
             .slice(0, 4);
         const groups = this.groupDiagnosisEvidence(toolEvidence);
+        const statsHtml = this.renderDiagnosisEvidenceStats(toolEvidence);
 
         const highlightHtml = highlights.map(item => this.renderDiagnosisEvidenceHighlight(item)).join('');
         const groupHtml = groups.map(group => {
@@ -2024,10 +2246,45 @@ class SuperBizAgentApp {
         return `
             <div class="diagnosis-evidence-overview">
                 <div class="diagnosis-evidence-overview-title">关键证据摘要</div>
+                ${statsHtml}
                 <div class="diagnosis-evidence-highlight-list">${highlightHtml}</div>
             </div>
             <div class="diagnosis-evidence-groups">${groupHtml}</div>
         `;
+    }
+
+    renderDiagnosisEvidenceStats(toolEvidence) {
+        const stats = this.calculateDiagnosisEvidenceStats(toolEvidence);
+        return `
+            <div class="diagnosis-evidence-stats" aria-label="证据统计">
+                <span class="diagnosis-evidence-stat">证据统计</span>
+                <span class="diagnosis-evidence-stat success">成功 ${stats.successCount}</span>
+                <span class="diagnosis-evidence-stat failed">失败 ${stats.failedCount}</span>
+                <span class="diagnosis-evidence-stat retry">重试 ${stats.retriedCount}</span>
+                <span class="diagnosis-evidence-stat">总耗时 ${this.formatEvidenceDuration(stats.totalDurationMs)}</span>
+            </div>
+        `;
+    }
+
+    calculateDiagnosisEvidenceStats(toolEvidence) {
+        const items = Array.isArray(toolEvidence) ? toolEvidence : [];
+        return items.reduce((stats, item) => {
+            if (this.isDiagnosisEvidenceSuccess(item)) {
+                stats.successCount += 1;
+            } else {
+                stats.failedCount += 1;
+            }
+            if (Number(item && item.attemptCount) > 1) {
+                stats.retriedCount += 1;
+            }
+            stats.totalDurationMs += this.safeNumber(item && item.durationMs);
+            return stats;
+        }, {
+            successCount: 0,
+            failedCount: 0,
+            retriedCount: 0,
+            totalDurationMs: 0
+        });
     }
 
     groupDiagnosisEvidence(toolEvidence) {
@@ -2112,12 +2369,14 @@ class SuperBizAgentApp {
     }
 
     renderDiagnosisEvidenceItem(item) {
-        const breakerOpen = item.errorCode === 'CIRCUIT_OPEN';
-        const ok = item.success !== false && !breakerOpen;
-        const statusText = breakerOpen ? 'BREAKER OPEN' : (ok ? 'SUCCESS' : 'FAILED');
+        const breakerOpen = this.isCircuitOpenEvidence(item);
+        const ok = this.isDiagnosisEvidenceSuccess(item);
+        const statusText = ok ? '成功' : this.evidenceFailureLabel(item);
         const statusClass = breakerOpen ? 'failed breaker-open' : (ok ? 'success' : 'failed');
         const title = item.toolName || item.title || item.type || 'evidence';
         const summary = item.summary || item.content || '无摘要';
+        const metaHtml = this.renderDiagnosisEvidenceMeta(item);
+        const failureDetail = this.renderDiagnosisEvidenceFailureDetail(item);
         return `
             <div class="diagnosis-evidence-item">
                 <div class="diagnosis-evidence-head">
@@ -2129,7 +2388,9 @@ class SuperBizAgentApp {
                 </div>
                 ${item.timeRange ? `<div class="diagnosis-evidence-time">时间范围: ${this.escapeHtml(item.timeRange)}</div>` : ''}
                 <div class="diagnosis-evidence-summary">${this.escapeHtml(summary)}</div>
+                ${metaHtml}
                 ${item.errorCode ? `<div class="diagnosis-evidence-error-code">errorCode: ${this.escapeHtml(item.errorCode)}</div>` : ''}
+                ${failureDetail}
                 ${breakerOpen ? '<div class="diagnosis-evidence-breaker-note">依赖熔断，相关证据缺失；报告不能基于该工具生成事实结论。</div>' : ''}
                 ${item.queryParams ? `
                     <details class="diagnosis-evidence-extra">
@@ -2140,6 +2401,75 @@ class SuperBizAgentApp {
                 ${this.renderMetricTrendChartDetails(item)}
             </div>
         `;
+    }
+
+    renderDiagnosisEvidenceMeta(item) {
+        const chips = [];
+        const attemptCount = Number(item && item.attemptCount);
+        const durationMs = this.safeNumber(item && item.durationMs);
+        if (Number.isFinite(attemptCount) && attemptCount >= 0) {
+            chips.push(`尝试 ${attemptCount} 次`);
+        }
+        if (durationMs > 0) {
+            chips.push(`耗时 ${this.formatEvidenceDuration(durationMs)}`);
+        }
+        if (item && item.retryable === true) {
+            chips.push('可重试');
+        }
+        if (chips.length === 0) {
+            return '';
+        }
+        return `
+            <div class="diagnosis-evidence-meta-row">
+                ${chips.map(chip => `<span class="diagnosis-evidence-meta-chip">${this.escapeHtml(chip)}</span>`).join('')}
+            </div>
+        `;
+    }
+
+    renderDiagnosisEvidenceFailureDetail(item) {
+        if (this.isDiagnosisEvidenceSuccess(item)) {
+            return '';
+        }
+        const label = this.evidenceFailureLabel(item);
+        const message = item && item.errorMessage ? item.errorMessage : '';
+        return `
+            <div class="diagnosis-evidence-failure-detail">
+                <strong>${this.escapeHtml(label)}</strong>${message ? `：${this.escapeHtml(message)}` : ''}
+            </div>
+        `;
+    }
+
+    isDiagnosisEvidenceSuccess(item) {
+        return !!item && item.success !== false && !this.isCircuitOpenEvidence(item);
+    }
+
+    isCircuitOpenEvidence(item) {
+        return !!item && item.errorCode === 'CIRCUIT_OPEN';
+    }
+
+    evidenceFailureLabel(item) {
+        const errorCode = item && item.errorCode ? item.errorCode : '';
+        const labels = {
+            CIRCUIT_OPEN: '依赖熔断',
+            DEPENDENCY_ERROR: '依赖异常',
+            TOOL_BUDGET_EXCEEDED: '工具调用超限',
+            TOOL_DUPLICATE_SKIPPED: '重复调用已跳过',
+            RETRY_INTERRUPTED: '重试被中断'
+        };
+        return labels[errorCode] || (errorCode ? errorCode : '失败');
+    }
+
+    safeNumber(value) {
+        const number = Number(value);
+        return Number.isFinite(number) && number > 0 ? number : 0;
+    }
+
+    formatEvidenceDuration(durationMs) {
+        const ms = this.safeNumber(durationMs);
+        if (ms < 1000) {
+            return `${Math.round(ms)}ms`;
+        }
+        return `${(ms / 1000).toFixed(1)}s`;
     }
 
     renderMetricTrendChartDetails(item) {
@@ -2292,6 +2622,12 @@ class SuperBizAgentApp {
             currentTool: latestRun ? latestRun.currentTool : null,
             progressMessage: latestRun ? latestRun.progressMessage : null,
             errorMessage: latestRun ? latestRun.errorMessage : null,
+            qualityScore: latestRun ? latestRun.qualityScore : null,
+            qualityGrade: latestRun ? latestRun.qualityGrade : null,
+            humanReviewStatus: latestRun ? latestRun.humanReviewStatus : null,
+            humanReviewComment: latestRun ? latestRun.humanReviewComment : null,
+            caseArchived: latestRun ? latestRun.caseArchived : null,
+            caseArchiveMessage: latestRun ? latestRun.caseArchiveMessage : null,
             completedAt: latestRun ? latestRun.completedAt : null,
             toolEvidenceCount,
             report: latestRun ? latestRun.report : null
@@ -2331,6 +2667,26 @@ class SuperBizAgentApp {
             CANCELLED: '已取消'
         };
         return names[status] || status || '未知';
+    }
+
+    humanReviewStatusText(status) {
+        const names = {
+            UNREVIEWED: '未确认',
+            CONFIRMED: '已确认',
+            REJECTED: '已驳回'
+        };
+        return names[status] || '未确认';
+    }
+
+    qualityLabel(run) {
+        if (!run || !run.qualityGrade) {
+            return '未评分';
+        }
+        const score = Number.isFinite(Number(run.qualityScore)) ? Number(run.qualityScore) : 0;
+        const issues = Array.isArray(run.qualityIssues) && run.qualityIssues.length > 0
+            ? `，问题 ${run.qualityIssues.length} 项`
+            : '';
+        return `${run.qualityGrade} ${score}${issues}`;
     }
 
     escapeHtml(text) {

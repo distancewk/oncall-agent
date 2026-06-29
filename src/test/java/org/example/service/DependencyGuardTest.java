@@ -5,6 +5,7 @@ import org.example.dto.DependencyHealthSnapshot;
 import org.example.exception.DependencyUnavailableException;
 import org.junit.jupiter.api.Test;
 
+import java.io.IOException;
 import java.time.Duration;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -69,6 +70,73 @@ class DependencyGuardTest {
         assertEquals("ok", result);
         assertFalse(guard.snapshot().isEmpty());
         assertEquals("DISABLED", guard.snapshot().get(0).getState());
+    }
+
+    @Test
+    void execute_shouldRetryConfiguredTransientFailuresBeforeFallback() {
+        AppResilienceProperties properties = new AppResilienceProperties();
+        properties.getDefaultConfig().setMinimumCalls(5);
+        properties.getDefaultConfig().setRetryMaxAttempts(3);
+        properties.getDefaultConfig().setRetryWaitDuration(Duration.ofMillis(1));
+        ToolCallAttemptContext attemptContext = new ToolCallAttemptContext();
+        DependencyGuard guard = new DependencyGuard(properties, attemptContext);
+        AtomicInteger calls = new AtomicInteger();
+
+        String result = guard.execute("prometheus", "queryMetricTrend",
+                () -> {
+                    int attempt = calls.incrementAndGet();
+                    if (attempt < 3) {
+                        throw new IllegalStateException("temporary timeout");
+                    }
+                    return "ok";
+                },
+                error -> "fallback");
+
+        assertEquals("ok", result);
+        assertEquals(3, calls.get());
+        assertEquals(3, attemptContext.consumeLastAttempts());
+        assertEquals("CLOSED", guard.snapshot().get(0).getState());
+    }
+
+    @Test
+    void executeChecked_shouldPropagateOriginalCheckedExceptionType() {
+        AppResilienceProperties properties = new AppResilienceProperties();
+        properties.getDefaultConfig().setMinimumCalls(5);
+        DependencyGuard guard = new DependencyGuard(properties);
+        IOException original = new IOException("network reset");
+
+        IOException thrown = assertThrows(IOException.class,
+                () -> DependencyGuardExecutor.executeChecked(
+                        guard,
+                        "prometheus",
+                        "query",
+                        () -> {
+                            throw original;
+                        }));
+
+        assertEquals(original, thrown);
+    }
+
+    @Test
+    void execute_shouldRecordAttemptCountWhenRetriesExhausted() {
+        AppResilienceProperties properties = new AppResilienceProperties();
+        properties.getDefaultConfig().setMinimumCalls(5);
+        properties.getDefaultConfig().setRetryMaxAttempts(2);
+        properties.getDefaultConfig().setRetryWaitDuration(Duration.ofMillis(1));
+        ToolCallAttemptContext attemptContext = new ToolCallAttemptContext();
+        DependencyGuard guard = new DependencyGuard(properties, attemptContext);
+        AtomicInteger calls = new AtomicInteger();
+
+        String result = guard.execute("prometheus", "queryMetricTrend",
+                () -> {
+                    calls.incrementAndGet();
+                    throw new IllegalStateException("temporary timeout");
+                },
+                error -> "fallback:" + error.getMessage());
+
+        assertEquals("fallback:temporary timeout", result);
+        assertEquals(2, calls.get());
+        assertEquals(2, attemptContext.consumeLastAttempts());
     }
 
     @Test

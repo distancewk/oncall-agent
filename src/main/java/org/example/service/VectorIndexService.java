@@ -11,7 +11,6 @@ import lombok.Getter;
 import lombok.Setter;
 import org.example.constant.MilvusConstants;
 import org.example.dto.DocumentChunk;
-import org.example.exception.DependencyUnavailableException;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -190,11 +189,12 @@ public class VectorIndexService {
     }
 
     private void ensureCollectionLoaded() {
-        R<RpcStatus> loadResponse = guardedMilvus("ensureCollectionLoaded", () -> milvusClient.loadCollection(
-                LoadCollectionParam.newBuilder()
+        R<RpcStatus> loadResponse = DependencyGuardExecutor.executeMilvus(
+                dependencyGuard,
+                "ensureCollectionLoaded",
+                () -> milvusClient.loadCollection(LoadCollectionParam.newBuilder()
                         .withCollectionName(MilvusConstants.MILVUS_COLLECTION_NAME)
-                        .build()
-        ));
+                        .build()));
 
         // 状态码 65535 表示集合已经加载，这不是错误
         if (loadResponse.getStatus() != 0 && loadResponse.getStatus() != 65535) {
@@ -222,7 +222,8 @@ public class VectorIndexService {
                     .withExpr(expr)
                     .build();
 
-            R<MutationResult> response = guardedMilvus("deleteExistingData", () -> milvusClient.delete(deleteParam));
+            R<MutationResult> response = DependencyGuardExecutor.executeMilvus(
+                    dependencyGuard, "deleteExistingData", () -> milvusClient.delete(deleteParam));
 
             if (response.getStatus() != 0) {
                 throw new RuntimeException("删除旧数据失败: " + response.getMessage());
@@ -231,11 +232,11 @@ public class VectorIndexService {
                 logger.info("✓ 已删除文件的旧数据: {}, 删除记录数: {}", normalizedPath, deletedCount);
             }
 
+        } catch (RuntimeException e) {
+            logger.error("删除旧数据失败", e);
+            throw e;
         } catch (Exception e) {
             logger.error("删除旧数据失败", e);
-            if (e instanceof RuntimeException runtimeException) {
-                throw runtimeException;
-            }
             throw new RuntimeException("删除旧数据失败: " + e.getMessage(), e);
         }
     }
@@ -292,7 +293,8 @@ public class VectorIndexService {
             }
 
             InsertParam insertParam = insertHelper.buildInsertParam(ids, contents, vectors, sparseVectors, metadataList);
-            R<MutationResult> insertResponse = guardedMilvus("insertBatchToMilvus",
+            R<MutationResult> insertResponse = DependencyGuardExecutor.executeMilvus(
+                    dependencyGuard, "insertBatchToMilvus",
                     () -> milvusClient.insert(insertParam));
 
             if (insertResponse.getStatus() != 0) {
@@ -305,29 +307,6 @@ public class VectorIndexService {
             logger.error("批量插入向量到 Milvus 失败", e);
             throw e;
         }
-    }
-
-    private <T> R<T> guardedMilvus(String operation, java.util.function.Supplier<R<T>> call) {
-        if (dependencyGuard == null) {
-            return call.get();
-        }
-        return dependencyGuard.execute("milvus", operation,
-                () -> {
-                    R<T> response = call.get();
-                    if (response.getStatus() != 0 && response.getStatus() != 65535) {
-                        throw new RuntimeException(response.getMessage());
-                    }
-                    return response;
-                },
-                error -> {
-                    if (error instanceof DependencyUnavailableException unavailable) {
-                        throw unavailable;
-                    }
-                    if (error instanceof RuntimeException runtimeException) {
-                        throw runtimeException;
-                    }
-                    throw new RuntimeException(error);
-                });
     }
 
     /**

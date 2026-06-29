@@ -17,6 +17,9 @@ public class DiagnosisEvidence {
     private boolean success;
     private String errorMessage;
     private String errorCode;
+    private int attemptCount;
+    private long durationMs;
+    private boolean retryable;
     private long createdAt;
 
     public String getId() {
@@ -115,6 +118,30 @@ public class DiagnosisEvidence {
         this.errorCode = errorCode;
     }
 
+    public int getAttemptCount() {
+        return attemptCount;
+    }
+
+    public void setAttemptCount(int attemptCount) {
+        this.attemptCount = attemptCount;
+    }
+
+    public long getDurationMs() {
+        return durationMs;
+    }
+
+    public void setDurationMs(long durationMs) {
+        this.durationMs = durationMs;
+    }
+
+    public boolean isRetryable() {
+        return retryable;
+    }
+
+    public void setRetryable(boolean retryable) {
+        this.retryable = retryable;
+    }
+
     public long getCreatedAt() {
         return createdAt;
     }
@@ -132,6 +159,9 @@ public class DiagnosisEvidence {
         evidence.setSummary(content);
         evidence.setRawFragment(content);
         evidence.setSuccess(true);
+        evidence.setAttemptCount(0);
+        evidence.setDurationMs(0);
+        evidence.setRetryable(false);
         evidence.setCreatedAt(createdAt);
         return evidence;
     }
@@ -157,6 +187,9 @@ public class DiagnosisEvidence {
         evidence.setSuccess(success);
         evidence.setErrorMessage(errorMessage);
         evidence.setErrorCode(null);
+        evidence.setAttemptCount(1);
+        evidence.setDurationMs(0);
+        evidence.setRetryable(false);
         evidence.setCreatedAt(createdAt);
         return evidence;
     }

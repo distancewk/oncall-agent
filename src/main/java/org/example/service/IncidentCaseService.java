@@ -61,14 +61,33 @@ public class IncidentCaseService {
                 .orElseThrow(() -> new IllegalArgumentException("Incident 不存在: " + incidentId));
         DiagnosisRunRecord run = latestCompletedRun(incident)
                 .orElseThrow(() -> new IllegalStateException("Incident 尚无已完成诊断，不能写入历史案例"));
+        return archiveCase(incident, run);
+    }
 
+    public ArchiveResult archiveCase(String incidentId, String runId) {
+        IncidentRecord incident = incidentService.getIncident(incidentId)
+                .orElseThrow(() -> new IllegalArgumentException("Incident 不存在: " + incidentId));
+        DiagnosisRunRecord run = incident.getDiagnosisRuns().stream()
+                .filter(item -> runId.equals(item.getRunId()))
+                .findFirst()
+                .orElseThrow(() -> new IllegalArgumentException("DiagnosisRun 不存在: " + runId));
+        if (!"COMPLETED".equals(run.getStatus()) || run.getReport() == null || run.getReport().isBlank()) {
+            throw new IllegalStateException("DiagnosisRun 尚无已完成报告，不能写入历史案例: " + runId);
+        }
+        if (!"CONFIRMED".equals(run.getHumanReviewStatus())) {
+            throw new IllegalStateException("DiagnosisRun 未被人工确认，不能写入历史案例: " + runId);
+        }
+        return archiveCase(incident, run);
+    }
+
+    private ArchiveResult archiveCase(IncidentRecord incident, DiagnosisRunRecord run) {
         CaseDocument document = buildCaseDocument(incident, run);
-        deleteExistingCase(incidentId);
+        deleteExistingCase(incident.getId());
         insertCaseDocument(document);
 
         ArchiveResult result = new ArchiveResult();
         result.setSuccess(true);
-        result.setIncidentId(incidentId);
+        result.setIncidentId(incident.getId());
         result.setDocumentId(document.id());
         result.setMessage("历史案例已写入知识库");
         return result;
@@ -183,6 +202,7 @@ public class IncidentCaseService {
         metadata.put("instance", value(instance));
         metadata.put("severity", value(incident.getSeverity()));
         metadata.put("root_cause", rootCause);
+        metadata.put("human_review_status", value(run.getHumanReviewStatus()));
         metadata.put("archived_at", System.currentTimeMillis());
 
         String id = UUID.nameUUIDFromBytes(("incident_case:" + incident.getId()).getBytes(StandardCharsets.UTF_8)).toString();

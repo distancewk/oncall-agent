@@ -11,6 +11,7 @@ import okhttp3.Response;
 import okhttp3.ResponseBody;
 import org.example.exception.DependencyUnavailableException;
 import org.example.service.DependencyGuard;
+import org.example.service.DependencyGuardExecutor;
 import org.example.service.DiagnosisEvidenceRecorder;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -280,10 +281,8 @@ public class QueryMetricsTools {
      * 从 Prometheus API 获取告警数据
      */
     private PrometheusAlertsResult fetchPrometheusAlerts() throws Exception {
-        if (dependencyGuard != null) {
-            return executeGuarded("prometheus", TOOL_QUERY_PROMETHEUS_ALERTS, this::fetchPrometheusAlertsDirect);
-        }
-        return fetchPrometheusAlertsDirect();
+        return DependencyGuardExecutor.executeChecked(
+                dependencyGuard, "prometheus", TOOL_QUERY_PROMETHEUS_ALERTS, this::fetchPrometheusAlertsDirect);
     }
 
     private PrometheusAlertsResult fetchPrometheusAlertsDirect() throws Exception {
@@ -316,11 +315,8 @@ public class QueryMetricsTools {
     }
 
     private List<MetricPoint> fetchPrometheusTrend(String query, String window, String step) throws Exception {
-        if (dependencyGuard != null) {
-            return executeGuarded("prometheus", TOOL_QUERY_METRIC_TREND,
-                    () -> fetchPrometheusTrendDirect(query, window, step));
-        }
-        return fetchPrometheusTrendDirect(query, window, step);
+        return DependencyGuardExecutor.executeChecked(dependencyGuard, "prometheus", TOOL_QUERY_METRIC_TREND,
+                () -> fetchPrometheusTrendDirect(query, window, step));
     }
 
     private List<MetricPoint> fetchPrometheusTrendDirect(String query, String window, String step) throws Exception {
@@ -643,34 +639,6 @@ public class QueryMetricsTools {
         }
     }
 
-    private <T> T executeGuarded(String dependency, String operation, CheckedSupplier<T> supplier) throws Exception {
-        try {
-            return dependencyGuard.execute(dependency, operation,
-                    () -> {
-                        try {
-                            return supplier.get();
-                        } catch (Exception e) {
-                            throw new GuardedDependencyException(e);
-                        }
-                    },
-                    error -> {
-                        if (error instanceof DependencyUnavailableException unavailable) {
-                            throw unavailable;
-                        }
-                        if (error instanceof RuntimeException runtimeException) {
-                            throw runtimeException;
-                        }
-                        throw new GuardedDependencyException(error);
-                    });
-        } catch (GuardedDependencyException e) {
-            Throwable cause = e.getCause();
-            if (cause instanceof Exception exception) {
-                throw exception;
-            }
-            throw e;
-        }
-    }
-
     private String firstNonBlank(String first, String second) {
         if (first != null && !first.isBlank()) {
             return first;
@@ -727,17 +695,6 @@ public class QueryMetricsTools {
         }
     }
 
-    @FunctionalInterface
-    private interface CheckedSupplier<T> {
-        T get() throws Exception;
-    }
-
-    private static class GuardedDependencyException extends RuntimeException {
-        GuardedDependencyException(Throwable cause) {
-            super(cause);
-        }
-    }
-    
     // ==================== 数据模型 ====================
     
     /**

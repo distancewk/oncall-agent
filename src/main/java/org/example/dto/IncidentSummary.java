@@ -7,7 +7,12 @@ public class IncidentSummary {
     private String status;
     private String severity;
     private int alertCount;
+    private String latestRunId;
     private String latestRunStatus;
+    private int latestRunQualityScore;
+    private String latestRunQualityGrade;
+    private String latestRunHumanReviewStatus;
+    private boolean latestRunCaseArchived;
     private long createdAt;
     private long updatedAt;
     private long lastAlertAt;
@@ -52,12 +57,52 @@ public class IncidentSummary {
         this.alertCount = alertCount;
     }
 
+    public String getLatestRunId() {
+        return latestRunId;
+    }
+
+    public void setLatestRunId(String latestRunId) {
+        this.latestRunId = latestRunId;
+    }
+
     public String getLatestRunStatus() {
         return latestRunStatus;
     }
 
     public void setLatestRunStatus(String latestRunStatus) {
         this.latestRunStatus = latestRunStatus;
+    }
+
+    public int getLatestRunQualityScore() {
+        return latestRunQualityScore;
+    }
+
+    public void setLatestRunQualityScore(int latestRunQualityScore) {
+        this.latestRunQualityScore = latestRunQualityScore;
+    }
+
+    public String getLatestRunQualityGrade() {
+        return latestRunQualityGrade;
+    }
+
+    public void setLatestRunQualityGrade(String latestRunQualityGrade) {
+        this.latestRunQualityGrade = latestRunQualityGrade;
+    }
+
+    public String getLatestRunHumanReviewStatus() {
+        return latestRunHumanReviewStatus;
+    }
+
+    public void setLatestRunHumanReviewStatus(String latestRunHumanReviewStatus) {
+        this.latestRunHumanReviewStatus = latestRunHumanReviewStatus;
+    }
+
+    public boolean isLatestRunCaseArchived() {
+        return latestRunCaseArchived;
+    }
+
+    public void setLatestRunCaseArchived(boolean latestRunCaseArchived) {
+        this.latestRunCaseArchived = latestRunCaseArchived;
     }
 
     public long getCreatedAt() {

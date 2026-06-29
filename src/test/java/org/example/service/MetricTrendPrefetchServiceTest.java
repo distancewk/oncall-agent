@@ -8,8 +8,10 @@ import org.example.dto.DiagnosisRunRecord;
 import org.example.dto.IncidentRecord;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
+import org.springframework.jdbc.datasource.DriverManagerDataSource;
 import org.springframework.test.util.ReflectionTestUtils;
 
+import javax.sql.DataSource;
 import java.nio.file.Path;
 import java.util.List;
 import java.util.Map;
@@ -70,8 +72,19 @@ class MetricTrendPrefetchServiceTest {
     private IncidentService newIncidentService(ObjectMapper objectMapper) {
         AppIncidentProperties properties = new AppIncidentProperties();
         properties.setPath(tempDir.resolve("incidents").toString());
-        IncidentStore store = new IncidentStore(properties, objectMapper);
+        properties.setJdbcUrl("jdbc:h2:" + tempDir.resolve("incidents-db"));
+        properties.setJdbcUsername("");
+        properties.setJdbcPassword("");
+        IncidentStore store = new IncidentStore(properties, objectMapper, dataSource(properties));
         return new IncidentService(store, objectMapper);
+    }
+
+    private DataSource dataSource(AppIncidentProperties properties) {
+        DriverManagerDataSource dataSource = new DriverManagerDataSource();
+        dataSource.setUrl(properties.getJdbcUrl());
+        dataSource.setUsername(properties.getJdbcUsername());
+        dataSource.setPassword(properties.getJdbcPassword());
+        return dataSource;
     }
 
     private AlertPayload alertPayload(String alertName, String service, String instance) {

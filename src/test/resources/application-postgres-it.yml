@@ -1,0 +1,38 @@
+spring:
+  ai:
+    mcp:
+      client:
+        enabled: false
+  flyway:
+    enabled: false
+  redis:
+    host: 127.0.0.1
+    port: 0
+
+dashscope:
+  api:
+    key: postgres-it-disabled
+
+prometheus:
+  mock-enabled: true
+
+cls:
+  mock-enabled: true
+
+app:
+  jobs:
+    enabled: false
+  alerts:
+    simulate-enabled: true
+  security:
+    enabled: false
+  chat-history:
+    path: ${java.io.tmpdir}/superbizagent-postgres-it/chat-history
+  incidents:
+    path: ${java.io.tmpdir}/superbizagent-postgres-it/incidents
+    jdbc-url: jdbc:postgresql://127.0.0.1:1/postgres_it_disabled
+    jdbc-username: postgres_it
+    jdbc-password: postgres_it
+    jdbc-initialization-fail-timeout-millis: 0
+    diagnosis-reuse-enabled: false
+    tool-call-deduplication-enabled: false

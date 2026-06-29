@@ -78,6 +78,25 @@ services:
     networks:
       - app-network
 
+  postgres:
+    image: postgres:16-alpine
+    container_name: superbiz-postgres
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-superbizagent}
+      POSTGRES_USER: ${POSTGRES_USER:-superbizagent}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-superbizagent}
+    volumes:
+      - ${DOCKER_VOLUME_DIRECTORY:-.}/data/postgres:/var/lib/postgresql/data
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER:-superbizagent} -d $${POSTGRES_DB:-superbizagent}"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    networks:
+      - app-network
+
   redis:
     image: redis:7-alpine
     container_name: session-redis
@@ -112,6 +131,11 @@ services:
       APP_WEBHOOK_SECRET: ${APP_WEBHOOK_SECRET:-}
       APP_CHAT_HISTORY_PATH: /app/data/chat-history
       APP_INCIDENTS_PATH: /app/data/incidents
+      APP_INCIDENT_JDBC_URL: ${APP_INCIDENT_JDBC_URL:-jdbc:postgresql://postgres:5432/superbizagent}
+      APP_INCIDENT_JDBC_USERNAME: ${APP_INCIDENT_JDBC_USERNAME:-superbizagent}
+      APP_INCIDENT_JDBC_PASSWORD: ${APP_INCIDENT_JDBC_PASSWORD:-superbizagent}
+      APP_JOBS_ENABLED: ${APP_JOBS_ENABLED:-true}
+      APP_JOB_WORKER_CONCURRENCY: ${APP_JOB_WORKER_CONCURRENCY:-4}
       APP_PRIVATE_MEMORY_RECALL_ENABLED: ${APP_PRIVATE_MEMORY_RECALL_ENABLED:-true}
       APP_PRIVATE_MEMORY_RECALL_TOP_K: ${APP_PRIVATE_MEMORY_RECALL_TOP_K:-3}
     volumes:
@@ -122,6 +146,8 @@ services:
       milvus:
         condition: service_healthy
       redis:
+        condition: service_healthy
+      postgres:
         condition: service_healthy
     networks:
       - app-network

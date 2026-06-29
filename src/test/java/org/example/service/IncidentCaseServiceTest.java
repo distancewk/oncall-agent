@@ -19,6 +19,7 @@ import java.util.Optional;
 import java.util.TreeMap;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
@@ -79,6 +80,65 @@ class IncidentCaseServiceTest {
         assertTrue(metadata.contains("\"service\":\"payment-service\""));
         assertTrue(metadata.contains("\"instance\":\"payment-service-pod-1\""));
         assertTrue(metadata.contains("\"root_cause\":\"JVM GC 风暴导致 CPU 升高。\""));
+    }
+
+    @Test
+    void archiveCaseWithRunId_shouldRequireConfirmedRunAndInsertThatRun() {
+        IncidentService incidentService = mock(IncidentService.class);
+        MilvusServiceClient milvusClient = mock(MilvusServiceClient.class);
+        VectorEmbeddingService embeddingService = mock(VectorEmbeddingService.class);
+        VectorSearchService vectorSearchService = mock(VectorSearchService.class);
+
+        IncidentRecord incident = incident("incident-4");
+        DiagnosisRunRecord run = completedRun("run-confirmed", """
+                # 告警分析报告
+
+                ### 根因结论
+                CPU 线程池耗尽。
+
+                ### 处理建议
+                扩容实例并调整线程池。
+                """);
+        run.setHumanReviewStatus("CONFIRMED");
+        incident.getDiagnosisRuns().add(run);
+        when(incidentService.getIncident("incident-4")).thenReturn(Optional.of(incident));
+        when(embeddingService.generateEmbedding(any())).thenReturn(List.of(0.1f, 0.2f));
+        when(embeddingService.generateSparseVector(any())).thenReturn(new TreeMap<>(Map.of(1L, 1.0f)));
+
+        @SuppressWarnings("unchecked")
+        R<MutationResult> mutationResponse = mock(R.class);
+        when(mutationResponse.getStatus()).thenReturn(0);
+        when(milvusClient.delete(any(DeleteParam.class))).thenReturn(mutationResponse);
+        when(milvusClient.insert(any(InsertParam.class))).thenReturn(mutationResponse);
+
+        IncidentCaseService service = new IncidentCaseService(
+                incidentService, milvusClient, embeddingService, vectorSearchService, new MilvusInsertHelper());
+
+        IncidentCaseService.ArchiveResult result = service.archiveCase("incident-4", "run-confirmed");
+
+        assertTrue(result.isSuccess());
+        assertEquals("incident-4", result.getIncidentId());
+        ArgumentCaptor<InsertParam> insertCaptor = ArgumentCaptor.forClass(InsertParam.class);
+        verify(milvusClient).insert(insertCaptor.capture());
+        String metadata = fieldValues(insertCaptor.getValue(), "metadata").get(0).toString();
+        assertTrue(metadata.contains("\"run_id\":\"run-confirmed\""));
+        assertTrue(metadata.contains("\"human_review_status\":\"CONFIRMED\""));
+    }
+
+    @Test
+    void archiveCaseWithRunId_shouldRejectUnconfirmedRun() {
+        IncidentService incidentService = mock(IncidentService.class);
+        IncidentRecord incident = incident("incident-5");
+        incident.getDiagnosisRuns().add(completedRun("run-unreviewed", "# 报告"));
+        when(incidentService.getIncident("incident-5")).thenReturn(Optional.of(incident));
+        IncidentCaseService service = new IncidentCaseService(
+                incidentService, mock(MilvusServiceClient.class), mock(VectorEmbeddingService.class),
+                mock(VectorSearchService.class), new MilvusInsertHelper());
+
+        IllegalStateException exception = assertThrows(IllegalStateException.class,
+                () -> service.archiveCase("incident-5", "run-unreviewed"));
+
+        assertTrue(exception.getMessage().contains("未被人工确认"));
     }
 
     @Test

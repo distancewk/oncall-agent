@@ -1,12 +1,5 @@
 package org.example.service;
 
-import io.milvus.client.MilvusServiceClient;
-import io.milvus.grpc.MutationResult;
-import io.milvus.param.R;
-import io.milvus.param.RpcStatus;
-import io.milvus.param.collection.LoadCollectionParam;
-import io.milvus.param.dml.InsertParam;
-import org.example.constant.MilvusConstants;
 import org.example.exception.DependencyUnavailableException;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -15,7 +8,6 @@ import org.springframework.ai.chat.prompt.Prompt;
 import org.springframework.ai.chat.messages.SystemMessage;
 import org.springframework.ai.chat.messages.UserMessage;
 import org.springframework.beans.factory.annotation.Autowired;
-import org.springframework.context.annotation.Lazy;
 import org.springframework.stereotype.Service;
 
 import com.alibaba.cloud.ai.dashscope.chat.DashScopeChatModel;
@@ -35,14 +27,7 @@ public class MemoryExtractionService {
     private DashScopeChatModel dashScopeChatModel;
 
     @Autowired
-    private VectorEmbeddingService embeddingService;
-
-    @Autowired
-    @Lazy
-    private MilvusServiceClient milvusClient;
-
-    @Autowired
-    private MilvusInsertHelper insertHelper = new MilvusInsertHelper();
+    private MemoryLifecycleService memoryLifecycleService;
 
     @Autowired(required = false)
     private DependencyGuard dependencyGuard;
@@ -78,8 +63,6 @@ public class MemoryExtractionService {
             Prompt prompt = new Prompt(Arrays.asList(systemMessage, userMessage));
 
             // 3. 调用大模型进行提炼
-            DashScopeChatModel chatModel = dashScopeChatModel;
-            
             ChatResponse response = callChatModel(prompt);
             String responseText = response.getResult().getOutput().getText();
             if (responseText == null) {
@@ -100,66 +83,12 @@ public class MemoryExtractionService {
             for (String fact : facts) {
                 fact = fact.trim();
                 if (!fact.isEmpty()) {
-                    storeMemoryToMilvus(sessionId, fact);
+                    memoryLifecycleService.storeMemory(sessionId, fact);
                 }
             }
 
         } catch (Exception e) {
             logger.error("提炼长期记忆失败: SessionId={}", sessionId, e);
-        }
-    }
-
-    /**
-     * 将单条记忆存入 Milvus
-     */
-    private void storeMemoryToMilvus(String sessionId, String fact) {
-        try {
-            // 生成向量
-            String content = "[用户私人记忆] " + fact;
-            List<Float> vector = embeddingService.generateEmbedding(content);
-            java.util.SortedMap<Long, Float> sparseVector = embeddingService.generateSparseVector(content);
-
-            // 准备元数据
-            Map<String, Object> metadata = new HashMap<>();
-            metadata.put("_source", "chat_memory");
-            metadata.put("doc_type", MilvusConstants.DOC_TYPE_CHAT_MEMORY);
-            metadata.put("session_id", sessionId);
-            metadata.put("timestamp", System.currentTimeMillis());
-
-            // 确保 collection 已加载
-            R<RpcStatus> loadResponse = guardedMilvus("storeMemoryLoadCollection", () -> milvusClient.loadCollection(
-                    LoadCollectionParam.newBuilder()
-                            .withCollectionName(MilvusConstants.MILVUS_COLLECTION_NAME)
-                            .build()
-            ));
-
-            if (loadResponse.getStatus() != 0 && loadResponse.getStatus() != 65535) {
-                logger.error("加载 collection 失败: {}", loadResponse.getMessage());
-                return;
-            }
-
-            // 生成唯一 ID
-            String id = UUID.randomUUID().toString();
-
-            InsertParam insertParam = insertHelper.buildInsertParam(
-                    List.of(id),
-                    List.of(content),
-                    List.of(vector),
-                    List.of(sparseVector),
-                    List.of(metadata)
-            );
-
-            R<MutationResult> insertResponse = guardedMilvus("storeMemoryInsert",
-                    () -> milvusClient.insert(insertParam));
-
-            if (insertResponse.getStatus() != 0) {
-                logger.error("长期记忆写入 Milvus 失败: {}", insertResponse.getMessage());
-            } else {
-                logger.debug("长期记忆成功写入 Milvus，ID: {}", id);
-            }
-
-        } catch (Exception e) {
-            logger.error("长期记忆写入 Milvus 时发生异常", e);
         }
     }
 
@@ -180,26 +109,4 @@ public class MemoryExtractionService {
                 });
     }
 
-    private <T> R<T> guardedMilvus(String operation, java.util.function.Supplier<R<T>> call) {
-        if (dependencyGuard == null) {
-            return call.get();
-        }
-        return dependencyGuard.execute("milvus", operation,
-                () -> {
-                    R<T> response = call.get();
-                    if (response.getStatus() != 0 && response.getStatus() != 65535) {
-                        throw new RuntimeException(response.getMessage());
-                    }
-                    return response;
-                },
-                error -> {
-                    if (error instanceof DependencyUnavailableException unavailable) {
-                        throw unavailable;
-                    }
-                    if (error instanceof RuntimeException runtimeException) {
-                        throw runtimeException;
-                    }
-                    throw new RuntimeException(error);
-                });
-    }
 }

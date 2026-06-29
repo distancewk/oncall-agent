@@ -6,6 +6,8 @@ import com.alibaba.cloud.ai.graph.OverAllState;
 import com.alibaba.cloud.ai.graph.agent.ReactAgent;
 import com.alibaba.cloud.ai.graph.streaming.OutputType;
 import com.alibaba.cloud.ai.graph.streaming.StreamingOutput;
+import com.fasterxml.jackson.core.type.TypeReference;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.Getter;
 import lombok.Setter;
 import org.example.config.AppMemoryProperties;
@@ -17,6 +19,7 @@ import org.example.service.AiOpsService;
 import org.example.service.AlertService;
 import org.example.service.ChatService;
 import org.example.service.DependencyGuard;
+import org.example.service.MemoryLifecycleService;
 import org.example.service.SessionManager;
 import org.example.service.VectorSearchService;
 import org.slf4j.Logger;
@@ -43,6 +46,8 @@ import java.util.concurrent.Executor;
 public class ChatController {
 
     private static final Logger logger = LoggerFactory.getLogger(ChatController.class);
+    private static final TypeReference<Map<String, Object>> METADATA_TYPE = new TypeReference<>() {
+    };
 
     @Autowired
     private AiOpsService aiOpsService;
@@ -75,6 +80,12 @@ public class ChatController {
 
     @Autowired(required = false)
     private AppMemoryProperties appMemoryProperties;
+
+    @Autowired(required = false)
+    private MemoryLifecycleService memoryLifecycleService;
+
+    @Autowired(required = false)
+    private ObjectMapper objectMapper = new ObjectMapper();
 
     @Autowired(required = false)
     private DependencyGuard dependencyGuard;
@@ -148,7 +159,10 @@ public class ChatController {
 
             SessionManager.SessionInfo session = sessionManager.getSession(request.getId());
             if (session != null) {
-                session.clearHistory(sessionManager);
+                boolean privateMemoryDeleted = session.clearHistory(sessionManager);
+                if (!privateMemoryDeleted) {
+                    return ResponseEntity.ok(ApiResponse.error("会话历史已清空，但私人记忆删除失败，请稍后重试"));
+                }
                 return ResponseEntity.ok(ApiResponse.success("会话历史已清空"));
             } else {
                 return ResponseEntity.ok(ApiResponse.error("会话不存在"));
@@ -353,6 +367,9 @@ public class ChatController {
 
                 ToolCallback[] toolCallbacks = tools != null ? tools.getToolCallbacks() : new ToolCallback[0];
 
+                emitter.send(SseEmitter.event().name("message")
+                        .data(SseMessage.content("当前接口为演示入口，不会持久化 DiagnosisRun 证据链；正式诊断请使用 /api/incidents/{incidentId}/diagnose。\n"),
+                                MediaType.APPLICATION_JSON));
                 emitter.send(SseEmitter.event().name("message").data(SseMessage.content("正在读取告警并拆解任务...\n")));
 
                 // 调用 AiOpsService 执行分析流程（传入告警上下文）
@@ -469,11 +486,14 @@ public class ChatController {
 
     @DeleteMapping("/chat/session/{sessionId}")
     public ResponseEntity<ApiResponse<String>> deleteChatSession(@PathVariable String sessionId) {
-        boolean deleted = sessionManager.deleteSession(sessionId);
-        if (deleted) {
-            return ResponseEntity.ok(ApiResponse.success("会话已删除"));
+        SessionManager.SessionDeletionResult result = sessionManager.deleteSessionWithStatus(sessionId);
+        if (!result.deleted()) {
+            return ResponseEntity.ok(ApiResponse.error("会话不存在"));
         }
-        return ResponseEntity.ok(ApiResponse.error("会话不存在"));
+        if (!result.privateMemoryDeleted()) {
+            return ResponseEntity.ok(ApiResponse.error("会话已删除，但私人记忆删除失败，请稍后重试"));
+        }
+        return ResponseEntity.ok(ApiResponse.success("会话已删除"));
     }
 
     private List<VectorSearchService.SearchResult> searchPrivateMemories(
@@ -488,10 +508,50 @@ public class ChatController {
         }
         int memoryTopK = appMemoryProperties == null ? 3 : Math.max(1, appMemoryProperties.getPrivateRecallTopK());
         try {
-            return vectorSearchService.searchSessionMemories(question, session.getSessionId(), memoryTopK);
+            List<VectorSearchService.SearchResult> results =
+                    vectorSearchService.searchSessionMemories(question, session.getSessionId(), memoryTopK);
+            if (memoryLifecycleService != null) {
+                return memoryLifecycleService.filterRecallResults(results);
+            }
+            return filterRecallResults(results);
         } catch (RuntimeException e) {
             logger.warn("检索私人长期记忆失败，继续普通对话: {}", e.getMessage());
             return List.of();
+        }
+    }
+
+    private List<VectorSearchService.SearchResult> filterRecallResults(List<VectorSearchService.SearchResult> results) {
+        if (results == null || results.isEmpty()) {
+            return List.of();
+        }
+        float minScore = appMemoryProperties == null ? 0.0f : appMemoryProperties.getPrivateRecallMinScore();
+        int maxPromptChars = appMemoryProperties == null ? 1200 : appMemoryProperties.getPrivateRecallMaxPromptChars();
+        int usedPromptChars = 0;
+        List<VectorSearchService.SearchResult> filtered = new ArrayList<>();
+        for (VectorSearchService.SearchResult result : results) {
+            if (result == null || result.getScore() < minScore || isDeletedMemory(result)) {
+                continue;
+            }
+            String content = result.getContent() == null ? "" : result.getContent();
+            if (usedPromptChars + content.length() > maxPromptChars) {
+                continue;
+            }
+            filtered.add(result);
+            usedPromptChars += content.length();
+        }
+        return filtered;
+    }
+
+    private boolean isDeletedMemory(VectorSearchService.SearchResult result) {
+        if (result.getMetadata() == null || result.getMetadata().isBlank()) {
+            return false;
+        }
+        try {
+            Map<String, Object> metadata = objectMapper.readValue(result.getMetadata(), METADATA_TYPE);
+            return Boolean.TRUE.equals(metadata.get("deleted"));
+        } catch (Exception e) {
+            logger.debug("解析私人记忆 metadata 失败，按已删除跳过: id={}", result.getId(), e);
+            return true;
         }
     }
 

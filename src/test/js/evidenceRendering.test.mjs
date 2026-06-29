@@ -47,6 +47,9 @@ const evidence = [
     summary: 'cpu_usage 最近 15m 持续上升，latest=94.00，anomalous=true',
     queryParams: '{"metric":"cpu_usage","window":"15m"}',
     timeRange: '15m',
+    attemptCount: 2,
+    durationMs: 1240,
+    retryable: true,
     rawFragment: JSON.stringify({
       metric: 'cpu_usage',
       window: '15m',
@@ -69,7 +72,23 @@ const evidence = [
     toolName: 'queryLogs',
     success: true,
     summary: '成功查询到 5 条 ERROR 日志',
-    queryParams: '{"query":"level:ERROR"}'
+    queryParams: '{"query":"level:ERROR"}',
+    attemptCount: 1,
+    durationMs: 80,
+    retryable: true
+  },
+  {
+    id: 'ev-logs-open',
+    type: 'tool_call',
+    toolName: 'queryLogs',
+    success: false,
+    summary: 'CLS 日志查询被熔断',
+    queryParams: '{"query":"level:ERROR","service":"payment-service"}',
+    errorCode: 'CIRCUIT_OPEN',
+    errorMessage: '日志依赖熔断',
+    attemptCount: 0,
+    durationMs: 0,
+    retryable: true
   },
   {
     id: 'ev-docs',
@@ -98,6 +117,16 @@ assert.match(html, /知识库检索/);
 assert.match(html, /相似历史案例/);
 assert.match(html, /ev-cpu-15m/);
 assert.match(html, /cpu_usage 最近 15m/);
+assert.match(html, /证据统计/);
+assert.match(html, /成功 5/);
+assert.match(html, /失败 1/);
+assert.match(html, /重试 1/);
+assert.match(html, /总耗时 1\.3s/);
+assert.match(html, /尝试 2 次/);
+assert.match(html, /耗时 1\.2s/);
+assert.match(html, /可重试/);
+assert.match(html, /依赖熔断/);
+assert.match(html, /日志依赖熔断/);
 assert.doesNotMatch(html, /<div class="diagnosis-evidence-meta">\{&quot;metric&quot;:&quot;cpu_usage&quot;,&quot;window&quot;:&quot;15m&quot;\}<\/div>/);
 assert.match(html, /查看参数/);
 assert.match(html, /查看趋势图/);

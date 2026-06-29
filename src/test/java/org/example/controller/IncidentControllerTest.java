@@ -2,6 +2,7 @@ package org.example.controller;
 
 import com.alibaba.cloud.ai.dashscope.chat.DashScopeChatModel;
 import org.example.dto.DiagnosisRunRecord;
+import org.example.dto.DiagnosisEvidence;
 import org.example.dto.IncidentRecord;
 import org.example.dto.IncidentSummary;
 import org.example.service.AiOpsService;
@@ -66,15 +67,28 @@ class IncidentControllerTest {
         summary.setStatus("OPEN");
         summary.setSeverity("critical");
         summary.setAlertCount(2);
+        summary.setLatestRunId("run-1");
         summary.setLatestRunStatus("COMPLETED");
+        summary.setLatestRunQualityScore(92);
+        summary.setLatestRunQualityGrade("HIGH");
+        summary.setLatestRunHumanReviewStatus("CONFIRMED");
 
-        when(incidentService.listIncidents()).thenReturn(List.of(summary));
+        when(incidentService.listIncidents("OPEN", "critical", "COMPLETED", "payment", "CONFIRMED"))
+                .thenReturn(List.of(summary));
 
-        mockMvc.perform(get("/api/incidents"))
+        mockMvc.perform(get("/api/incidents")
+                        .param("status", "OPEN")
+                        .param("severity", "critical")
+                        .param("latestRunStatus", "COMPLETED")
+                        .param("q", "payment")
+                        .param("humanReviewStatus", "CONFIRMED"))
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.data[0].id").value("incident-1"))
                 .andExpect(jsonPath("$.data[0].title").value("HighCPUUsage payment-service"))
-                .andExpect(jsonPath("$.data[0].latestRunStatus").value("COMPLETED"));
+                .andExpect(jsonPath("$.data[0].latestRunStatus").value("COMPLETED"))
+                .andExpect(jsonPath("$.data[0].latestRunId").value("run-1"))
+                .andExpect(jsonPath("$.data[0].latestRunQualityScore").value(92))
+                .andExpect(jsonPath("$.data[0].latestRunHumanReviewStatus").value("CONFIRMED"));
     }
 
     @Test
@@ -94,7 +108,7 @@ class IncidentControllerTest {
     }
 
     @Test
-    void diagnoseIncident_shouldCreateQueuedRunAndStartAsyncAnalysis() throws Exception {
+    void diagnoseIncident_shouldCreateQueuedRunAndEnqueueDurableJob() throws Exception {
         IncidentRecord incident = new IncidentRecord();
         incident.setId("incident-1");
         incident.setTitle("HighCPUUsage payment-service");
@@ -105,14 +119,15 @@ class IncidentControllerTest {
         run.setRunId("run-1");
         run.setIncidentId("incident-1");
         run.setStatus("QUEUED");
-        when(incidentService.createDiagnosisRun("incident-1", "告警上下文")).thenReturn(run);
+        when(incidentService.createDiagnosisRunAndEnqueue("incident-1", "告警上下文")).thenReturn(run);
 
         mockMvc.perform(post("/api/incidents/incident-1/diagnose"))
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.data.runId").value("run-1"))
                 .andExpect(jsonPath("$.data.status").value("QUEUED"));
 
-        verify(executor).execute(any(Runnable.class));
+        verify(incidentService).createDiagnosisRunAndEnqueue("incident-1", "告警上下文");
+        verify(executor, never()).execute(any(Runnable.class));
     }
 
     @Test
@@ -138,53 +153,8 @@ class IncidentControllerTest {
                 .andExpect(jsonPath("$.data.status").value("COMPLETED"))
                 .andExpect(jsonPath("$.data.reusedFromRunId").value("run-original"));
 
-        verify(incidentService, never()).createDiagnosisRun(eq("incident-1"), any());
+        verify(incidentService, never()).createDiagnosisRunAndEnqueue(eq("incident-1"), any());
         verify(executor, never()).execute(any(Runnable.class));
-    }
-
-    @Test
-    void diagnoseIncident_shouldPrefetchSimilarCasesAndMetricTrendsBeforeAiOps() throws Exception {
-        IncidentRecord incident = new IncidentRecord();
-        incident.setId("incident-1");
-        incident.setTitle("HighCPUUsage payment-service");
-        when(incidentService.getIncident("incident-1")).thenReturn(Optional.of(incident));
-        when(incidentService.buildAlertContext(incident)).thenReturn("基础告警上下文");
-
-        DiagnosisRunRecord run = new DiagnosisRunRecord();
-        run.setRunId("run-1");
-        run.setIncidentId("incident-1");
-        run.setStatus("QUEUED");
-        when(incidentService.createDiagnosisRun("incident-1", "基础告警上下文")).thenReturn(run);
-        when(incidentService.getDiagnosisRuns("incident-1")).thenReturn(Optional.of(List.of(run)));
-        when(incidentCaseService.prefetchAndAppend(incident, run, "基础告警上下文"))
-                .thenReturn("基础告警上下文\n\n## 相似历史故障案例");
-        when(metricTrendPrefetchService.prefetchAndAppend(incident, run, "基础告警上下文\n\n## 相似历史故障案例"))
-                .thenReturn("基础告警上下文\n\n## 相似历史故障案例\n\n## 预取指标趋势证据");
-        when(aiOpsService.executeAiOpsAnalysis(
-                eq(dashScopeChatModelAiOps), any(),
-                eq("基础告警上下文\n\n## 相似历史故障案例\n\n## 预取指标趋势证据"),
-                eq("incident-1"), eq("run-1")))
-                .thenReturn(Optional.empty());
-        doAnswer(invocation -> {
-            Runnable task = invocation.getArgument(0);
-            task.run();
-            return null;
-        }).when(executor).execute(any(Runnable.class));
-
-        mockMvc.perform(post("/api/incidents/incident-1/diagnose"))
-                .andExpect(status().isOk())
-                .andExpect(jsonPath("$.data.runId").value("run-1"));
-
-        verify(incidentCaseService).prefetchAndAppend(incident, run, "基础告警上下文");
-        verify(metricTrendPrefetchService).prefetchAndAppend(incident, run, "基础告警上下文\n\n## 相似历史故障案例");
-        verify(incidentService).updateRunAlertContext("incident-1", "run-1",
-                "基础告警上下文\n\n## 相似历史故障案例");
-        verify(incidentService).updateRunAlertContext("incident-1", "run-1",
-                "基础告警上下文\n\n## 相似历史故障案例\n\n## 预取指标趋势证据");
-        verify(aiOpsService).executeAiOpsAnalysis(
-                eq(dashScopeChatModelAiOps), any(),
-                eq("基础告警上下文\n\n## 相似历史故障案例\n\n## 预取指标趋势证据"),
-                eq("incident-1"), eq("run-1"));
     }
 
     @Test
@@ -201,6 +171,95 @@ class IncidentControllerTest {
                 .andExpect(jsonPath("$.data[0].runId").value("run-1"))
                 .andExpect(jsonPath("$.data[0].status").value("FAILED"))
                 .andExpect(jsonPath("$.data[0].errorMessage").value("Prometheus 查询失败"));
+    }
+
+    @Test
+    void getRunEvidence_shouldReturnEvidenceForSpecificRun() throws Exception {
+        DiagnosisEvidence evidence = DiagnosisEvidence.toolCall(
+                "queryMetricTrend",
+                "{\"metric\":\"cpu_usage\"}",
+                "1h",
+                "CPU 上升",
+                "{\"success\":true}",
+                true,
+                null,
+                1L);
+        when(incidentService.getRunEvidence("incident-1", "run-1")).thenReturn(Optional.of(List.of(evidence)));
+
+        mockMvc.perform(get("/api/incidents/incident-1/runs/run-1/evidence"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.data[0].toolName").value("queryMetricTrend"))
+                .andExpect(jsonPath("$.data[0].summary").value("CPU 上升"));
+    }
+
+    @Test
+    void cancelRun_shouldDelegateToIncidentService() throws Exception {
+        DiagnosisRunRecord run = new DiagnosisRunRecord();
+        run.setRunId("run-1");
+        run.setIncidentId("incident-1");
+        run.setStatus("CANCELLED");
+        run.setErrorMessage("用户取消");
+        when(incidentService.cancelRun("incident-1", "run-1", "用户取消")).thenReturn(run);
+
+        mockMvc.perform(post("/api/incidents/incident-1/runs/run-1/cancel")
+                        .param("reason", "用户取消"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.data.runId").value("run-1"))
+                .andExpect(jsonPath("$.data.status").value("CANCELLED"))
+                .andExpect(jsonPath("$.data.errorMessage").value("用户取消"));
+    }
+
+    @Test
+    void confirmRun_shouldConfirmArchiveCaseAndReturnUpdatedRun() throws Exception {
+        DiagnosisRunRecord confirmed = new DiagnosisRunRecord();
+        confirmed.setRunId("run-1");
+        confirmed.setIncidentId("incident-1");
+        confirmed.setStatus("COMPLETED");
+        confirmed.setHumanReviewStatus("CONFIRMED");
+        when(incidentService.confirmRun("incident-1", "run-1", "根因准确")).thenReturn(confirmed);
+
+        IncidentCaseService.ArchiveResult archiveResult = new IncidentCaseService.ArchiveResult();
+        archiveResult.setSuccess(true);
+        archiveResult.setIncidentId("incident-1");
+        archiveResult.setDocumentId("doc-1");
+        archiveResult.setMessage("历史案例已写入知识库");
+        when(incidentCaseService.archiveCase("incident-1", "run-1")).thenReturn(archiveResult);
+
+        DiagnosisRunRecord archived = new DiagnosisRunRecord();
+        archived.setRunId("run-1");
+        archived.setIncidentId("incident-1");
+        archived.setStatus("COMPLETED");
+        archived.setHumanReviewStatus("CONFIRMED");
+        archived.setCaseArchived(true);
+        archived.setCaseDocumentId("doc-1");
+        when(incidentService.markRunCaseArchived(
+                "incident-1", "run-1", true, "doc-1", "历史案例已写入知识库")).thenReturn(archived);
+
+        mockMvc.perform(post("/api/incidents/incident-1/runs/run-1/confirm")
+                        .param("comment", "根因准确"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.data.humanReviewStatus").value("CONFIRMED"))
+                .andExpect(jsonPath("$.data.caseArchived").value(true))
+                .andExpect(jsonPath("$.data.caseDocumentId").value("doc-1"));
+    }
+
+    @Test
+    void rejectRun_shouldRejectWithoutArchiving() throws Exception {
+        DiagnosisRunRecord rejected = new DiagnosisRunRecord();
+        rejected.setRunId("run-1");
+        rejected.setIncidentId("incident-1");
+        rejected.setStatus("COMPLETED");
+        rejected.setHumanReviewStatus("REJECTED");
+        rejected.setHumanReviewComment("证据不足");
+        when(incidentService.rejectRun("incident-1", "run-1", "证据不足")).thenReturn(rejected);
+
+        mockMvc.perform(post("/api/incidents/incident-1/runs/run-1/reject")
+                        .param("comment", "证据不足"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.data.humanReviewStatus").value("REJECTED"))
+                .andExpect(jsonPath("$.data.humanReviewComment").value("证据不足"));
+
+        verify(incidentCaseService, never()).archiveCase(any(), any());
     }
 
     @Test

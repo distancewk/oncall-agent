@@ -5,6 +5,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.Data;
 import org.example.exception.DependencyUnavailableException;
 import org.example.service.DependencyGuard;
+import org.example.service.DependencyGuardExecutor;
 import org.example.service.DiagnosisEvidenceRecorder;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -14,6 +15,13 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
 
+import java.net.URI;
+import java.net.URLEncoder;
+import java.net.http.HttpClient;
+import java.net.http.HttpRequest;
+import java.net.http.HttpResponse;
+import java.nio.charset.StandardCharsets;
+import java.time.Duration;
 import java.time.Instant;
 import java.time.ZoneId;
 import java.time.format.DateTimeFormatter;
@@ -48,6 +56,18 @@ public class QueryLogsTools {
     @Value("${cls.mock-enabled:false}")
     private boolean mockEnabled;
 
+    @Value("${cls.base-url:}")
+    private String baseUrl;
+
+    @Value("${cls.query-path:/api/v1/logs/query}")
+    private String queryPath;
+
+    @Value("${cls.api-key:}")
+    private String apiKey;
+
+    @Value("${cls.timeout:10}")
+    private int timeoutSeconds;
+
     @Autowired(required = false)
     private DiagnosisEvidenceRecorder diagnosisEvidenceRecorder;
 
@@ -57,6 +77,8 @@ public class QueryLogsTools {
     private static final DateTimeFormatter FORMATTER = DateTimeFormatter
             .ofPattern("yyyy-MM-dd HH:mm:ss")
             .withZone(ZoneId.of("Asia/Shanghai"));
+
+    private HttpClient httpClient = HttpClient.newHttpClient();
     
     @jakarta.annotation.PostConstruct
     public void init() {
@@ -177,6 +199,7 @@ public class QueryLogsTools {
     @Tool(description = "Query logs from Cloud Log Service (CLS). " +
             "Use this tool to search application logs, system metrics, and other log data. " +
             "Call getAvailableLogTopics only when the log topic cannot be inferred from the alert type or planner context. " +
+            "Within one DiagnosisRun, keep log searches focused: no duplicate queries and at most 3 queryLogs calls by default. " +
             "Available log topics: " +
             "1) 'system-metrics' - System metrics logs (CPU, memory, disk usage, etc. Related to HighCPUUsage, HighMemoryUsage, HighDiskUsage alerts); " +
             "2) 'application-logs' - Application logs (error logs, slow request logs, downstream dependency logs. Related to ServiceUnavailable, SlowResponse alerts); " +
@@ -244,15 +267,109 @@ public class QueryLogsTools {
     }
 
     private List<LogEntry> queryClsLogs(String region, String logTopic, String query, int limit) throws Exception {
-        if (dependencyGuard != null) {
-            return executeGuarded("cls-logs", TOOL_QUERY_LOGS,
-                    () -> queryClsLogsDirect(region, logTopic, query, limit));
-        }
-        return queryClsLogsDirect(region, logTopic, query, limit);
+        return DependencyGuardExecutor.executeChecked(dependencyGuard, "cls-logs", TOOL_QUERY_LOGS,
+                () -> queryClsLogsDirect(region, logTopic, query, limit));
     }
 
-    private List<LogEntry> queryClsLogsDirect(String region, String logTopic, String query, int limit) {
-        throw new UnsupportedOperationException("CLS 真实查询尚未实现，请启用 mock 模式进行测试");
+    private List<LogEntry> queryClsLogsDirect(String region, String logTopic, String query, int limit) throws Exception {
+        if (!notBlank(baseUrl)) {
+            throw new IllegalStateException("CLS base-url 未配置，请设置 CLS_BASE_URL 或启用 mock 模式");
+        }
+        URI uri = buildClsQueryUri(region, logTopic, query, limit);
+        HttpRequest.Builder requestBuilder = HttpRequest.newBuilder(uri)
+                .timeout(Duration.ofSeconds(Math.max(1, timeoutSeconds)))
+                .GET()
+                .header("Accept", "application/json");
+        if (notBlank(apiKey)) {
+            requestBuilder.header("X-API-Key", apiKey);
+        }
+        HttpResponse<String> response = httpClient.send(
+                requestBuilder.build(), HttpResponse.BodyHandlers.ofString(StandardCharsets.UTF_8));
+        if (response.statusCode() < 200 || response.statusCode() >= 300) {
+            throw new IllegalStateException("CLS HTTP 查询失败，status=" + response.statusCode()
+                    + ", body=" + truncate(response.body()));
+        }
+        return parseClsLogsResponse(response.body());
+    }
+
+    private URI buildClsQueryUri(String region, String logTopic, String query, int limit) {
+        String normalizedBaseUrl = stripTrailingSlash(baseUrl);
+        String normalizedPath = queryPath == null || queryPath.isBlank() ? "/api/v1/logs/query" : queryPath;
+        if (!normalizedPath.startsWith("/")) {
+            normalizedPath = "/" + normalizedPath;
+        }
+        String queryString = "region=" + encode(normalizeRegion(region))
+                + "&logTopic=" + encode(logTopic)
+                + "&query=" + encode(query)
+                + "&limit=" + encode(String.valueOf(limit));
+        return URI.create(normalizedBaseUrl + normalizedPath + "?" + queryString);
+    }
+
+    private List<LogEntry> parseClsLogsResponse(String body) throws Exception {
+        com.fasterxml.jackson.databind.JsonNode root = objectMapper.readTree(body);
+        if (root.path("success").isBoolean() && !root.path("success").asBoolean()) {
+            String message = root.path("message").asText(root.path("error").asText("CLS 查询失败"));
+            throw new IllegalStateException(message);
+        }
+        com.fasterxml.jackson.databind.JsonNode logsNode = root.isArray() ? root : root.path("logs");
+        if (!logsNode.isArray()) {
+            return List.of();
+        }
+        List<LogEntry> entries = new ArrayList<>();
+        for (com.fasterxml.jackson.databind.JsonNode node : logsNode) {
+            entries.add(parseLogEntry(node));
+        }
+        return entries;
+    }
+
+    private LogEntry parseLogEntry(com.fasterxml.jackson.databind.JsonNode node) {
+        LogEntry entry = new LogEntry();
+        entry.setTimestamp(node.path("timestamp").asText(""));
+        entry.setLevel(node.path("level").asText(""));
+        entry.setService(node.path("service").asText(""));
+        entry.setInstance(node.path("instance").asText(""));
+        entry.setMessage(node.path("message").asText(node.toString()));
+        entry.setMetrics(parseMetrics(node));
+        return entry;
+    }
+
+    private Map<String, String> parseMetrics(com.fasterxml.jackson.databind.JsonNode node) {
+        com.fasterxml.jackson.databind.JsonNode metricsNode = node.has("metrics") ? node.path("metrics") : node.path("fields");
+        Map<String, String> metrics = new HashMap<>();
+        if (metricsNode.isObject()) {
+            metricsNode.fields().forEachRemaining(entry ->
+                    metrics.put(entry.getKey(), entry.getValue().isTextual()
+                            ? entry.getValue().asText()
+                            : entry.getValue().toString()));
+        }
+        return metrics;
+    }
+
+    private String normalizeRegion(String region) {
+        return VALID_REGIONS.contains(region) ? region : DEFAULT_REGION;
+    }
+
+    private String stripTrailingSlash(String value) {
+        String trimmed = value.trim();
+        while (trimmed.endsWith("/")) {
+            trimmed = trimmed.substring(0, trimmed.length() - 1);
+        }
+        return trimmed;
+    }
+
+    private String encode(String value) {
+        return URLEncoder.encode(value == null ? "" : value, StandardCharsets.UTF_8);
+    }
+
+    private String truncate(String value) {
+        if (value == null || value.length() <= 300) {
+            return value;
+        }
+        return value.substring(0, 300) + "...";
+    }
+
+    private boolean notBlank(String value) {
+        return value != null && !value.isBlank();
     }
 
     /**
@@ -639,13 +756,6 @@ public class QueryLogsTools {
         return logs;
     }
     
-    /**
-     * 构建错误响应
-     */
-    private String buildErrorResponse(String message) {
-        return buildErrorResponse(message, message, null);
-    }
-
     private String buildErrorResponse(String message, String error, String errorCode) {
         try {
             QueryLogsOutput output = new QueryLogsOutput();
@@ -657,45 +767,6 @@ public class QueryLogsTools {
         } catch (Exception e) {
             return String.format("{\"success\":false,\"message\":\"%s\",\"error\":\"%s\",\"errorCode\":\"%s\"}",
                     message, error, errorCode);
-        }
-    }
-
-    private <T> T executeGuarded(String dependency, String operation, CheckedSupplier<T> supplier) throws Exception {
-        try {
-            return dependencyGuard.execute(dependency, operation,
-                    () -> {
-                        try {
-                            return supplier.get();
-                        } catch (Exception e) {
-                            throw new GuardedDependencyException(e);
-                        }
-                    },
-                    error -> {
-                        if (error instanceof DependencyUnavailableException unavailable) {
-                            throw unavailable;
-                        }
-                        if (error instanceof RuntimeException runtimeException) {
-                            throw runtimeException;
-                        }
-                        throw new GuardedDependencyException(error);
-                    });
-        } catch (GuardedDependencyException e) {
-            Throwable cause = e.getCause();
-            if (cause instanceof Exception exception) {
-                throw exception;
-            }
-            throw e;
-        }
-    }
-
-    @FunctionalInterface
-    private interface CheckedSupplier<T> {
-        T get() throws Exception;
-    }
-
-    private static class GuardedDependencyException extends RuntimeException {
-        GuardedDependencyException(Throwable cause) {
-            super(cause);
         }
     }
 

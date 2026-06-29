@@ -7,7 +7,7 @@ SuperBizAgent 是一个基于 Spring Boot、Spring AI Alibaba、DashScope、Milv
 | 模块 | 说明 |
 |------|------|
 | RAG 知识库问答 | 上传 `.md/.txt` 文档后写入 Milvus，聊天和知识库检索只召回普通文档数据 |
-| 多轮对话 | 近期上下文保存在内存/Redis，完整聊天历史持久化到文件，重启后仍可查看历史会话 |
+| 多轮对话 | 近期上下文保存在内存/Redis，完整聊天历史持久化到 PostgreSQL，重启后仍可查看历史会话 |
 | 私人记忆 | 被窗口淘汰的历史对话可提炼为 `chat_memory`，检索时强制按 `session_id` 隔离 |
 | AIOps 诊断 | Webhook 或手动触发 Incident 诊断，生成 DiagnosisRun 和最终报告 |
 | 证据链 | 每次工具调用保存为 DiagnosisEvidence，报告需要引用 evidence id |
@@ -28,6 +28,7 @@ SuperBizAgent 是一个基于 Spring Boot、Spring AI Alibaba、DashScope、Milv
 | Milvus | 2.5.10 | 向量数据库 |
 | Milvus Java SDK | 2.6.10 | Java 客户端 |
 | Redis | 7-alpine | 会话热缓存 |
+| PostgreSQL | 16-alpine | Incident、告警、诊断、证据、聊天、索引状态和后台任务持久化 |
 | MinIO / etcd | Compose 内置 | Milvus 依赖 |
 | 前端 | 原生 HTML/CSS/JS | 单页控制台，使用 marked、DOMPurify、highlight.js |
 
@@ -61,7 +62,7 @@ export APP_ALERT_SIMULATE_ENABLED=true
 本地 Maven 启动应用时，只需要先启动依赖容器：
 
 ```bash
-docker compose up -d etcd minio milvus redis attu
+docker compose up -d etcd minio milvus redis postgres attu
 ```
 
 确认依赖健康：
@@ -118,7 +119,7 @@ export DASHSCOPE_API_KEY=your-api-key
 docker compose up -d --build
 ```
 
-`docker-compose.yml` 中的 app 会等待 Milvus 和 Redis 健康后再启动，并将上传文件、聊天历史和 Incident 数据挂载到本地目录。
+`docker-compose.yml` 中的 app 会等待 Milvus、Redis 和 PostgreSQL 健康后再启动，并将上传文件、聊天历史、旧 Incident JSON 导入目录和 PostgreSQL 数据挂载到本地目录。
 
 ## 常用命令
 
@@ -126,9 +127,11 @@ docker compose up -d --build
 |------|------|
 | `mvn spring-boot:run` | 本地启动应用 |
 | `mvn test` | 运行全部 Java 测试 |
+| `mvn -Ppostgres-it verify` | 运行完整 Maven 门禁和 PostgreSQL Testcontainers 集成测试；Docker 不可用时集成测试会跳过 |
 | `node --check src/main/resources/static/app.js` | 检查前端 JS 语法 |
 | `node src/test/js/evidenceRendering.test.mjs` | 检查工具证据前端渲染 |
-| `docker compose up -d etcd minio milvus redis attu` | 启动本地依赖 |
+| `docker compose up -d etcd minio milvus redis postgres attu` | 启动本地依赖 |
+| `docker compose config` | 校验 Compose 配置 |
 | `docker compose up -d --build` | 构建并启动完整容器栈 |
 | `docker compose down` | 停止 Compose 服务 |
 | `make upload` | 上传 `aiops-docs/` 下的文档 |
@@ -200,8 +203,9 @@ curl -X POST http://localhost:9900/api/chat \
 当前记忆策略：
 
 - 近期上下文窗口最多保留 6 对用户/助手消息，用于下一轮提示词。
-- 完整聊天历史写入 `APP_CHAT_HISTORY_PATH`，默认 `./data/chat-history`。
-- Redis 是热缓存，默认 TTL 1 小时；重启后可从文件历史恢复最近窗口。
+- 完整聊天历史写入 PostgreSQL 的 `chat_sessions` / `chat_messages` 表。
+- Redis 是热缓存，默认 TTL 1 小时；重启后可从 PostgreSQL 恢复最近窗口。
+- `APP_CHAT_HISTORY_PATH` 仅用于首次启动时导入旧 JSON 聊天文件，导入成功后源文件保留。
 - 被窗口淘汰的消息会异步提炼为 `chat_memory`，查询时必须匹配当前 `session_id`。
 
 ## AIOps 诊断流程
@@ -216,7 +220,7 @@ http://localhost:9900/api/webhook/alert
 
 告警进入系统后的流程：
 
-1. 按 fingerprint 或关键标签归并为一个 Incident。
+1. 按 fingerprint 或归一化后的关键标签归并为一个 Incident。
 2. 创建一次 DiagnosisRun，初始状态为 `QUEUED`。
 3. 诊断开始后进入 `RUNNING` 或 `WAITING_TOOL`。
 4. 诊断前自动召回相似历史故障案例。
@@ -224,11 +228,17 @@ http://localhost:9900/api/webhook/alert
 6. Agent 调用知识库、指标、日志等工具，工具结果写入 DiagnosisEvidence。
 7. 最终报告只保存在 `DiagnosisRunRecord.report`，并追加证据校验段。
 
+无 fingerprint 时，系统会将 `CPUUsageHigh / HighCPUUsage / CpuHigh` 等同义告警名归一化，再结合服务、实例和级别生成聚合键。不同实例默认仍拆成不同 Incident，避免误合并。
+
 ### 手动触发诊断
 
 ```bash
 curl -X POST http://localhost:9900/api/incidents/{incidentId}/diagnose
 ```
+
+正式事故诊断入口是 `POST /api/incidents/{incidentId}/diagnose`。该路径会创建 `DiagnosisRun`、记录工具 evidence、执行报告校验和质量评分。
+
+`POST /api/ai_ops` 仅保留为演示入口，不持久化 `DiagnosisRun` 证据链，不应作为生产诊断入口。
 
 ### Incident 接口
 
@@ -250,8 +260,9 @@ curl -X POST http://localhost:9900/api/incidents/{incidentId}/diagnose
 | `WAITING_TOOL` | 正在等待某个工具返回 |
 | `COMPLETED` | 已生成最终诊断报告 |
 | `FAILED` | 诊断失败，`errorMessage` 保存失败原因 |
+| `CANCELLED` | 用户或系统取消诊断 |
 
-当前代码没有对外的 `CANCELLED` 取消接口。
+事故详情页支持对活跃诊断执行取消操作，后端会将运行标记为 `CANCELLED` 并记录取消 evidence。
 
 ### 工具证据
 
@@ -264,8 +275,13 @@ curl -X POST http://localhost:9900/api/incidents/{incidentId}/diagnose
 - `summary`: 返回摘要
 - `rawFragment`: 原始片段
 - `success/errorMessage`: 成功状态和错误信息
+- `attemptCount/durationMs/retryable`: 实际尝试次数、耗时和是否属于可重试工具
 
-前端事故详情会将工具证据分组展示为：相似历史案例、指标趋势、日志查询、知识库检索、活动告警、时间工具、其他工具。
+前端事故详情会将工具证据分组展示为：相似历史案例、指标趋势、日志查询、知识库检索、活动告警、时间工具、其他工具。证据区还会显示成功数、失败数、重试数和总耗时，便于判断诊断质量受模型、工具还是外部依赖影响。
+
+`DiagnosisReportService` 注入给 Agent 的证据表同样包含 `attemptCount`、`durationMs` 和 `retryable`。因此最终报告不仅能引用“哪个工具证据”，也能看到该证据是否经过重试、是否因为熔断或依赖异常导致缺失。
+
+诊断工具调用会做基础治理：同一 DiagnosisRun 内相同 `toolName + queryParams` 会去重；`queryLogs` 默认最多调用 3 次，超过后返回 `TOOL_BUDGET_EXCEEDED`，重复调用返回 `TOOL_DUPLICATE_SKIPPED`，报告必须如实说明证据不足。
 
 ## Agent 工具
 
@@ -292,6 +308,7 @@ curl -X POST http://localhost:9900/api/incidents/{incidentId}/diagnose
 ## 安全与配置
 
 默认本地开发不启用鉴权。生产 profile 中 `APP_SECURITY_ENABLED=true`，请求需要携带凭证。
+启动 `prod` profile 时会执行生产配置校验：必须提供 DashScope Key、API Token、Webhook Secret 和非本地 CORS 白名单；同时禁止开启 Prometheus/CLS mock 和模拟告警接口。
 
 | 场景 | Header |
 |------|--------|
@@ -312,6 +329,10 @@ curl -X POST http://localhost:9900/api/incidents/{incidentId}/diagnose
 | `PROMETHEUS_BASE_URL` | `http://localhost:9090` | Prometheus 地址 |
 | `PROMETHEUS_MOCK_ENABLED` | `false` | Prometheus mock 开关，dev profile 默认为 true |
 | `CLS_MOCK_ENABLED` | `false` | CLS mock 开关，dev profile 默认为 true |
+| `CLS_BASE_URL` | 空 | 真实日志查询网关地址，配置后 `queryLogs` 会访问 `${CLS_BASE_URL}${CLS_QUERY_PATH}` |
+| `CLS_QUERY_PATH` | `/api/v1/logs/query` | 日志查询路径 |
+| `CLS_API_KEY` | 空 | 日志网关 API Key，请求头为 `X-API-Key` |
+| `CLS_TIMEOUT` | `10` | 日志查询超时秒数 |
 | `FILE_UPLOAD_PATH` | `./uploads` | 上传文件目录 |
 | `APP_CORS_ALLOWED_ORIGINS` | `http://localhost:9900,http://127.0.0.1:9900` | CORS 白名单 |
 | `APP_SECURITY_ENABLED` | `false` | API 鉴权开关，prod profile 为 true |
@@ -319,7 +340,47 @@ curl -X POST http://localhost:9900/api/incidents/{incidentId}/diagnose
 | `APP_WEBHOOK_SECRET` | 空 | Webhook 共享密钥 |
 | `APP_ALERT_SIMULATE_ENABLED` | `false` | 模拟告警接口开关 |
 | `APP_CHAT_HISTORY_PATH` | `./data/chat-history` | 完整聊天历史目录 |
-| `APP_INCIDENTS_PATH` | `./data/incidents` | Incident JSON 存储目录 |
+| `APP_INCIDENTS_PATH` | `./data/incidents` | 旧 JSON Incident 导入目录，仅用于从历史文件迁移到 JDBC |
+| `APP_INCIDENT_JDBC_URL` | `jdbc:postgresql://localhost:5432/superbizagent` | Incident JDBC 数据库地址 |
+| `APP_INCIDENT_JDBC_USERNAME` | `superbizagent` | JDBC 用户名 |
+| `APP_INCIDENT_JDBC_PASSWORD` | `superbizagent` | JDBC 密码，本地默认值仅用于开发 |
+| `APP_INCIDENT_JDBC_DRIVER_CLASS_NAME` | 空 | 可选 JDBC Driver 类名 |
+| `APP_INCIDENT_JDBC_MAX_POOL_SIZE` | `10` | Incident JDBC 连接池最大连接数 |
+| `APP_INCIDENT_JDBC_MIN_IDLE` | `1` | Incident JDBC 连接池最小空闲连接数 |
+| `APP_INCIDENT_JDBC_CONNECTION_TIMEOUT_MILLIS` | `5000` | Incident JDBC 获取连接超时时间 |
+| `APP_INCIDENT_JDBC_INITIALIZATION_FAIL_TIMEOUT_MILLIS` | `-1` | Incident JDBC 初始化失败超时；本地默认懒连接，prod profile 默认 30000 |
+| `APP_JOBS_ENABLED` | `true` | durable job worker 总开关 |
+| `APP_JOB_POLL_DELAY_MILLIS` | `1000` | 后台任务领取间隔 |
+| `APP_JOB_LEASE_DURATION_MILLIS` | `60000` | 运行任务租约时长 |
+| `APP_JOB_HEARTBEAT_INTERVAL_MILLIS` | `15000` | 运行任务心跳间隔 |
+| `APP_JOB_RECOVERY_DELAY_MILLIS` | `15000` | 失败重试延迟和过期租约扫描间隔 |
+| `APP_JOB_WORKER_CONCURRENCY` | `4` | 后台任务执行并发数 |
+| `APP_JOB_DIAGNOSIS_MAX_ATTEMPTS` | `2` | 诊断任务最大尝试次数 |
+| `APP_JOB_INDEX_MAX_ATTEMPTS` | `3` | 文档索引任务最大尝试次数 |
+| `APP_DIAGNOSIS_REUSE_ENABLED` | `true` | 同一 Incident 内重复告警是否复用最近完成报告 |
+| `APP_DIAGNOSIS_REUSE_WINDOW_MILLIS` | `3600000` | 诊断报告复用时间窗口 |
+| `APP_TOOL_CALL_DEDUPLICATION_ENABLED` | `true` | 同一 DiagnosisRun 内工具调用去重开关 |
+| `APP_QUERY_LOGS_MAX_CALLS_PER_RUN` | `3` | 单次 DiagnosisRun 中 `queryLogs` 最大调用次数 |
+| `APP_MAX_TOOL_CALLS_PER_RUN` | `12` | 单次 DiagnosisRun 最大工具调用预算 |
+| `APP_STALE_RUN_TIMEOUT_MILLIS` | `600000` | 活跃诊断 run 超时判定窗口 |
+| `APP_STALE_RUN_SWEEP_DELAY_MILLIS` | `60000` | 超时诊断 run 扫描间隔 |
+| `APP_RESILIENCE_ENABLED` | `true` | 依赖熔断/重试总开关 |
+| `APP_RESILIENCE_FAILURE_RATE_THRESHOLD` | `50` | 熔断失败率阈值 |
+| `APP_RESILIENCE_SLOW_CALL_RATE_THRESHOLD` | `50` | 慢调用比例阈值 |
+| `APP_RESILIENCE_SLOW_CALL_DURATION` | `5s` | 默认慢调用判定耗时 |
+| `APP_RESILIENCE_MINIMUM_CALLS` | `5` | 熔断统计窗口最小调用数 |
+| `APP_RESILIENCE_HALF_OPEN_CALLS` | `2` | 半开状态允许探测调用数 |
+| `APP_RESILIENCE_OPEN_DURATION` | `30s` | 熔断打开后等待恢复时间 |
+| `APP_RESILIENCE_RETRY_MAX_ATTEMPTS` | `1` | 默认依赖重试次数，1 表示不重试 |
+| `APP_RESILIENCE_RETRY_WAIT_DURATION` | `300ms` | 默认依赖重试等待时间 |
+| `APP_PROMETHEUS_RETRY_MAX_ATTEMPTS` | `2` | Prometheus 只读查询最大尝试次数 |
+| `APP_PROMETHEUS_RETRY_WAIT_DURATION` | `300ms` | Prometheus 查询重试等待时间 |
+| `APP_CLS_RETRY_MAX_ATTEMPTS` | `2` | CLS 日志查询最大尝试次数 |
+| `APP_CLS_RETRY_WAIT_DURATION` | `300ms` | CLS 日志查询重试等待时间 |
+| `APP_MCP_TAVILY_RETRY_MAX_ATTEMPTS` | `2` | Tavily MCP 查询最大尝试次数 |
+| `APP_MCP_TAVILY_RETRY_WAIT_DURATION` | `500ms` | Tavily MCP 查询重试等待时间 |
+| `APP_MCP_DBHUB_RETRY_MAX_ATTEMPTS` | `2` | DBHub MCP 只读查询最大尝试次数 |
+| `APP_MCP_DBHUB_RETRY_WAIT_DURATION` | `500ms` | DBHub MCP 查询重试等待时间 |
 | `APP_PRIVATE_MEMORY_RECALL_ENABLED` | `true` | 私人记忆召回开关 |
 | `APP_PRIVATE_MEMORY_RECALL_TOP_K` | `3` | 私人记忆召回数量 |
 | `RAG_SEARCH_EF` | `64` | Milvus HNSW 搜索 ef 参数 |
@@ -331,6 +392,22 @@ curl -X POST http://localhost:9900/api/incidents/{incidentId}/diagnose
 | `MCP_DBHUB_COMMAND` | `npx` | DBHub MCP 启动命令 |
 | `MCP_DBHUB_PACKAGE` | `@bytebase/dbhub@0.21.2` | DBHub MCP npm 包版本 |
 | `MCP_DBHUB_CONFIG` | `./config/dbhub.toml` | DBHub 多数据库配置文件路径 |
+
+运行时业务状态只写 PostgreSQL，不再写 Incident 或聊天 JSON。Flyway 脚本位于 `src/main/resources/db/migration/incidents`，覆盖 normalized operational tables 和 `background_jobs`。应用启动时会幂等导入旧 `incidents.payload`、`APP_INCIDENTS_PATH` 和 `APP_CHAT_HISTORY_PATH` 数据，并在 `legacy_import_markers` 记录完成标记；源行和源文件不会删除。升级前应先备份 PostgreSQL 和旧数据目录。
+
+诊断和文档索引请求只创建 durable job。诊断 run 与对应 job 在同一个数据库事务内创建；文档索引 task 与对应 job 也在同一个数据库事务内创建，任一写入失败都会整体回滚，不留下孤立 run、task 或 job。Worker 原子领取任务、持有并刷新租约；进程中断后，过期租约会转为 `RETRY` 或在尝试耗尽后转为 `FAILED`。取消先在数据库事务中把 DiagnosisRun 置为 `CANCELLED` 并标记 job 的 `cancel_requested`，事务提交后再尽力中断本实例正在执行的 Future；终态不会被后续完成/失败回写覆盖。
+
+所有 job 时间、并发和重试配置都必须为正数，并在启动时校验。`APP_JOB_HEARTBEAT_INTERVAL_MILLIS` 必须小于 `APP_JOB_LEASE_DURATION_MILLIS / 2`，否则应用拒绝启动，避免心跳过慢导致运行中任务被错误回收。
+
+### Compose 专用变量
+
+| 变量 | 默认值 | 说明 |
+|------|--------|------|
+| `POSTGRES_DB` | `superbizagent` | Compose 内 PostgreSQL 数据库名 |
+| `POSTGRES_USER` | `superbizagent` | Compose 内 PostgreSQL 用户 |
+| `POSTGRES_PASSWORD` | `superbizagent` | Compose 内 PostgreSQL 密码，本地演示默认值 |
+| `POSTGRES_PORT` | `5432` | 暴露到宿主机的 PostgreSQL 端口 |
+| `DOCKER_VOLUME_DIRECTORY` | `.` | Compose 数据、上传和历史目录挂载根路径 |
 
 ## MCP 工具
 
@@ -348,6 +425,17 @@ curl -X POST http://localhost:9900/api/incidents/{incidentId}/diagnose
 - Tavily 结果只作为外部参考，不覆盖 Incident、指标、日志和内部知识库事实。
 - DBHub 只允许只读查询，禁止写入和结构变更 SQL。
 - MCP 工具调用会作为 `DiagnosisEvidence` 记录，最终报告需要引用对应 evidence id。
+- 只读外部工具通过 `DependencyGuard` 做有限重试和熔断；证据中会记录 `attemptCount`、`durationMs` 和 `retryable`。
+
+## 常用接口补充
+
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| `GET` | `/api/incidents/{incidentId}/runs/{runId}/evidence` | 查询某次诊断 run 的工具证据 |
+| `POST` | `/api/incidents/{incidentId}/runs/{runId}/cancel` | 取消活跃诊断 run |
+| `POST` | `/api/incidents/{incidentId}/runs/{runId}/confirm` | 人工确认诊断，并尝试写入历史案例库 |
+| `POST` | `/api/incidents/{incidentId}/runs/{runId}/reject` | 人工驳回诊断 |
+| `GET` | `/api/system/dependencies` | 查看被熔断治理的外部依赖健康快照 |
 
 ## 项目结构
 
@@ -367,7 +455,7 @@ super-biz-agent/
 │   └── application-prod.yml         # 生产 profile
 ├── aiops-docs/                      # 示例运维知识库文档
 ├── docs/                            # 项目文档
-├── docker-compose.yml               # Milvus、Redis、Attu、应用
+├── docker-compose.yml               # Milvus、Redis、PostgreSQL、Attu、应用
 ├── Dockerfile                       # 多阶段构建镜像
 ├── Makefile                         # 本地辅助命令
 └── pom.xml                          # Maven 构建与质量门禁
@@ -377,11 +465,13 @@ super-biz-agent/
 
 ```bash
 mvn test
+mvn -Ppostgres-it verify
 node --check src/main/resources/static/app.js
 node src/test/js/evidenceRendering.test.mjs
+docker compose config
 ```
 
-Maven Surefire 已预加载 Byte Buddy agent，默认 `mvn test` 不需要额外传 `-DargLine`。项目同时配置了 SpotBugs、PMD 和 Checkstyle；其中 SpotBugs/PMD 用于阻断高风险问题，Checkstyle 当前不阻断风格类问题。
+Maven Surefire 已预加载 Byte Buddy agent，默认 `mvn test` 不需要额外传 `-DargLine`。`mvn -Ppostgres-it verify` 会通过 Testcontainers 覆盖 PostgreSQL 生产 SQL 和 durable workflow；Docker 不可用时 PostgreSQL 集成测试会跳过，仍会执行普通单元测试和 Maven 质量门禁。项目同时配置了 SpotBugs、PMD 和 Checkstyle；其中 SpotBugs/PMD 用于阻断高风险问题，Checkstyle 当前不阻断风格类问题。
 
 ## 常见问题
 

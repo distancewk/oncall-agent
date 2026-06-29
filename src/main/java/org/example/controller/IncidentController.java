@@ -1,22 +1,15 @@
 package org.example.controller;
 
-import com.alibaba.cloud.ai.dashscope.chat.DashScopeChatModel;
-import com.alibaba.cloud.ai.graph.OverAllState;
 import org.example.dto.ApiResponse;
 import org.example.dto.DiagnosisRunRecord;
 import org.example.dto.IncidentRecord;
 import org.example.dto.IncidentSummary;
-import org.example.service.AiOpsService;
 import org.example.service.IncidentCaseService;
 import org.example.service.IncidentService;
-import org.example.service.MetricTrendPrefetchService;
 import org.example.service.VectorSearchService;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import org.springframework.ai.tool.ToolCallback;
-import org.springframework.ai.tool.ToolCallbackProvider;
 import org.springframework.beans.factory.annotation.Autowired;
-import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
@@ -27,7 +20,6 @@ import org.springframework.web.bind.annotation.RestController;
 
 import java.util.List;
 import java.util.Optional;
-import java.util.concurrent.Executor;
 
 @RestController
 @RequestMapping("/api/incidents")
@@ -39,28 +31,17 @@ public class IncidentController {
     private IncidentService incidentService;
 
     @Autowired
-    private AiOpsService aiOpsService;
-
-    @Autowired
     private IncidentCaseService incidentCaseService;
 
-    @Autowired(required = false)
-    private MetricTrendPrefetchService metricTrendPrefetchService;
-
-    @Autowired
-    @Qualifier("dashScopeChatModelAiOps")
-    private DashScopeChatModel dashScopeChatModelAiOps;
-
-    @Autowired(required = false)
-    private ToolCallbackProvider tools;
-
-    @Autowired
-    @Qualifier("chatTaskExecutor")
-    private Executor executor;
-
     @GetMapping
-    public ResponseEntity<ApiResponse<List<IncidentSummary>>> listIncidents() {
-        return ResponseEntity.ok(ApiResponse.success(incidentService.listIncidents()));
+    public ResponseEntity<ApiResponse<List<IncidentSummary>>> listIncidents(
+            @RequestParam(required = false) String status,
+            @RequestParam(required = false) String severity,
+            @RequestParam(required = false) String latestRunStatus,
+            @RequestParam(required = false) String q,
+            @RequestParam(required = false) String humanReviewStatus) {
+        return ResponseEntity.ok(ApiResponse.success(incidentService.listIncidents(
+                status, severity, latestRunStatus, q, humanReviewStatus)));
     }
 
     @GetMapping("/{incidentId}")
@@ -75,6 +56,76 @@ public class IncidentController {
         return incidentService.getDiagnosisRuns(incidentId)
                 .map(runs -> ResponseEntity.ok(ApiResponse.success(runs)))
                 .orElseGet(() -> ResponseEntity.status(404).body(ApiResponse.error(404, "Incident 不存在")));
+    }
+
+    @GetMapping("/{incidentId}/runs/{runId}/evidence")
+    public ResponseEntity<ApiResponse<List<org.example.dto.DiagnosisEvidence>>> getRunEvidence(
+            @PathVariable String incidentId,
+            @PathVariable String runId) {
+        return incidentService.getRunEvidence(incidentId, runId)
+                .map(evidence -> ResponseEntity.ok(ApiResponse.success(evidence)))
+                .orElseGet(() -> ResponseEntity.status(404).body(ApiResponse.error(404, "DiagnosisRun 不存在")));
+    }
+
+    @PostMapping("/{incidentId}/runs/{runId}/cancel")
+    public ResponseEntity<ApiResponse<DiagnosisRunRecord>> cancelRun(@PathVariable String incidentId,
+                                                                     @PathVariable String runId,
+                                                                     @RequestParam(required = false) String reason) {
+        try {
+            DiagnosisRunRecord run = incidentService.cancelRun(incidentId, runId, reason);
+            return ResponseEntity.ok(ApiResponse.success(run));
+        } catch (IllegalArgumentException e) {
+            return ResponseEntity.status(404).body(ApiResponse.error(404, e.getMessage()));
+        } catch (IllegalStateException e) {
+            return ResponseEntity.badRequest().body(ApiResponse.error(400, e.getMessage()));
+        }
+    }
+
+    @PostMapping("/{incidentId}/runs/{runId}/confirm")
+    public ResponseEntity<ApiResponse<DiagnosisRunRecord>> confirmRun(@PathVariable String incidentId,
+                                                                      @PathVariable String runId,
+                                                                      @RequestParam(required = false) String comment) {
+        try {
+            incidentService.confirmRun(incidentId, runId, comment);
+            try {
+                IncidentCaseService.ArchiveResult archiveResult = incidentCaseService.archiveCase(incidentId, runId);
+                DiagnosisRunRecord archived = incidentService.markRunCaseArchived(
+                        incidentId,
+                        runId,
+                        archiveResult.isSuccess(),
+                        archiveResult.getDocumentId(),
+                        archiveResult.getMessage());
+                return ResponseEntity.ok(ApiResponse.success(archived));
+            } catch (Exception archiveError) {
+                logger.warn("人工确认后写入历史案例失败, incidentId: {}, runId: {}",
+                        incidentId, runId, archiveError);
+                DiagnosisRunRecord updated = incidentService.markRunCaseArchived(
+                        incidentId,
+                        runId,
+                        false,
+                        null,
+                        "历史案例写入失败: " + archiveError.getMessage());
+                return ResponseEntity.ok(ApiResponse.success(updated));
+            }
+        } catch (IllegalArgumentException e) {
+            return ResponseEntity.status(404).body(ApiResponse.error(404, e.getMessage()));
+        } catch (IllegalStateException e) {
+            return ResponseEntity.badRequest().body(ApiResponse.error(400, e.getMessage()));
+        }
+    }
+
+    @PostMapping("/{incidentId}/runs/{runId}/reject")
+    public ResponseEntity<ApiResponse<DiagnosisRunRecord>> rejectRun(@PathVariable String incidentId,
+                                                                     @PathVariable String runId,
+                                                                     @RequestParam(required = false) String comment) {
+        try {
+            DiagnosisRunRecord run = incidentService.rejectRun(incidentId, runId, comment);
+            return ResponseEntity.ok(ApiResponse.success(run));
+        } catch (IllegalArgumentException e) {
+            return ResponseEntity.status(404).body(ApiResponse.error(404, e.getMessage()));
+        } catch (IllegalStateException e) {
+            return ResponseEntity.badRequest().body(ApiResponse.error(400, e.getMessage()));
+        }
     }
 
     @PostMapping("/{incidentId}/diagnose")
@@ -92,8 +143,7 @@ public class IncidentController {
             return ResponseEntity.ok(ApiResponse.success(reusedRun.get()));
         }
 
-        DiagnosisRunRecord run = incidentService.createDiagnosisRun(incidentId, alertContext);
-        executor.execute(() -> executeDiagnosisRun(incidentId, run.getRunId(), alertContext));
+        DiagnosisRunRecord run = incidentService.createDiagnosisRunAndEnqueue(incidentId, alertContext);
         return ResponseEntity.ok(ApiResponse.success(run));
     }
 
@@ -108,76 +158,4 @@ public class IncidentController {
         return ResponseEntity.ok(ApiResponse.success(incidentCaseService.findSimilarCases(incidentId, topK == null ? 3 : topK)));
     }
 
-    private void executeDiagnosisRun(String incidentId, String runId, String alertContext) {
-        try {
-            logger.info("开始执行 Incident 诊断, incidentId: {}, runId: {}", incidentId, runId);
-            incidentService.markRunRunning(incidentId, runId);
-            String diagnosisContext = prefetchSimilarCasesContext(incidentId, runId, alertContext);
-            diagnosisContext = prefetchMetricTrendContext(incidentId, runId, diagnosisContext);
-            ToolCallback[] toolCallbacks = tools != null ? tools.getToolCallbacks() : new ToolCallback[0];
-            Optional<OverAllState> stateOptional = aiOpsService.executeAiOpsAnalysis(
-                    dashScopeChatModelAiOps, toolCallbacks, diagnosisContext, incidentId, runId);
-            if (stateOptional.isEmpty()) {
-                incidentService.failRun(incidentId, runId, "告警分析执行失败，未获取到有效结果");
-                return;
-            }
-
-            Optional<String> reportOptional = aiOpsService.extractFinalReport(stateOptional.get());
-            if (reportOptional.isPresent()) {
-                incidentService.completeRun(incidentId, runId, reportOptional.get());
-            } else {
-                incidentService.failRun(incidentId, runId, "多 Agent 流程完成，但未能提取最终报告");
-            }
-        } catch (Exception e) {
-            logger.error("Incident 诊断执行异常, incidentId: {}, runId: {}", incidentId, runId, e);
-            incidentService.failRun(incidentId, runId, "告警分析异常: " + e.getMessage());
-        }
-    }
-
-    private String prefetchSimilarCasesContext(String incidentId, String runId, String alertContext) {
-        try {
-            Optional<IncidentRecord> incidentOptional = incidentService.getIncident(incidentId);
-            Optional<DiagnosisRunRecord> runOptional = incidentService.getDiagnosisRuns(incidentId)
-                    .flatMap(runs -> runs.stream()
-                            .filter(run -> runId.equals(run.getRunId()))
-                            .findFirst());
-            if (incidentOptional.isEmpty() || runOptional.isEmpty()) {
-                return alertContext;
-            }
-            String enriched = incidentCaseService.prefetchAndAppend(incidentOptional.get(), runOptional.get(), alertContext);
-            if (!enriched.equals(alertContext)) {
-                incidentService.updateRunAlertContext(incidentId, runId, enriched);
-            }
-            return enriched;
-        } catch (Exception e) {
-            logger.warn("相似历史故障案例召回失败，将继续使用原始告警上下文, incidentId: {}, runId: {}",
-                    incidentId, runId, e);
-            return alertContext;
-        }
-    }
-
-    private String prefetchMetricTrendContext(String incidentId, String runId, String alertContext) {
-        if (metricTrendPrefetchService == null) {
-            return alertContext;
-        }
-        try {
-            Optional<IncidentRecord> incidentOptional = incidentService.getIncident(incidentId);
-            Optional<DiagnosisRunRecord> runOptional = incidentService.getDiagnosisRuns(incidentId)
-                    .flatMap(runs -> runs.stream()
-                            .filter(run -> runId.equals(run.getRunId()))
-                            .findFirst());
-            if (incidentOptional.isEmpty() || runOptional.isEmpty()) {
-                return alertContext;
-            }
-            String enriched = metricTrendPrefetchService.prefetchAndAppend(incidentOptional.get(), runOptional.get(), alertContext);
-            if (!enriched.equals(alertContext)) {
-                incidentService.updateRunAlertContext(incidentId, runId, enriched);
-            }
-            return enriched;
-        } catch (Exception e) {
-            logger.warn("指标趋势预取失败，将继续使用当前告警上下文, incidentId: {}, runId: {}",
-                    incidentId, runId, e);
-            return alertContext;
-        }
-    }
 }

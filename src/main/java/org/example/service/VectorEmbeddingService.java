@@ -245,7 +245,7 @@ public class VectorEmbeddingService {
                         throw new RuntimeException(error);
                     });
         } catch (DashScopeEmbeddingCallException e) {
-            throw e.getNoApiKeyException();
+            throw e.getNoApiKeyException(); // NOPMD - SDK exception has no cause-preserving constructor.
         }
     }
 

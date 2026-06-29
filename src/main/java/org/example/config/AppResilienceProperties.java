@@ -58,6 +58,8 @@ public class AppResilienceProperties {
         private Integer minimumCalls;
         private Integer permittedHalfOpenCalls;
         private Duration openDuration;
+        private Integer retryMaxAttempts;
+        private Duration retryWaitDuration;
 
         public static InstanceConfig hardDefaults() {
             InstanceConfig defaults = new InstanceConfig();
@@ -67,6 +69,8 @@ public class AppResilienceProperties {
             defaults.setMinimumCalls(5);
             defaults.setPermittedHalfOpenCalls(2);
             defaults.setOpenDuration(Duration.ofSeconds(30));
+            defaults.setRetryMaxAttempts(1);
+            defaults.setRetryWaitDuration(Duration.ofMillis(300));
             return defaults;
         }
 
@@ -91,6 +95,12 @@ public class AppResilienceProperties {
             }
             if (other.openDuration != null) {
                 this.openDuration = other.openDuration;
+            }
+            if (other.retryMaxAttempts != null) {
+                this.retryMaxAttempts = other.retryMaxAttempts;
+            }
+            if (other.retryWaitDuration != null) {
+                this.retryWaitDuration = other.retryWaitDuration;
             }
         }
 
@@ -140,6 +150,22 @@ public class AppResilienceProperties {
 
         public void setOpenDuration(Duration openDuration) {
             this.openDuration = openDuration;
+        }
+
+        public Integer getRetryMaxAttempts() {
+            return retryMaxAttempts;
+        }
+
+        public void setRetryMaxAttempts(Integer retryMaxAttempts) {
+            this.retryMaxAttempts = retryMaxAttempts;
+        }
+
+        public Duration getRetryWaitDuration() {
+            return retryWaitDuration;
+        }
+
+        public void setRetryWaitDuration(Duration retryWaitDuration) {
+            this.retryWaitDuration = retryWaitDuration;
         }
     }
 }

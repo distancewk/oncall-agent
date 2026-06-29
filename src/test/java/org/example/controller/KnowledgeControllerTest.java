@@ -1,15 +1,22 @@
 package org.example.controller;
 
+import com.fasterxml.jackson.databind.ObjectMapper;
+import org.example.config.AppJobProperties;
 import org.example.dto.ApiResponse;
 import org.example.dto.IndexTaskStatus;
+import org.example.service.BackgroundJobRepository;
+import org.example.service.IncidentSchemaMigrator;
 import org.example.service.IndexTaskStatusService;
 import org.example.service.VectorSearchService;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
+import org.junit.jupiter.api.io.TempDir;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
+import org.springframework.jdbc.datasource.DriverManagerDataSource;
 
+import java.nio.file.Path;
 import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -20,6 +27,9 @@ import static org.mockito.Mockito.when;
 @ExtendWith(MockitoExtension.class)
 class KnowledgeControllerTest {
 
+    @TempDir
+    private Path tempDir;
+
     @Mock
     private VectorSearchService vectorSearchService;
 
@@ -28,7 +38,18 @@ class KnowledgeControllerTest {
 
     @BeforeEach
     void setUp() {
-        indexTaskStatusService = new IndexTaskStatusService();
+        DriverManagerDataSource dataSource = new DriverManagerDataSource();
+        dataSource.setUrl("jdbc:h2:" + tempDir.resolve("index-db"));
+        dataSource.setUsername("");
+        dataSource.setPassword("");
+        IncidentSchemaMigrator migrator = new IncidentSchemaMigrator(dataSource);
+        indexTaskStatusService = new IndexTaskStatusService(
+                dataSource,
+                migrator,
+                new BackgroundJobRepository(dataSource, migrator),
+                new ObjectMapper(),
+                new AppJobProperties()
+        );
         controller = new KnowledgeController(vectorSearchService, indexTaskStatusService);
     }
 

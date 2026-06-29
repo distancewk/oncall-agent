@@ -36,6 +36,10 @@ public class SessionManager {
     @Qualifier("chatTaskExecutor")
     private Executor executor;
 
+    @Autowired
+    @Qualifier("memoryTaskExecutor")
+    private Executor memoryExecutor;
+
     @Autowired(required = false)
     private StringRedisTemplate redisTemplate;
 
@@ -45,11 +49,16 @@ public class SessionManager {
     @Autowired(required = false)
     private ChatHistoryStore chatHistoryStore;
 
+    @Autowired(required = false)
+    private MemoryLifecycleService memoryLifecycleService;
+
     private static final String REDIS_KEY_PREFIX = "session:";
     private static final long SESSION_TTL_SECONDS = 3600; // 1 hour
 
     // 存储会话信息
     private final Map<String, SessionInfo> sessions = new ConcurrentHashMap<>();
+    private final Map<String, Long> memoryGenerations = new ConcurrentHashMap<>();
+    private final Map<String, Object> memoryOperationLocks = new ConcurrentHashMap<>();
 
     /**
      * 获取或创建会话
@@ -77,7 +86,7 @@ public class SessionManager {
             return fromHistoryStore;
         }
         // Create new
-        SessionInfo session = new SessionInfo(sessionId);
+        SessionInfo session = newActiveSession(sessionId);
         sessions.put(sessionId, session);
         saveToRedis(session);
         return session;
@@ -158,7 +167,7 @@ public class SessionManager {
 
             @SuppressWarnings("unchecked")
             List<Map<String, String>> history = (List<Map<String, String>>) data.get("messageHistory");
-            return new SessionInfo(sessionId, createTime, history);
+            return newActiveSession(sessionId, createTime, history);
         } catch (Exception e) {
             logger.warn("Failed to load session from Redis: {}", e.getMessage());
             return null;
@@ -181,7 +190,7 @@ public class SessionManager {
             return null;
         }
         return chatHistoryStore.load(sessionId)
-                .map(record -> new SessionInfo(
+                .map(record -> newActiveSession(
                         record.getSessionId(),
                         record.getCreateTime(),
                         recentWindow(record.getMessageHistory())
@@ -211,13 +220,29 @@ public class SessionManager {
     }
 
     public boolean deleteSession(String sessionId) {
+        SessionDeletionResult result = deleteSessionWithStatus(sessionId);
+        return result.deleted() && result.privateMemoryDeleted();
+    }
+
+    public SessionDeletionResult deleteSessionWithStatus(String sessionId) {
         if (sessionId == null || sessionId.isBlank()) {
-            return false;
+            return new SessionDeletionResult(false, true);
         }
+        advanceMemoryGeneration(sessionId);
         boolean removedFromMemory = sessions.remove(sessionId) != null;
         deleteFromRedis(sessionId);
         boolean removedFromHistory = chatHistoryStore != null && chatHistoryStore.delete(sessionId);
-        return removedFromMemory || removedFromHistory;
+        boolean deleted = removedFromMemory || removedFromHistory;
+        boolean privateMemoryDeleted = !deleted || deleteSessionMemories(sessionId);
+        return new SessionDeletionResult(deleted, privateMemoryDeleted);
+    }
+
+    private SessionInfo newActiveSession(String sessionId) {
+        return newActiveSession(sessionId, System.currentTimeMillis(), new ArrayList<>());
+    }
+
+    private SessionInfo newActiveSession(String sessionId, long createTime, List<Map<String, String>> initialHistory) {
+        return new SessionInfo(sessionId, createTime, initialHistory, advanceMemoryGeneration(sessionId));
     }
 
     private void appendToHistoryStore(String sessionId, long createTime, String userQuestion, String aiAnswer) {
@@ -236,6 +261,50 @@ public class SessionManager {
         if (chatHistoryStore != null) {
             chatHistoryStore.delete(sessionId);
         }
+    }
+
+    boolean deleteSessionMemories(String sessionId) {
+        if (sessionId == null || sessionId.isBlank() || memoryLifecycleService == null) {
+            return true;
+        }
+        Object lock = memoryOperationLock(sessionId);
+        synchronized (lock) {
+            RuntimeException lastFailure = null;
+            for (int attempt = 1; attempt <= 2; attempt++) {
+                try {
+                    memoryLifecycleService.deleteSessionMemories(sessionId);
+                    memoryOperationLocks.remove(sessionId, lock);
+                    return true;
+                } catch (RuntimeException e) {
+                    lastFailure = e;
+                    logger.warn("Failed to delete private memories for session: {}, attempt: {}",
+                            sessionId, attempt, e);
+                }
+            }
+            logger.error("Private memory deletion failed after retries for session: {}", sessionId, lastFailure);
+            memoryOperationLocks.remove(sessionId, lock);
+            return false;
+        }
+    }
+
+    private synchronized long currentMemoryGeneration(String sessionId) {
+        return memoryGenerations.getOrDefault(sessionId, 0L);
+    }
+
+    private synchronized long advanceMemoryGeneration(String sessionId) {
+        return memoryGenerations.merge(sessionId, 1L, Long::sum);
+    }
+
+    private synchronized long advanceMemoryGenerationIfCurrent(String sessionId, long expectedGeneration) {
+        long currentGeneration = currentMemoryGeneration(sessionId);
+        if (currentGeneration != expectedGeneration) {
+            return -1L;
+        }
+        return advanceMemoryGeneration(sessionId);
+    }
+
+    private Object memoryOperationLock(String sessionId) {
+        return memoryOperationLocks.computeIfAbsent(sessionId, ignored -> new Object());
     }
 
     private void deleteFromRedis(String sessionId) {
@@ -293,6 +362,9 @@ public class SessionManager {
         return "新对话";
     }
 
+    public record SessionDeletionResult(boolean deleted, boolean privateMemoryDeleted) {
+    }
+
     // ==================== 内部类 ====================
 
     /**
@@ -304,17 +376,26 @@ public class SessionManager {
         private final List<Map<String, String>> messageHistory;
         private final long createTime;
         private final ReentrantLock lock;
+        private volatile long memoryGeneration;
 
         public SessionInfo(String sessionId) {
-            this(sessionId, System.currentTimeMillis(), new ArrayList<>());
+            this(sessionId, System.currentTimeMillis(), new ArrayList<>(), 0L);
         }
 
         private SessionInfo(String sessionId, long createTime, List<Map<String, String>> initialHistory) {
+            this(sessionId, createTime, initialHistory, 0L);
+        }
+
+        private SessionInfo(String sessionId,
+                            long createTime,
+                            List<Map<String, String>> initialHistory,
+                            long memoryGeneration) {
             this.sessionId = sessionId;
             this.messageHistory = new ArrayList<>();
             replaceHistory(initialHistory);
             this.createTime = createTime > 0 ? createTime : System.currentTimeMillis();
             this.lock = new ReentrantLock();
+            this.memoryGeneration = memoryGeneration;
         }
 
         public String getSessionId() {
@@ -370,7 +451,7 @@ public class SessionManager {
 
             // 触发异步提炼
             if (!evictedMessages.isEmpty() && manager != null) {
-                manager.triggerMemoryExtraction(sessionId, evictedMessages);
+                manager.triggerMemoryExtraction(sessionId, evictedMessages, memoryGeneration);
             }
         }
 
@@ -402,9 +483,19 @@ public class SessionManager {
         /**
          * 清空历史消息并持久化
          */
-        public void clearHistory(SessionManager manager) {
+        public boolean clearHistory(SessionManager manager) {
+            long nextGeneration = -1L;
+            if (manager != null) {
+                nextGeneration = manager.advanceMemoryGenerationIfCurrent(sessionId, memoryGeneration);
+                if (nextGeneration < 0) {
+                    return true;
+                }
+            }
             lock.lock();
             try {
+                if (manager != null) {
+                    memoryGeneration = nextGeneration;
+                }
                 messageHistory.clear();
                 logger.info("会话 {} 历史消息已清空", sessionId);
                 if (manager != null) {
@@ -413,6 +504,10 @@ public class SessionManager {
             } finally {
                 lock.unlock();
             }
+            if (manager != null) {
+                return manager.deleteSessionMemories(sessionId);
+            }
+            return true;
         }
 
         /**
@@ -442,11 +537,26 @@ public class SessionManager {
      * 触发异步的记忆提炼
      */
     public void triggerMemoryExtraction(String sessionId, List<Map<String, String>> historyToArchive) {
-        if (memoryExtractionService == null || executor == null) {
+        if (sessionId == null || sessionId.isBlank() || memoryExtractionService == null || memoryExecutor == null) {
             return;
         }
-        executor.execute(() -> {
-            memoryExtractionService.extractAndStore(sessionId, historyToArchive);
+        triggerMemoryExtraction(sessionId, historyToArchive, currentMemoryGeneration(sessionId));
+    }
+
+    private void triggerMemoryExtraction(String sessionId,
+                                         List<Map<String, String>> historyToArchive,
+                                         long generation) {
+        if (sessionId == null || sessionId.isBlank() || memoryExtractionService == null || memoryExecutor == null) {
+            return;
+        }
+        memoryExecutor.execute(() -> {
+            synchronized (memoryOperationLock(sessionId)) {
+                if (generation != currentMemoryGeneration(sessionId)) {
+                    logger.debug("跳过过期会话记忆提炼任务: sessionId={}", sessionId);
+                    return;
+                }
+                memoryExtractionService.extractAndStore(sessionId, historyToArchive);
+            }
         });
     }
 }

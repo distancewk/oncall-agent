@@ -7,6 +7,7 @@ import io.github.resilience4j.circuitbreaker.CircuitBreakerRegistry;
 import org.example.config.AppResilienceProperties;
 import org.example.dto.DependencyHealthSnapshot;
 import org.example.exception.DependencyUnavailableException;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Service;
 
 import java.util.Comparator;
@@ -15,6 +16,7 @@ import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Function;
 import java.util.function.Supplier;
 
@@ -22,6 +24,7 @@ import java.util.function.Supplier;
 public class DependencyGuard {
 
     private final AppResilienceProperties properties;
+    private final ToolCallAttemptContext attemptContext;
     private final CircuitBreakerRegistry registry;
     private final Map<String, String> lastErrors = new ConcurrentHashMap<>();
     private final Map<String, Long> openedAt = new ConcurrentHashMap<>();
@@ -29,28 +32,63 @@ public class DependencyGuard {
     private final Set<String> eventPublisherRegistered = ConcurrentHashMap.newKeySet();
 
     public DependencyGuard(AppResilienceProperties properties) {
+        this(properties, new ToolCallAttemptContext());
+    }
+
+    @Autowired
+    public DependencyGuard(AppResilienceProperties properties, ToolCallAttemptContext attemptContext) {
         this.properties = properties;
+        this.attemptContext = attemptContext == null ? new ToolCallAttemptContext() : attemptContext;
         this.registry = CircuitBreakerRegistry.ofDefaults();
     }
 
     public <T> T execute(String dependency, String operation, Supplier<T> call, Function<Throwable, T> fallback) {
         if (!properties.isEnabled()) {
             disabledDependencies.add(dependency);
+            attemptContext.recordAttempts(1);
             return call.get();
         }
 
+        AppResilienceProperties.InstanceConfig config = properties.configFor(dependency);
         CircuitBreaker breaker = breaker(dependency);
+        AtomicInteger attempts = new AtomicInteger();
         try {
-            return breaker.executeSupplier(call);
+            T result = breaker.executeSupplier(() -> executeWithRetry(dependency, operation, config, call, attempts));
+            attemptContext.recordAttempts(attempts.get());
+            return result;
         } catch (CallNotPermittedException e) {
+            attemptContext.recordAttempts(0);
             DependencyUnavailableException unavailable =
                     new DependencyUnavailableException(dependency, operation, "CIRCUIT_OPEN", e);
             rememberOpen(dependency, unavailable);
             return fallback.apply(unavailable);
         } catch (RuntimeException e) {
+            attemptContext.recordAttempts(attempts.get());
             rememberFailure(dependency, e);
             return fallback.apply(e);
         }
+    }
+
+    private <T> T executeWithRetry(String dependency,
+                                   String operation,
+                                   AppResilienceProperties.InstanceConfig config,
+                                   Supplier<T> call,
+                                   AtomicInteger attempts) {
+        int maxAttempts = config.getRetryMaxAttempts() == null ? 1 : Math.max(1, config.getRetryMaxAttempts());
+        RuntimeException lastFailure = null;
+        for (int attempt = 1; attempt <= maxAttempts; attempt++) {
+            attempts.incrementAndGet();
+            try {
+                return call.get();
+            } catch (RuntimeException e) {
+                lastFailure = e;
+                if (attempt >= maxAttempts || !isRetryableFailure(e)) {
+                    throw e;
+                }
+                sleepBeforeRetry(dependency, operation, config);
+            }
+        }
+        throw lastFailure == null ? new IllegalStateException("retry attempts exhausted") : lastFailure;
     }
 
     public void assertAvailable(String dependency, String operation) {
@@ -149,6 +187,21 @@ public class DependencyGuard {
                 .permittedNumberOfCallsInHalfOpenState(config.getPermittedHalfOpenCalls())
                 .waitDurationInOpenState(config.getOpenDuration())
                 .build();
+    }
+
+    private boolean isRetryableFailure(RuntimeException error) {
+        return !(error instanceof DependencyUnavailableException);
+    }
+
+    private void sleepBeforeRetry(String dependency,
+                                  String operation,
+                                  AppResilienceProperties.InstanceConfig config) {
+        try {
+            Thread.sleep(config.getRetryWaitDuration().toMillis());
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new DependencyUnavailableException(dependency, operation, "RETRY_INTERRUPTED", e);
+        }
     }
 
     private DependencyHealthSnapshot toCircuitBreakerSnapshot(CircuitBreaker breaker) {

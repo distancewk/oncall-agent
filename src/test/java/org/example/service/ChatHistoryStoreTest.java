@@ -2,6 +2,7 @@ package org.example.service;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.example.config.AppChatHistoryProperties;
+import org.example.config.AppIncidentProperties;
 import org.example.dto.ChatSessionRecord;
 import org.example.dto.ChatSessionSummary;
 import org.junit.jupiter.api.BeforeEach;
@@ -12,6 +13,13 @@ import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
+import javax.sql.DataSource;
+import org.springframework.jdbc.datasource.DriverManagerDataSource;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -23,12 +31,16 @@ class ChatHistoryStoreTest {
     private Path historyDir;
 
     private ChatHistoryStore store;
+    private DataSource dataSource;
+    private AppChatHistoryProperties properties;
 
     @BeforeEach
     void setUp() {
-        AppChatHistoryProperties properties = new AppChatHistoryProperties();
+        properties = new AppChatHistoryProperties();
         properties.setPath(historyDir.toString());
-        store = new ChatHistoryStore(properties, new ObjectMapper());
+        dataSource = dataSource(historyDir.resolve("chat-db"));
+        store = new ChatHistoryStore(
+                properties, new ObjectMapper(), dataSource, new IncidentSchemaMigrator(dataSource));
     }
 
     @Test
@@ -43,6 +55,49 @@ class ChatHistoryStoreTest {
         assertEquals(4, record.getMessageHistory().size());
         assertEquals("hello", record.getMessageHistory().get(0).get("content"));
         assertEquals("answer", record.getMessageHistory().get(3).get("content"));
+        assertFalse(historyDir.resolve("c2Vzc2lvbi93aXRoL3BhdGg.json").toFile().exists());
+
+        ChatHistoryStore restarted = new ChatHistoryStore(
+                properties, new ObjectMapper(), dataSource, new IncidentSchemaMigrator(dataSource));
+        assertEquals(4, restarted.load("session/with/path").orElseThrow().getMessageHistory().size());
+    }
+
+    @Test
+    void concurrentAppend_shouldPersistBothMessagePairs() throws Exception {
+        ChatHistoryStore firstStore = new ChatHistoryStore(
+                properties, new ObjectMapper(), dataSource, new IncidentSchemaMigrator(dataSource));
+        ChatHistoryStore secondStore = new ChatHistoryStore(
+                properties, new ObjectMapper(), dataSource, new IncidentSchemaMigrator(dataSource));
+        CountDownLatch start = new CountDownLatch(1);
+        ExecutorService executor = Executors.newFixedThreadPool(2);
+        try {
+            Future<?> first = executor.submit(() -> {
+                assertTrue(start.await(5, TimeUnit.SECONDS));
+                firstStore.appendMessagePair("concurrent-session", 100L, "first question", "first answer");
+                return null;
+            });
+            Future<?> second = executor.submit(() -> {
+                assertTrue(start.await(5, TimeUnit.SECONDS));
+                secondStore.appendMessagePair("concurrent-session", 100L, "second question", "second answer");
+                return null;
+            });
+            start.countDown();
+
+            first.get(5, TimeUnit.SECONDS);
+            second.get(5, TimeUnit.SECONDS);
+
+            ChatSessionRecord record = store.load("concurrent-session").orElseThrow();
+            List<String> contents = record.getMessageHistory().stream()
+                    .map(message -> message.get("content"))
+                    .toList();
+            assertEquals(4, record.getMessageHistory().size());
+            assertTrue(contents.contains("first question"));
+            assertTrue(contents.contains("first answer"));
+            assertTrue(contents.contains("second question"));
+            assertTrue(contents.contains("second answer"));
+        } finally {
+            executor.shutdownNow();
+        }
     }
 
     @Test
@@ -80,5 +135,13 @@ class ChatHistoryStoreTest {
                 Map.of("role", "assistant", "content", "answer")
         )));
         return record;
+    }
+
+    private DataSource dataSource(Path path) {
+        DriverManagerDataSource source = new DriverManagerDataSource();
+        source.setUrl("jdbc:h2:" + path);
+        source.setUsername("");
+        source.setPassword("");
+        return source;
     }
 }

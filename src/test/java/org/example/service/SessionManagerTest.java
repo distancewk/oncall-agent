@@ -2,6 +2,7 @@ package org.example.service;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.example.config.AppChatHistoryProperties;
+import org.springframework.jdbc.datasource.DriverManagerDataSource;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
@@ -10,10 +11,17 @@ import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 
 import java.nio.file.Path;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.Executor;
 
 import static org.junit.jupiter.api.Assertions.*;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.Mockito.doThrow;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
+import static org.mockito.Mockito.verify;
 
 @ExtendWith(MockitoExtension.class)
 class SessionManagerTest {
@@ -26,11 +34,18 @@ class SessionManagerTest {
     @Mock
     private java.util.concurrent.Executor executor;
 
+    @Mock
+    private Executor memoryExecutor;
+
+    @Mock
+    private MemoryLifecycleService memoryLifecycleService;
+
     @BeforeEach
     void setUp() {
         sessionManager = new SessionManager();
         setField(sessionManager, "memoryExtractionService", memoryExtractionService);
         setField(sessionManager, "executor", executor);
+        setField(sessionManager, "memoryExecutor", memoryExecutor);
     }
 
     private void setField(Object target, String fieldName, Object value) {
@@ -171,6 +186,7 @@ class SessionManagerTest {
         SessionManager restarted = new SessionManager();
         setField(restarted, "memoryExtractionService", memoryExtractionService);
         setField(restarted, "executor", executor);
+        setField(restarted, "memoryExecutor", memoryExecutor);
         setField(restarted, "chatHistoryStore", store);
 
         SessionManager.SessionInfo restored = restarted.getOrCreateSession("persist-test");
@@ -194,9 +210,108 @@ class SessionManagerTest {
         assertTrue(store.load("delete-test").isEmpty());
     }
 
+    @Test
+    void clearHistory_shouldDeletePrivateMemoriesForSession() {
+        setField(sessionManager, "memoryLifecycleService", memoryLifecycleService);
+        SessionManager.SessionInfo session = sessionManager.getOrCreateSession("session-1");
+
+        assertTrue(session.clearHistory(sessionManager));
+
+        verify(memoryLifecycleService).deleteSessionMemories("session-1");
+    }
+
+    @Test
+    void clearHistory_shouldReportPrivateMemoryDeletionFailure() {
+        setField(sessionManager, "memoryLifecycleService", memoryLifecycleService);
+        SessionManager.SessionInfo session = sessionManager.getOrCreateSession("session-1");
+        doThrow(new RuntimeException("milvus unavailable"))
+                .when(memoryLifecycleService).deleteSessionMemories("session-1");
+
+        assertFalse(session.clearHistory(sessionManager));
+
+        verify(memoryLifecycleService, times(2)).deleteSessionMemories("session-1");
+    }
+
+    @Test
+    void deleteSession_shouldDeletePrivateMemoriesForSession() {
+        setField(sessionManager, "memoryLifecycleService", memoryLifecycleService);
+        sessionManager.getOrCreateSession("session-1");
+
+        assertTrue(sessionManager.deleteSession("session-1"));
+
+        verify(memoryLifecycleService).deleteSessionMemories("session-1");
+    }
+
+    @Test
+    void deleteSession_shouldStillRemoveSessionWhenPrivateMemoryDeletionFails() {
+        setField(sessionManager, "memoryLifecycleService", memoryLifecycleService);
+        sessionManager.getOrCreateSession("session-1");
+        doThrow(new RuntimeException("milvus unavailable"))
+                .when(memoryLifecycleService).deleteSessionMemories("session-1");
+
+        SessionManager.SessionDeletionResult result = sessionManager.deleteSessionWithStatus("session-1");
+
+        assertTrue(result.deleted());
+        assertFalse(result.privateMemoryDeleted());
+        assertNull(sessionManager.getSession("session-1"));
+        verify(memoryLifecycleService, times(2)).deleteSessionMemories("session-1");
+    }
+
+    @Test
+    void triggerMemoryExtraction_shouldUseMemoryExecutor() {
+        SessionManager manager = new SessionManager();
+        setField(manager, "memoryExtractionService", memoryExtractionService);
+        setField(manager, "memoryExecutor", memoryExecutor);
+
+        manager.triggerMemoryExtraction(
+                "session-1",
+                List.of(Map.of("role", "user", "content", "偏好 Java")));
+
+        verify(memoryExecutor).execute(any(Runnable.class));
+    }
+
+    @Test
+    void clearHistory_shouldCancelQueuedMemoryExtractionForSession() {
+        List<Runnable> queuedTasks = new ArrayList<>();
+        setField(sessionManager, "memoryExecutor", (Executor) queuedTasks::add);
+        setField(sessionManager, "memoryLifecycleService", memoryLifecycleService);
+        SessionManager.SessionInfo session = sessionManager.getOrCreateSession("session-1");
+
+        sessionManager.triggerMemoryExtraction(
+                "session-1",
+                List.of(Map.of("role", "user", "content", "偏好 Java")));
+        assertTrue(session.clearHistory(sessionManager));
+        queuedTasks.get(0).run();
+
+        verify(memoryExtractionService, never()).extractAndStore(any(), any());
+        verify(memoryLifecycleService).deleteSessionMemories("session-1");
+    }
+
+    @Test
+    void deletedSession_shouldCancelExtractionTriggeredByStaleSessionObject() {
+        setField(sessionManager, "memoryExecutor", (Executor) Runnable::run);
+        setField(sessionManager, "memoryLifecycleService", memoryLifecycleService);
+        SessionManager.SessionInfo session = sessionManager.getOrCreateSession("session-1");
+        for (int i = 1; i <= 6; i++) {
+            session.addMessage("q" + i, "a" + i, sessionManager);
+        }
+
+        SessionManager.SessionDeletionResult result = sessionManager.deleteSessionWithStatus("session-1");
+        session.addMessage("q7", "a7", sessionManager);
+
+        assertTrue(result.deleted());
+        assertTrue(result.privateMemoryDeleted());
+        verify(memoryExtractionService, never()).extractAndStore(any(), any());
+    }
+
     private ChatHistoryStore newHistoryStore(Path historyDir) {
         AppChatHistoryProperties properties = new AppChatHistoryProperties();
         properties.setPath(historyDir.toString());
-        return new ChatHistoryStore(properties, new ObjectMapper());
+        DriverManagerDataSource dataSource = new DriverManagerDataSource();
+        dataSource.setUrl("jdbc:h2:" + historyDir.resolve("chat-db"));
+        dataSource.setUsername("");
+        dataSource.setPassword("");
+        return new ChatHistoryStore(
+                properties, new ObjectMapper(), dataSource, new IncidentSchemaMigrator(dataSource));
     }
 }

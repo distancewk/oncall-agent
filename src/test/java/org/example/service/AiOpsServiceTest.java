@@ -34,10 +34,9 @@ class AiOpsServiceTest {
     @BeforeEach
     void setUp() {
         aiOpsService = new AiOpsService();
-        ReflectionTestUtils.setField(aiOpsService, "dateTimeTools", dateTimeTools);
-        ReflectionTestUtils.setField(aiOpsService, "internalDocsTools", internalDocsTools);
-        ReflectionTestUtils.setField(aiOpsService, "queryMetricsTools", queryMetricsTools);
-        ReflectionTestUtils.setField(aiOpsService, "queryLogsTools", queryLogsTools);
+        ReflectionTestUtils.setField(aiOpsService, "agentToolSurfaceService",
+                new AgentToolSurfaceService(
+                        dateTimeTools, internalDocsTools, queryMetricsTools, queryLogsTools, null));
     }
 
     @Test
@@ -80,8 +79,35 @@ class AiOpsServiceTest {
     }
 
     @Test
-    void buildMethodToolsArray_shouldKeepDiagnosisToolsForAiOps() {
-        Object[] methodTools = ReflectionTestUtils.invokeMethod(aiOpsService, "buildMethodToolsArray");
+    void prompts_shouldReuseMatchingPrefetchedMetricTrendEvidence() {
+        String plannerPrompt = ReflectionTestUtils.invokeMethod(aiOpsService, "buildPlannerPrompt");
+        String executorPrompt = ReflectionTestUtils.invokeMethod(aiOpsService, "buildExecutorPrompt");
+
+        assertNotNull(plannerPrompt);
+        assertNotNull(executorPrompt);
+        assertTrue(plannerPrompt.contains("已有成功的 queryMetricTrend evidence"));
+        assertTrue(plannerPrompt.contains("metric、service、instance、window 与当前诊断目标匹配"));
+        assertTrue(plannerPrompt.contains("15m/1h/6h"));
+        assertTrue(executorPrompt.contains("已有成功的 queryMetricTrend evidence"));
+        assertTrue(executorPrompt.contains("优先复用"));
+        assertTrue(executorPrompt.contains("metric、service、instance、window 与当前诊断目标匹配"));
+        assertTrue(executorPrompt.contains("缺失 15m/1h/6h 中最相关窗口或查询失败时才再次调用"));
+        assertFalse(executorPrompt.contains("必须优先调用 queryMetricTrend"));
+    }
+
+    @Test
+    void buildPlannerMethodToolsArray_shouldExcludeDiagnosisExecutionTools() {
+        Object[] methodTools = ReflectionTestUtils.invokeMethod(aiOpsService, "buildPlannerMethodToolsArray");
+
+        assertNotNull(methodTools);
+        assertEquals(2, methodTools.length);
+        assertSame(dateTimeTools, methodTools[0]);
+        assertSame(internalDocsTools, methodTools[1]);
+    }
+
+    @Test
+    void buildExecutorMethodToolsArray_shouldKeepDiagnosisToolsForAiOps() {
+        Object[] methodTools = ReflectionTestUtils.invokeMethod(aiOpsService, "buildExecutorMethodToolsArray");
 
         assertNotNull(methodTools);
         assertEquals(4, methodTools.length);
@@ -124,6 +150,20 @@ class AiOpsServiceTest {
         assertNotNull(executorPrompt);
         assertTrue(plannerPrompt.contains("只有无法根据告警类型推断日志主题时，才调用 getAvailableLogTopics"));
         assertTrue(executorPrompt.contains("能从告警类型推断日志主题时，直接调用 queryLogs"));
+    }
+
+    @Test
+    void prompts_shouldDescribeLogToolBudgetAndDeduplication() {
+        String plannerPrompt = ReflectionTestUtils.invokeMethod(aiOpsService, "buildPlannerPrompt");
+        String executorPrompt = ReflectionTestUtils.invokeMethod(aiOpsService, "buildExecutorPrompt");
+
+        assertNotNull(plannerPrompt);
+        assertNotNull(executorPrompt);
+        assertTrue(plannerPrompt.contains("工具调用总次数默认最多 12 次"));
+        assertTrue(plannerPrompt.contains("queryLogs 默认最多调用 3 次"));
+        assertTrue(plannerPrompt.contains("同一 toolName + 同一参数或等价参数禁止重复调用"));
+        assertTrue(executorPrompt.contains("TOOL_BUDGET_EXCEEDED"));
+        assertTrue(executorPrompt.contains("TOOL_DUPLICATE_SKIPPED"));
     }
 
     @Test

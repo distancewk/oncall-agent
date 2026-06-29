@@ -21,6 +21,16 @@ public class DiagnosisRunRecord {
     private String reuseReason;
     private double reuseConfidence;
     private long reuseValidatedAt;
+    private int qualityScore;
+    private String qualityGrade;
+    private String qualitySummary;
+    private List<String> qualityIssues = new ArrayList<>();
+    private String humanReviewStatus = "UNREVIEWED";
+    private String humanReviewComment;
+    private long humanReviewedAt;
+    private boolean caseArchived;
+    private String caseDocumentId;
+    private String caseArchiveMessage;
     private List<DiagnosisEvidence> evidence = new ArrayList<>();
 
     public String getRunId() {
@@ -149,6 +159,86 @@ public class DiagnosisRunRecord {
 
     public void setReuseValidatedAt(long reuseValidatedAt) {
         this.reuseValidatedAt = reuseValidatedAt;
+    }
+
+    public int getQualityScore() {
+        return qualityScore;
+    }
+
+    public void setQualityScore(int qualityScore) {
+        this.qualityScore = qualityScore;
+    }
+
+    public String getQualityGrade() {
+        return qualityGrade;
+    }
+
+    public void setQualityGrade(String qualityGrade) {
+        this.qualityGrade = qualityGrade;
+    }
+
+    public String getQualitySummary() {
+        return qualitySummary;
+    }
+
+    public void setQualitySummary(String qualitySummary) {
+        this.qualitySummary = qualitySummary;
+    }
+
+    public List<String> getQualityIssues() {
+        return qualityIssues;
+    }
+
+    public void setQualityIssues(List<String> qualityIssues) {
+        this.qualityIssues = qualityIssues == null ? new ArrayList<>() : new ArrayList<>(qualityIssues);
+    }
+
+    public String getHumanReviewStatus() {
+        return humanReviewStatus;
+    }
+
+    public void setHumanReviewStatus(String humanReviewStatus) {
+        this.humanReviewStatus = humanReviewStatus;
+    }
+
+    public String getHumanReviewComment() {
+        return humanReviewComment;
+    }
+
+    public void setHumanReviewComment(String humanReviewComment) {
+        this.humanReviewComment = humanReviewComment;
+    }
+
+    public long getHumanReviewedAt() {
+        return humanReviewedAt;
+    }
+
+    public void setHumanReviewedAt(long humanReviewedAt) {
+        this.humanReviewedAt = humanReviewedAt;
+    }
+
+    public boolean isCaseArchived() {
+        return caseArchived;
+    }
+
+    public void setCaseArchived(boolean caseArchived) {
+        this.caseArchived = caseArchived;
+    }
+
+    public String getCaseDocumentId() {
+        return caseDocumentId;
+    }
+
+    public void setCaseDocumentId(String caseDocumentId) {
+        this.caseDocumentId = caseDocumentId;
+    }
+
+    public String getCaseArchiveMessage() {
+        return caseArchiveMessage;
+    }
+
+    public void setCaseArchiveMessage(String caseArchiveMessage) {
+        this.caseArchiveMessage = caseArchiveMessage;
     }
 
     public List<DiagnosisEvidence> getEvidence() {
