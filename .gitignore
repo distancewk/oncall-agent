@@ -56,3 +56,4 @@ data/
 /volumes
 /server.pid
 .claude/
+.superpowers/
