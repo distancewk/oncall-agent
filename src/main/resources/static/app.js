@@ -2200,6 +2200,105 @@ class SuperBizAgentApp {
 
     // ==================== 工具 ====================
 
+    deriveIncidentWorkbenchSummary(detailData) {
+        const detail = detailData || {};
+        const runs = Array.isArray(detail.diagnosisRuns) ? detail.diagnosisRuns : [];
+        const latestRun = runs.length > 0 ? runs[runs.length - 1] : null;
+        const toolEvidence = latestRun && Array.isArray(latestRun.evidence)
+            ? latestRun.evidence.filter(item => this.isToolEvidence(item))
+            : [];
+        const evidenceStats = this.calculateDiagnosisEvidenceStats(toolEvidence);
+
+        return {
+            severity: detail.severity || '',
+            incidentStatus: detail.status || '',
+            latestRunStatus: latestRun ? (latestRun.status || '') : '',
+            humanReviewStatus: latestRun ? (latestRun.humanReviewStatus || '') : '',
+            evidenceCount: toolEvidence.length,
+            failedEvidenceCount: evidenceStats.failedCount,
+            retriedEvidenceCount: evidenceStats.retriedCount,
+            totalDurationMs: evidenceStats.totalDurationMs
+        };
+    }
+
+    deriveDiagnosisTimeline(detailData, latestRun) {
+        const detail = detailData || {};
+        const run = latestRun || null;
+        const events = [];
+
+        const addEvent = (kind, timestampValue, title, data = {}) => {
+            events.push({
+                kind,
+                timestamp: this.normalizeTimelineTimestamp(timestampValue),
+                title,
+                ...data,
+                order: events.length
+            });
+        };
+
+        addEvent('incident-created', detail.createdAt, '事故创建');
+        const lastAlertAt = this.firstTimelineTimestamp(detail.lastAlertAt);
+        if (lastAlertAt !== undefined || Number(detail.alertCount) > 0) {
+            addEvent('latest-alert', lastAlertAt, '最新告警');
+        }
+        if (run) {
+            addEvent('run-created', run.createdAt, '诊断任务创建', { runId: run.runId || '' });
+            const startedAt = this.firstTimelineTimestamp(run.startedAt);
+            if (startedAt !== undefined) {
+                addEvent('run-started', startedAt, '诊断任务开始', { runId: run.runId || '' });
+            }
+
+            const toolEvidence = Array.isArray(run.evidence)
+                ? run.evidence.filter(item => this.isToolEvidence(item))
+                : [];
+            toolEvidence.forEach(item => {
+                if (!this.isDiagnosisEvidenceSuccess(item)) {
+                    const breakerOpen = this.isCircuitOpenEvidence(item);
+                    const toolName = item.toolName || item.title || item.type || '工具';
+                    addEvent(
+                        breakerOpen ? 'tool-breaker-open' : 'tool-failed',
+                        this.firstTimelineTimestamp(item.createdAt, item.timestamp, item.updatedAt),
+                        breakerOpen ? `${toolName} 熔断打开` : `${toolName} 调用失败`,
+                        {
+                            evidenceId: item.id || '',
+                            toolName,
+                            errorCode: item.errorCode || ''
+                        }
+                    );
+                }
+            });
+
+            if (run.status === 'FAILED') {
+                addEvent('run-failed', this.firstTimelineTimestamp(run.completedAt, run.failedAt, run.updatedAt), '诊断任务失败', {
+                    runId: run.runId || '',
+                    errorMessage: run.errorMessage || ''
+                });
+            } else if (run.status === 'COMPLETED') {
+                addEvent('run-completed', this.firstTimelineTimestamp(run.completedAt, run.updatedAt), '诊断任务完成', { runId: run.runId || '' });
+            }
+        }
+
+        return events
+            .sort((a, b) => (a.timestamp - b.timestamp) || (a.order - b.order))
+            .map(({ order, ...event }) => event);
+    }
+
+    normalizeTimelineTimestamp(value) {
+        if (value === null || value === undefined || value === '') {
+            return 0;
+        }
+        const numeric = Number(value);
+        if (Number.isFinite(numeric)) {
+            return numeric;
+        }
+        const parsed = Date.parse(value);
+        return Number.isFinite(parsed) ? parsed : 0;
+    }
+
+    firstTimelineTimestamp(...values) {
+        return values.find(value => value !== null && value !== undefined && value !== '');
+    }
+
     formatKeyValue(values) {
         return Object.entries(values)
             .map(([key, value]) => `${key}: ${value}`)

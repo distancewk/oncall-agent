@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
+import test from 'node:test';
 import vm from 'node:vm';
 
 function loadAppPrototype() {
@@ -37,6 +38,10 @@ function loadAppPrototype() {
 
 const prototype = loadAppPrototype();
 const app = Object.create(prototype);
+
+function createAppForTest() {
+  return Object.create(prototype);
+}
 
 const evidence = [
   {
@@ -130,5 +135,117 @@ assert.match(html, /日志依赖熔断/);
 assert.doesNotMatch(html, /<div class="diagnosis-evidence-meta">\{&quot;metric&quot;:&quot;cpu_usage&quot;,&quot;window&quot;:&quot;15m&quot;\}<\/div>/);
 assert.match(html, /查看参数/);
 assert.match(html, /查看趋势图/);
+
+test('deriveIncidentWorkbenchSummary counts evidence states', () => {
+  const app = createAppForTest();
+  const detail = {
+    severity: 'critical',
+    status: 'PROCESSING',
+    alertCount: 3,
+    diagnosisRuns: [{
+      status: 'COMPLETED',
+      humanReviewStatus: 'PENDING',
+      evidence: [
+        { type: 'tool_call', success: true, durationMs: 120 },
+        { type: 'tool_call', success: false, errorCode: 'DEPENDENCY_ERROR', durationMs: 80 },
+        { type: 'tool_call', success: true, attemptCount: 2, durationMs: 200 },
+        { type: 'note', success: false, attemptCount: 5, durationMs: 999 }
+      ]
+    }]
+  };
+
+  const summary = app.deriveIncidentWorkbenchSummary(detail);
+
+  assert.equal(summary.severity, 'critical');
+  assert.equal(summary.incidentStatus, 'PROCESSING');
+  assert.equal(summary.latestRunStatus, 'COMPLETED');
+  assert.equal(summary.humanReviewStatus, 'PENDING');
+  assert.equal(summary.evidenceCount, 3);
+  assert.equal(summary.failedEvidenceCount, 1);
+  assert.equal(summary.retriedEvidenceCount, 1);
+  assert.equal(summary.totalDurationMs, 400);
+});
+
+test('deriveDiagnosisTimeline creates ordered incident and evidence events', () => {
+  const app = createAppForTest();
+  const detail = {
+    createdAt: 1000,
+    lastAlertAt: 2000,
+    alertCount: 1,
+    diagnosisRuns: [{
+      runId: 'run-1',
+      status: 'FAILED',
+      createdAt: 2100,
+      startedAt: 2200,
+      completedAt: 2500,
+      errorMessage: 'model failed',
+      evidence: [
+        {
+          id: 'ev-1',
+          type: 'tool_call',
+          toolName: 'queryLogs',
+          success: false,
+          errorCode: 'DEPENDENCY_ERROR',
+          createdAt: 2300
+        }
+      ]
+    }]
+  };
+
+  const events = app.deriveDiagnosisTimeline(detail, detail.diagnosisRuns[0]);
+
+  assert.deepEqual(Array.from(events, event => event.kind), [
+    'incident-created',
+    'latest-alert',
+    'run-created',
+    'run-started',
+    'tool-failed',
+    'run-failed'
+  ]);
+  assert.equal(events[4].title, 'queryLogs 调用失败');
+});
+
+test('deriveDiagnosisTimeline keeps missing timestamps stable', () => {
+  const app = createAppForTest();
+  const detail = {
+    diagnosisRuns: [{
+      status: 'COMPLETED',
+      completedAt: 3000,
+      evidence: [
+        {
+          id: 'ev-open',
+          type: 'tool_call',
+          toolName: 'queryLogs',
+          success: false,
+          errorCode: 'CIRCUIT_OPEN'
+        }
+      ]
+    }]
+  };
+
+  const events = app.deriveDiagnosisTimeline(detail, detail.diagnosisRuns[0]);
+
+  assert.deepEqual(Array.from(events, event => event.kind), [
+    'incident-created',
+    'run-created',
+    'tool-breaker-open',
+    'run-completed'
+  ]);
+  assert.equal(events[0].timestamp, 0);
+});
+
+test('deriveDiagnosisTimeline keeps latest alert event when timestamp is missing', () => {
+  const app = createAppForTest();
+  const detail = {
+    createdAt: 1000,
+    alertCount: 2
+  };
+
+  const events = app.deriveDiagnosisTimeline(detail, null);
+  const latestAlert = events.find(event => event.kind === 'latest-alert');
+
+  assert.ok(latestAlert);
+  assert.equal(latestAlert.timestamp, 0);
+});
 
 console.log('evidence rendering tests passed');
