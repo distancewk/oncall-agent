@@ -2212,6 +2212,199 @@ body {
     border-left: 3px solid var(--color-secondary);
 }
 
+.incident-workbench-summary {
+    display: grid;
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    gap: 10px;
+    margin-bottom: 24px;
+}
+
+.incident-workbench-summary-tile {
+    min-width: 0;
+    padding: 12px 14px;
+    border: 1px solid var(--border-light);
+    border-left: 3px solid var(--color-secondary);
+    border-radius: var(--radius-sm);
+    background: var(--bg-muted);
+}
+
+.incident-workbench-summary-tile.failed-evidence-count,
+.incident-workbench-summary-tile.severity {
+    border-left-color: var(--color-error);
+}
+
+.incident-workbench-summary-tile.retried-evidence-count,
+.incident-workbench-summary-tile.run-status {
+    border-left-color: var(--color-warning);
+}
+
+.incident-workbench-summary-tile.evidence-count,
+.incident-workbench-summary-tile.review-status {
+    border-left-color: var(--color-success);
+}
+
+.incident-workbench-summary-label {
+    margin-bottom: 4px;
+    color: var(--text-secondary);
+    font-size: 11px;
+    font-weight: 700;
+    line-height: 1.4;
+}
+
+.incident-workbench-summary-value {
+    min-width: 0;
+    color: var(--text-primary);
+    font-size: 14px;
+    font-weight: 800;
+    line-height: 1.35;
+    word-break: break-word;
+}
+
+.incident-workbench-layout {
+    display: grid;
+    grid-template-columns: minmax(220px, 280px) minmax(0, 1fr);
+    gap: 16px;
+    align-items: start;
+    margin-bottom: 24px;
+}
+
+.incident-workbench-sidebar,
+.incident-workbench-main,
+.incident-workbench-report,
+.incident-workbench-actions {
+    min-width: 0;
+}
+
+.incident-workbench-sidebar,
+.incident-workbench-main {
+    border: 1px solid var(--border-light);
+    border-radius: var(--radius-sm);
+    background: var(--bg-elevated);
+    padding: 14px;
+}
+
+.incident-workbench-sidebar h4,
+.incident-workbench-main h4,
+.incident-workbench-report h4,
+.incident-workbench-actions h4 {
+    margin: 0 0 12px;
+    padding-bottom: 8px;
+    border-bottom: 1px solid var(--border-color);
+    color: var(--text-primary);
+    font-family: var(--font-heading);
+    font-size: 14px;
+    font-weight: 600;
+}
+
+.incident-workbench-timeline {
+    position: relative;
+    display: grid;
+    gap: 12px;
+    padding-left: 18px;
+}
+
+.incident-workbench-timeline::before {
+    content: '';
+    position: absolute;
+    top: 4px;
+    bottom: 4px;
+    left: 5px;
+    width: 2px;
+    border-radius: 999px;
+    background: var(--border-color);
+}
+
+.incident-workbench-timeline-item {
+    --timeline-marker-color: var(--text-tertiary);
+    position: relative;
+    min-width: 0;
+    padding: 0 0 0 6px;
+}
+
+.incident-workbench-timeline-item::before {
+    content: '';
+    position: absolute;
+    top: 5px;
+    left: -18px;
+    width: 12px;
+    height: 12px;
+    border: 2px solid var(--bg-elevated);
+    border-radius: 50%;
+    background: var(--timeline-marker-color);
+    box-shadow: 0 0 0 2px color-mix(in srgb, var(--timeline-marker-color) 24%, transparent);
+}
+
+.incident-workbench-timeline-item.timeline-warning,
+.incident-workbench-timeline-item.timeline-run-started,
+.incident-workbench-timeline-item.timeline-latest-alert {
+    --timeline-marker-color: var(--color-warning);
+}
+
+.incident-workbench-timeline-item.timeline-danger,
+.incident-workbench-timeline-item.timeline-tool-failed,
+.incident-workbench-timeline-item.timeline-tool-breaker-open,
+.incident-workbench-timeline-item.timeline-run-failed {
+    --timeline-marker-color: var(--color-error);
+}
+
+.incident-workbench-timeline-item.timeline-success,
+.incident-workbench-timeline-item.timeline-run-completed {
+    --timeline-marker-color: var(--color-success);
+}
+
+.incident-workbench-timeline-item.timeline-active,
+.incident-workbench-timeline-item.timeline-run-created {
+    --timeline-marker-color: var(--color-secondary);
+}
+
+.incident-workbench-timeline-item.timeline-neutral,
+.incident-workbench-timeline-item.timeline-incident-created {
+    --timeline-marker-color: var(--text-tertiary);
+}
+
+.incident-workbench-timeline-time {
+    margin-bottom: 2px;
+    color: var(--text-secondary);
+    font-family: var(--font-mono);
+    font-size: 11px;
+    line-height: 1.45;
+    word-break: break-word;
+}
+
+.incident-workbench-timeline-title {
+    color: var(--text-primary);
+    font-size: 13px;
+    font-weight: 800;
+    line-height: 1.45;
+    word-break: break-word;
+}
+
+.incident-workbench-timeline-detail {
+    margin-top: 3px;
+    color: var(--text-secondary);
+    font-size: 12px;
+    line-height: 1.55;
+    word-break: break-word;
+}
+
+.incident-workbench-report-review {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) minmax(180px, 220px);
+    gap: 16px;
+    align-items: start;
+}
+
+.incident-workbench-report .alert-report-content {
+    min-width: 0;
+    margin-bottom: 0;
+    word-break: break-word;
+}
+
+.incident-workbench-actions .alert-detail-actions {
+    grid-template-columns: minmax(0, 1fr);
+    margin-top: 0;
+}
+
 .diagnosis-evidence-list {
     display: grid;
     gap: 12px;
@@ -2894,6 +3087,15 @@ body {
     }
 
     .alert-history-filters {
+        grid-template-columns: minmax(0, 1fr);
+    }
+
+    .incident-workbench-summary {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+
+    .incident-workbench-layout,
+    .incident-workbench-report-review {
         grid-template-columns: minmax(0, 1fr);
     }
 
