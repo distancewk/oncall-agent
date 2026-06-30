@@ -1954,7 +1954,18 @@ class SuperBizAgentApp {
                 }
             }
 
+            const summaryHtml = this.renderIncidentWorkbenchSummary(this.deriveIncidentWorkbenchSummary(detailData));
+            const timelineHtml = this.renderDiagnosisTimeline(this.deriveDiagnosisTimeline(detailData, latestRun));
+            const actionButtonsHtml = `
+                <button class="alert-aiops-btn" data-incident-id="${this.escapeHtml(incidentId)}">重新执行 AI Ops 诊断</button>
+                ${latestRun && ['QUEUED', 'RUNNING', 'WAITING_TOOL'].includes(latestRun.status) ? `<button class="alert-cancel-run-btn" data-incident-id="${this.escapeHtml(incidentId)}" data-run-id="${this.escapeHtml(latestRun.runId)}">取消诊断</button>` : ''}
+                ${latestRun && latestRun.status === 'COMPLETED' && latestRun.humanReviewStatus !== 'CONFIRMED' ? `<button class="alert-confirm-run-btn" data-incident-id="${this.escapeHtml(incidentId)}" data-run-id="${this.escapeHtml(latestRun.runId)}">确认并入库</button>` : ''}
+                ${latestRun && latestRun.status === 'COMPLETED' && latestRun.humanReviewStatus !== 'REJECTED' ? `<button class="alert-reject-run-btn" data-incident-id="${this.escapeHtml(incidentId)}" data-run-id="${this.escapeHtml(latestRun.runId)}">驳回诊断</button>` : ''}
+                ${latestRun && latestRun.status === 'COMPLETED' && !latestRun.caseArchived ? `<button class="alert-archive-case-btn" data-incident-id="${this.escapeHtml(incidentId)}">手动写入历史案例</button>` : ''}
+            `;
+
             this.alertDetailContent.innerHTML = `
+                ${summaryHtml}
                 <div class="alert-detail-section">
                     <div class="alert-detail-info">
                         <div><strong>Incident ID:</strong> ${this.escapeHtml(detailData.id)}</div>
@@ -1974,19 +1985,24 @@ class SuperBizAgentApp {
                     <h4>最新诊断</h4>
                     ${runHtml}
                 </div>
-                <div class="alert-detail-section">
-                    <h4>工具证据</h4>
-                    <div class="diagnosis-evidence-list">${evidenceHtml}</div>
+                <div class="incident-workbench-layout">
+                    <div class="incident-workbench-sidebar">
+                        <h4>诊断时间线</h4>
+                        ${timelineHtml}
+                    </div>
+                    <div class="incident-workbench-main">
+                        <h4>证据链工作台</h4>
+                        <div class="diagnosis-evidence-list">${evidenceHtml}</div>
+                    </div>
                 </div>
-                <div class="alert-detail-section">
-                    <h4>分析报告</h4>
-                    <div class="alert-report-content">${reportHtml}</div>
-                    <div class="alert-detail-actions">
-                        <button class="alert-aiops-btn" data-incident-id="${this.escapeHtml(incidentId)}">重新执行 AI Ops 诊断</button>
-                        ${latestRun && ['QUEUED', 'RUNNING', 'WAITING_TOOL'].includes(latestRun.status) ? `<button class="alert-cancel-run-btn" data-incident-id="${this.escapeHtml(incidentId)}" data-run-id="${this.escapeHtml(latestRun.runId)}">取消诊断</button>` : ''}
-                        ${latestRun && latestRun.status === 'COMPLETED' && latestRun.humanReviewStatus !== 'CONFIRMED' ? `<button class="alert-confirm-run-btn" data-incident-id="${this.escapeHtml(incidentId)}" data-run-id="${this.escapeHtml(latestRun.runId)}">确认并入库</button>` : ''}
-                        ${latestRun && latestRun.status === 'COMPLETED' && latestRun.humanReviewStatus !== 'REJECTED' ? `<button class="alert-reject-run-btn" data-incident-id="${this.escapeHtml(incidentId)}" data-run-id="${this.escapeHtml(latestRun.runId)}">驳回诊断</button>` : ''}
-                        ${latestRun && latestRun.status === 'COMPLETED' && !latestRun.caseArchived ? `<button class="alert-archive-case-btn" data-incident-id="${this.escapeHtml(incidentId)}">手动写入历史案例</button>` : ''}
+                <div class="incident-workbench-report-review">
+                    <div class="incident-workbench-report">
+                        <h4>AI 诊断报告</h4>
+                        <div class="alert-report-content">${reportHtml}</div>
+                    </div>
+                    <div class="incident-workbench-actions">
+                        <h4>人工动作</h4>
+                        <div class="alert-detail-actions">${actionButtonsHtml}</div>
                     </div>
                 </div>
             `;
@@ -2212,6 +2228,7 @@ class SuperBizAgentApp {
         return {
             severity: detail.severity || '',
             incidentStatus: detail.status || '',
+            alertCount: Number(detail.alertCount) || 0,
             latestRunStatus: latestRun ? (latestRun.status || '') : '',
             humanReviewStatus: latestRun ? (latestRun.humanReviewStatus || '') : '',
             evidenceCount: toolEvidence.length,
@@ -2281,6 +2298,90 @@ class SuperBizAgentApp {
         return events
             .sort((a, b) => (a.timestamp - b.timestamp) || (a.order - b.order))
             .map(({ order, ...event }) => event);
+    }
+
+    renderIncidentWorkbenchSummary(summary) {
+        const data = summary || {};
+        const tiles = [
+            { label: '事故级别', value: data.severity || 'unknown', className: 'severity' },
+            { label: '事故状态', value: data.incidentStatus || '未知', className: 'incident-status' },
+            { label: '累计告警', value: `${Number(data.alertCount) || 0} 次`, className: 'alert-count' },
+            { label: '诊断状态', value: data.latestRunStatus || '暂无诊断', className: 'run-status' },
+            { label: '人工确认', value: data.humanReviewStatus || '未确认', className: 'review-status' },
+            { label: '工具证据', value: `${Number(data.evidenceCount) || 0} 条`, className: 'evidence-count' },
+            { label: '失败证据', value: `${Number(data.failedEvidenceCount) || 0} 条`, className: 'failed-evidence-count' },
+            { label: '重试证据', value: `${Number(data.retriedEvidenceCount) || 0} 条`, className: 'retried-evidence-count' },
+            { label: '证据耗时', value: this.formatEvidenceDuration(data.totalDurationMs), className: 'duration' }
+        ];
+
+        return `
+            <div class="incident-workbench-summary" aria-label="事故诊断摘要">
+                ${tiles.map(tile => `
+                    <div class="incident-workbench-summary-tile ${tile.className}">
+                        <div class="incident-workbench-summary-label">${this.escapeHtml(tile.label)}</div>
+                        <div class="incident-workbench-summary-value">${this.escapeHtml(tile.value)}</div>
+                    </div>
+                `).join('')}
+            </div>
+        `;
+    }
+
+    renderDiagnosisTimeline(events) {
+        const items = Array.isArray(events) ? events : [];
+        if (items.length === 0) {
+            return '<div class="incident-workbench-timeline"><div class="alert-panel-empty">暂无诊断时间线</div></div>';
+        }
+
+        return `
+            <div class="incident-workbench-timeline">
+                ${items.map(event => {
+                    const kindClass = this.timelineClassName(event && event.kind);
+                    const toneClass = this.timelineClassName(event && event.tone);
+                    const detail = this.timelineEventDetail(event);
+                    return `
+                        <div class="incident-workbench-timeline-item ${kindClass} ${toneClass}">
+                            <div class="incident-workbench-timeline-time">${this.escapeHtml(this.formatTimelineTimestamp(event && event.timestamp))}</div>
+                            <div class="incident-workbench-timeline-body">
+                                <div class="incident-workbench-timeline-title">${this.escapeHtml(event && event.title ? event.title : '诊断事件')}</div>
+                                ${detail ? `<div class="incident-workbench-timeline-detail">${this.escapeHtml(detail)}</div>` : ''}
+                            </div>
+                        </div>
+                    `;
+                }).join('')}
+            </div>
+        `;
+    }
+
+    timelineClassName(value) {
+        const safe = String(value || '')
+            .toLowerCase()
+            .replace(/[^a-z0-9_-]/g, '-')
+            .replace(/-+/g, '-')
+            .replace(/^-|-$/g, '');
+        return safe ? `timeline-${safe}` : '';
+    }
+
+    timelineEventDetail(event) {
+        if (!event) {
+            return '';
+        }
+        if (event.detail !== undefined && event.detail !== null && event.detail !== '') {
+            return String(event.detail);
+        }
+        const parts = [];
+        if (event.errorCode) parts.push(event.errorCode);
+        if (event.errorMessage) parts.push(event.errorMessage);
+        if (event.evidenceId) parts.push(`证据 ${event.evidenceId}`);
+        if (event.runId) parts.push(`Run ${event.runId}`);
+        return parts.join(' · ');
+    }
+
+    formatTimelineTimestamp(timestamp) {
+        const normalized = this.normalizeTimelineTimestamp(timestamp);
+        if (!normalized) {
+            return '未知时间';
+        }
+        return new Date(normalized).toLocaleString('zh-CN');
     }
 
     normalizeTimelineTimestamp(value) {

@@ -3,6 +3,8 @@ import { readFileSync } from 'node:fs';
 import test from 'node:test';
 import vm from 'node:vm';
 
+let appSandbox;
+
 function loadAppPrototype() {
   const source = readFileSync('src/main/resources/static/app.js', 'utf8');
   const sandbox = {
@@ -29,10 +31,18 @@ function loadAppPrototype() {
         };
       }
     },
+    clearTimeout() {},
+    fetch(...args) {
+      return sandbox.fetchImpl(...args);
+    },
+    fetchImpl() {
+      throw new Error('fetchImpl not configured');
+    },
     setTimeout() {}
   };
   vm.createContext(sandbox);
   vm.runInContext(`${source}\nglobalThis.SuperBizAgentApp = SuperBizAgentApp;`, sandbox);
+  appSandbox = sandbox;
   return sandbox.SuperBizAgentApp.prototype;
 }
 
@@ -41,6 +51,18 @@ const app = Object.create(prototype);
 
 function createAppForTest() {
   return Object.create(prototype);
+}
+
+function createClassListForTest() {
+  const classes = new Set();
+  return {
+    add(value) {
+      classes.add(value);
+    },
+    contains(value) {
+      return classes.has(value);
+    }
+  };
 }
 
 const evidence = [
@@ -246,6 +268,112 @@ test('deriveDiagnosisTimeline keeps latest alert event when timestamp is missing
 
   assert.ok(latestAlert);
   assert.equal(latestAlert.timestamp, 0);
+});
+
+test('renderIncidentWorkbenchSummary returns status tiles', () => {
+  const app = createAppForTest();
+  const html = app.renderIncidentWorkbenchSummary({
+    severity: 'critical',
+    incidentStatus: 'PROCESSING',
+    alertCount: 2,
+    latestRunStatus: 'RUNNING',
+    humanReviewStatus: 'PENDING',
+    evidenceCount: 4,
+    failedEvidenceCount: 1,
+    retriedEvidenceCount: 1,
+    totalDurationMs: 320
+  });
+
+  assert.match(html, /incident-workbench-summary/);
+  assert.match(html, /critical/);
+  assert.match(html, /RUNNING/);
+  assert.match(html, /失败证据/);
+});
+
+test('renderIncidentWorkbenchSummary escapes tile values', () => {
+  const app = createAppForTest();
+  const html = app.renderIncidentWorkbenchSummary({
+    severity: '<script>alert(1)</script>',
+    incidentStatus: 'OPEN',
+    alertCount: 1,
+    latestRunStatus: 'RUNNING',
+    humanReviewStatus: 'PENDING',
+    evidenceCount: 0,
+    failedEvidenceCount: 0,
+    retriedEvidenceCount: 0,
+    totalDurationMs: 0
+  });
+
+  assert.match(html, /&lt;script&gt;alert\(1\)&lt;\/script&gt;/);
+  assert.doesNotMatch(html, /<script>/);
+});
+
+test('renderDiagnosisTimeline returns timeline items', () => {
+  const app = createAppForTest();
+  const html = app.renderDiagnosisTimeline([
+    { kind: 'run-started', timestamp: 1000, title: '开始 AI Ops 诊断', detail: '', tone: 'active' },
+    { kind: 'tool-failed', timestamp: 2000, title: 'queryLogs 调用失败', detail: 'DEPENDENCY_ERROR', tone: 'warning' }
+  ]);
+
+  assert.match(html, /incident-workbench-timeline/);
+  assert.match(html, /开始 AI Ops 诊断/);
+  assert.match(html, /queryLogs 调用失败/);
+  assert.match(html, /DEPENDENCY_ERROR/);
+});
+
+test('renderDiagnosisTimeline escapes event content', () => {
+  const app = createAppForTest();
+  const html = app.renderDiagnosisTimeline([
+    { kind: 'tool-failed', timestamp: 1000, title: '<script>alert(1)</script>', detail: '<b>DEPENDENCY_ERROR</b>', tone: 'warning' }
+  ]);
+
+  assert.match(html, /&lt;script&gt;alert\(1\)&lt;\/script&gt;/);
+  assert.match(html, /&lt;b&gt;DEPENDENCY_ERROR&lt;\/b&gt;/);
+  assert.doesNotMatch(html, /<script>/);
+  assert.doesNotMatch(html, /<b>DEPENDENCY_ERROR<\/b>/);
+});
+
+test('showAlertDetail renders workbench summary before detail sections', async () => {
+  const app = createAppForTest();
+  const detailContent = {
+    innerHTML: '',
+    scrollTop: 0,
+    querySelector() {
+      return null;
+    }
+  };
+  app.apiBaseUrl = '/api';
+  app.alertDetailPanel = {
+    style: {},
+    classList: createClassListForTest()
+  };
+  app.alertDetailContent = detailContent;
+  app.incidentDetailRefreshTimer = null;
+  app.incidentDetailRenderSignature = null;
+  appSandbox.fetchImpl = async () => ({
+    ok: true,
+    json: async () => ({
+      data: {
+        id: 'inc-order',
+        aggregationKey: 'order-key',
+        title: 'Order test incident',
+        status: 'OPEN',
+        severity: 'critical',
+        alertCount: 1,
+        createdAt: 1000,
+        alertPayloads: [],
+        diagnosisRuns: []
+      }
+    })
+  });
+
+  await app.showAlertDetail('inc-order');
+
+  const summaryIndex = detailContent.innerHTML.indexOf('incident-workbench-summary');
+  const firstDetailSectionIndex = detailContent.innerHTML.indexOf('alert-detail-section');
+  assert.ok(summaryIndex >= 0);
+  assert.ok(firstDetailSectionIndex >= 0);
+  assert.ok(summaryIndex < firstDetailSectionIndex);
 });
 
 console.log('evidence rendering tests passed');
