@@ -290,6 +290,27 @@ test('renderIncidentWorkbenchSummary returns status tiles', () => {
   assert.match(html, /失败证据/);
 });
 
+test('renderAlertHistoryFilters groups controls into two rows', () => {
+  const app = createAppForTest();
+  app.alertHistoryFilters = {
+    status: 'OPEN',
+    severity: 'critical',
+    latestRunStatus: 'RUNNING',
+    humanReviewStatus: 'UNREVIEWED',
+    q: 'cpu'
+  };
+
+  const html = app.renderAlertHistoryFilters();
+
+  assert.match(html, /alert-history-filter-row-primary/);
+  assert.match(html, /alert-history-filter-row-secondary/);
+  assert.match(html, /alert-history-filter-actions/);
+  assert.equal((html.match(/alert-history-filter-row /g) || []).length, 2);
+  assert.match(html, /value="cpu"/);
+  assert.match(html, /value="OPEN" selected/);
+  assert.match(html, /value="RUNNING" selected/);
+});
+
 test('renderIncidentWorkbenchSummary escapes tile values', () => {
   const app = createAppForTest();
   const html = app.renderIncidentWorkbenchSummary({

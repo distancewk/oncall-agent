@@ -1971,10 +1971,9 @@ body {
 
 /* ===== Alert Cards ===== */
 .alert-history-filters {
-    display: grid;
-    grid-template-columns: repeat(4, minmax(0, 1fr));
+    display: flex;
+    flex-direction: column;
     gap: 8px;
-    align-items: center;
     margin-bottom: 14px;
     padding: 12px;
     background: var(--bg-muted);
@@ -1982,8 +1981,24 @@ body {
     border-radius: var(--radius-sm);
 }
 
+.alert-history-filter-row {
+    display: grid;
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    gap: 8px;
+    align-items: center;
+    width: 100%;
+}
+
 .alert-history-search {
     grid-column: span 2;
+}
+
+.alert-history-filter-actions {
+    display: grid;
+    grid-column: span 2;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 8px;
+    min-width: 0;
 }
 
 .alert-history-filters input,
@@ -3087,7 +3102,17 @@ body {
     }
 
     .alert-history-filters {
+        gap: 10px;
+    }
+
+    .alert-history-filter-row,
+    .alert-history-filter-actions {
         grid-template-columns: minmax(0, 1fr);
+    }
+
+    .alert-history-search,
+    .alert-history-filter-actions {
+        grid-column: auto;
     }
 
     .incident-workbench-summary {

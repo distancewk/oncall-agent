@@ -1758,36 +1758,42 @@ class SuperBizAgentApp {
         const filters = this.alertHistoryFilters || {};
         return `
             <div class="alert-history-filters">
-                <input class="alert-history-search" data-filter="q" type="search"
-                    placeholder="搜索标题、服务或 Incident"
-                    value="${this.escapeHtml(filters.q || '')}">
-                <select data-filter="status">
-                    <option value="">全部状态</option>
-                    <option value="OPEN" ${filters.status === 'OPEN' ? 'selected' : ''}>处理中</option>
-                    <option value="RESOLVED" ${filters.status === 'RESOLVED' ? 'selected' : ''}>已恢复</option>
-                </select>
-                <select data-filter="severity">
-                    <option value="">全部级别</option>
-                    <option value="critical" ${filters.severity === 'critical' ? 'selected' : ''}>critical</option>
-                    <option value="warning" ${filters.severity === 'warning' ? 'selected' : ''}>warning</option>
-                </select>
-                <select data-filter="latestRunStatus">
-                    <option value="">诊断状态</option>
-                    <option value="QUEUED" ${filters.latestRunStatus === 'QUEUED' ? 'selected' : ''}>排队中</option>
-                    <option value="RUNNING" ${filters.latestRunStatus === 'RUNNING' ? 'selected' : ''}>诊断中</option>
-                    <option value="WAITING_TOOL" ${filters.latestRunStatus === 'WAITING_TOOL' ? 'selected' : ''}>等待工具</option>
-                    <option value="COMPLETED" ${filters.latestRunStatus === 'COMPLETED' ? 'selected' : ''}>已完成</option>
-                    <option value="FAILED" ${filters.latestRunStatus === 'FAILED' ? 'selected' : ''}>失败</option>
-                    <option value="CANCELLED" ${filters.latestRunStatus === 'CANCELLED' ? 'selected' : ''}>已取消</option>
-                </select>
-                <select data-filter="humanReviewStatus">
-                    <option value="">人工确认</option>
-                    <option value="UNREVIEWED" ${filters.humanReviewStatus === 'UNREVIEWED' ? 'selected' : ''}>未确认</option>
-                    <option value="CONFIRMED" ${filters.humanReviewStatus === 'CONFIRMED' ? 'selected' : ''}>已确认</option>
-                    <option value="REJECTED" ${filters.humanReviewStatus === 'REJECTED' ? 'selected' : ''}>已驳回</option>
-                </select>
-                <button class="alert-history-filter-btn" type="button">筛选</button>
-                <button class="alert-history-reset-btn" type="button">重置</button>
+                <div class="alert-history-filter-row alert-history-filter-row-primary">
+                    <input class="alert-history-search" data-filter="q" type="search"
+                        placeholder="搜索标题、服务或 Incident"
+                        value="${this.escapeHtml(filters.q || '')}">
+                    <select data-filter="status">
+                        <option value="">全部状态</option>
+                        <option value="OPEN" ${filters.status === 'OPEN' ? 'selected' : ''}>处理中</option>
+                        <option value="RESOLVED" ${filters.status === 'RESOLVED' ? 'selected' : ''}>已恢复</option>
+                    </select>
+                    <select data-filter="severity">
+                        <option value="">全部级别</option>
+                        <option value="critical" ${filters.severity === 'critical' ? 'selected' : ''}>critical</option>
+                        <option value="warning" ${filters.severity === 'warning' ? 'selected' : ''}>warning</option>
+                    </select>
+                </div>
+                <div class="alert-history-filter-row alert-history-filter-row-secondary">
+                    <select data-filter="latestRunStatus">
+                        <option value="">诊断状态</option>
+                        <option value="QUEUED" ${filters.latestRunStatus === 'QUEUED' ? 'selected' : ''}>排队中</option>
+                        <option value="RUNNING" ${filters.latestRunStatus === 'RUNNING' ? 'selected' : ''}>诊断中</option>
+                        <option value="WAITING_TOOL" ${filters.latestRunStatus === 'WAITING_TOOL' ? 'selected' : ''}>等待工具</option>
+                        <option value="COMPLETED" ${filters.latestRunStatus === 'COMPLETED' ? 'selected' : ''}>已完成</option>
+                        <option value="FAILED" ${filters.latestRunStatus === 'FAILED' ? 'selected' : ''}>失败</option>
+                        <option value="CANCELLED" ${filters.latestRunStatus === 'CANCELLED' ? 'selected' : ''}>已取消</option>
+                    </select>
+                    <select data-filter="humanReviewStatus">
+                        <option value="">人工确认</option>
+                        <option value="UNREVIEWED" ${filters.humanReviewStatus === 'UNREVIEWED' ? 'selected' : ''}>未确认</option>
+                        <option value="CONFIRMED" ${filters.humanReviewStatus === 'CONFIRMED' ? 'selected' : ''}>已确认</option>
+                        <option value="REJECTED" ${filters.humanReviewStatus === 'REJECTED' ? 'selected' : ''}>已驳回</option>
+                    </select>
+                    <div class="alert-history-filter-actions">
+                        <button class="alert-history-filter-btn" type="button">筛选</button>
+                        <button class="alert-history-reset-btn" type="button">重置</button>
+                    </div>
+                </div>
             </div>
         `;
     }
