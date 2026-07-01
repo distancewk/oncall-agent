@@ -13,7 +13,7 @@ SuperBizAgent 是一个基于 Spring Boot、Spring AI Alibaba、DashScope、Milv
 | 证据链 | 每次工具调用保存为 DiagnosisEvidence，报告需要引用 evidence id |
 | 指标趋势 | `queryMetricTrend` 支持 CPU、内存、错误率、P99、重启次数的 15m/1h/6h 趋势查询 |
 | 相似历史故障 | 已完成诊断可写入 `incident_case`，新故障诊断前自动召回相似案例 |
-| 前端控制台 | 提供聊天、知识库状态/检索、告警历史、事故详情、诊断进度、工具证据分组展示 |
+| 前端控制台 | 提供聊天、知识库状态/检索、事故历史筛选、事故详情、诊断进度、证据链工作台和工具证据分组展示 |
 | 安全边界 | 支持 API 鉴权开关、Webhook 共享密钥、CORS 白名单、模拟告警开发开关 |
 
 ## 技术栈
@@ -129,7 +129,8 @@ docker compose up -d --build
 | `mvn test` | 运行全部 Java 测试 |
 | `mvn -Ppostgres-it verify` | 运行完整 Maven 门禁和 PostgreSQL Testcontainers 集成测试；Docker 不可用时集成测试会跳过 |
 | `node --check src/main/resources/static/app.js` | 检查前端 JS 语法 |
-| `node src/test/js/evidenceRendering.test.mjs` | 检查工具证据前端渲染 |
+| `node --test src/test/js/evidenceRendering.test.mjs` | 检查事故详情、证据工作台和事故历史筛选栏渲染 |
+| `node --test src/test/js/incidentFrontendActions.test.mjs` | 检查事故前端操作 URL 与动作绑定 |
 | `docker compose up -d etcd minio milvus redis postgres attu` | 启动本地依赖 |
 | `docker compose config` | 校验 Compose 配置 |
 | `docker compose up -d --build` | 构建并启动完整容器栈 |
@@ -282,6 +283,24 @@ curl -X POST http://localhost:9900/api/incidents/{incidentId}/diagnose
 `DiagnosisReportService` 注入给 Agent 的证据表同样包含 `attemptCount`、`durationMs` 和 `retryable`。因此最终报告不仅能引用“哪个工具证据”，也能看到该证据是否经过重试、是否因为熔断或依赖异常导致缺失。
 
 诊断工具调用会做基础治理：同一 DiagnosisRun 内相同 `toolName + queryParams` 会去重；`queryLogs` 默认最多调用 3 次，超过后返回 `TOOL_BUDGET_EXCEEDED`，重复调用返回 `TOOL_DUPLICATE_SKIPPED`，报告必须如实说明证据不足。
+
+### 前端事故工作台
+
+事故历史面板支持按关键字、事故状态、级别、诊断状态和人工确认状态筛选。筛选栏在桌面端拆成两行：第一行放搜索、事故状态和级别，第二行放诊断状态、人工确认和操作按钮；移动端自动降为单列，避免筛选栏宽于事故卡片列表。
+
+事故详情页以“证据链工作台”为核心视图：
+
+- 顶部摘要卡片展示事故级别、事故状态、告警次数、最新诊断状态、人工确认状态、证据数量、失败证据、重试证据和总耗时。
+- 左侧诊断时间线聚合事故创建、最新告警、诊断创建/开始/完成/失败、工具成功/失败、熔断等事件。
+- 主体区域展示工具证据分组，保留每条 evidence 的参数、趋势图、耗时、重试和错误信息。
+- 下方将 AI 诊断报告、质量评分、人工确认动作和历史案例写入动作分区展示。
+
+前端渲染逻辑集中在 `src/main/resources/static/app.js`，样式集中在 `src/main/resources/static/styles.css`。改动事故详情或事故历史筛选时，应同步运行：
+
+```bash
+node --test src/test/js/evidenceRendering.test.mjs
+node --test src/test/js/incidentFrontendActions.test.mjs
+```
 
 ## Agent 工具
 
@@ -454,7 +473,6 @@ super-biz-agent/
 │   ├── application-dev.yml          # 开发 profile
 │   └── application-prod.yml         # 生产 profile
 ├── aiops-docs/                      # 示例运维知识库文档
-├── docs/                            # 项目文档
 ├── docker-compose.yml               # Milvus、Redis、PostgreSQL、Attu、应用
 ├── Dockerfile                       # 多阶段构建镜像
 ├── Makefile                         # 本地辅助命令
@@ -467,7 +485,8 @@ super-biz-agent/
 mvn test
 mvn -Ppostgres-it verify
 node --check src/main/resources/static/app.js
-node src/test/js/evidenceRendering.test.mjs
+node --test src/test/js/evidenceRendering.test.mjs
+node --test src/test/js/incidentFrontendActions.test.mjs
 docker compose config
 ```
 
