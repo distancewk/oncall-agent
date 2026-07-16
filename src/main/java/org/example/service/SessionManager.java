@@ -2,6 +2,7 @@ package org.example.service;
 
 import org.example.dto.ChatSessionRecord;
 import org.example.dto.ChatSessionSummary;
+import org.example.config.AppMemoryProperties;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -13,6 +14,9 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.Executor;
+import java.util.concurrent.ConcurrentLinkedQueue;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.locks.ReentrantLock;
 
@@ -41,6 +45,9 @@ public class SessionManager {
     private Executor memoryExecutor;
 
     @Autowired(required = false)
+    private ScheduledExecutorService memoryFlushScheduler;
+
+    @Autowired(required = false)
     private StringRedisTemplate redisTemplate;
 
     @Autowired(required = false)
@@ -52,13 +59,19 @@ public class SessionManager {
     @Autowired(required = false)
     private MemoryLifecycleService memoryLifecycleService;
 
+    @Autowired(required = false)
+    private AppMemoryProperties appMemoryProperties;
+
     private static final String REDIS_KEY_PREFIX = "session:";
     private static final long SESSION_TTL_SECONDS = 3600; // 1 hour
+    private static final java.util.regex.Pattern SAFE_SESSION_ID =
+            java.util.regex.Pattern.compile("[A-Za-z0-9_-]{1,64}");
 
     // 存储会话信息
     private final Map<String, SessionInfo> sessions = new ConcurrentHashMap<>();
     private final Map<String, Long> memoryGenerations = new ConcurrentHashMap<>();
     private final Map<String, Object> memoryOperationLocks = new ConcurrentHashMap<>();
+    private final Map<String, PendingMemory> pendingMemories = new ConcurrentHashMap<>();
 
     /**
      * 获取或创建会话
@@ -67,6 +80,7 @@ public class SessionManager {
         if (sessionId == null || sessionId.isEmpty()) {
             sessionId = UUID.randomUUID().toString();
         }
+        validateSessionId(sessionId);
         // Check L1 cache first
         SessionInfo existing = sessions.get(sessionId);
         if (existing != null) {
@@ -97,6 +111,9 @@ public class SessionManager {
      */
     public SessionInfo getSession(String sessionId) {
         if (sessionId == null || sessionId.isEmpty()) {
+            return null;
+        }
+        if (!isValidSessionId(sessionId)) {
             return null;
         }
         // Check L1 cache first
@@ -209,6 +226,9 @@ public class SessionManager {
     }
 
     public Optional<ChatSessionRecord> getSessionMessages(String sessionId) {
+        if (!isValidSessionId(sessionId)) {
+            return Optional.empty();
+        }
         if (chatHistoryStore != null) {
             Optional<ChatSessionRecord> persisted = chatHistoryStore.load(sessionId);
             if (persisted.isPresent()) {
@@ -225,16 +245,27 @@ public class SessionManager {
     }
 
     public SessionDeletionResult deleteSessionWithStatus(String sessionId) {
-        if (sessionId == null || sessionId.isBlank()) {
+        if (!isValidSessionId(sessionId)) {
             return new SessionDeletionResult(false, true);
         }
         advanceMemoryGeneration(sessionId);
+        discardPendingMemory(sessionId);
         boolean removedFromMemory = sessions.remove(sessionId) != null;
         deleteFromRedis(sessionId);
         boolean removedFromHistory = chatHistoryStore != null && chatHistoryStore.delete(sessionId);
         boolean deleted = removedFromMemory || removedFromHistory;
         boolean privateMemoryDeleted = !deleted || deleteSessionMemories(sessionId);
         return new SessionDeletionResult(deleted, privateMemoryDeleted);
+    }
+
+    public static boolean isValidSessionId(String sessionId) {
+        return sessionId != null && SAFE_SESSION_ID.matcher(sessionId).matches();
+    }
+
+    private void validateSessionId(String sessionId) {
+        if (!isValidSessionId(sessionId)) {
+            throw new IllegalArgumentException("会话 ID 格式非法");
+        }
     }
 
     private SessionInfo newActiveSession(String sessionId) {
@@ -261,6 +292,7 @@ public class SessionManager {
         if (chatHistoryStore != null) {
             chatHistoryStore.delete(sessionId);
         }
+        discardPendingMemory(sessionId);
     }
 
     boolean deleteSessionMemories(String sessionId) {
@@ -305,6 +337,21 @@ public class SessionManager {
 
     private Object memoryOperationLock(String sessionId) {
         return memoryOperationLocks.computeIfAbsent(sessionId, ignored -> new Object());
+    }
+
+    private void discardPendingMemory(String sessionId) {
+        PendingMemory pending = pendingMemories.remove(sessionId);
+        if (pending == null) {
+            return;
+        }
+        synchronized (pending) {
+            pending.messages.clear();
+            if (pending.future != null) {
+                pending.future.cancel(false);
+                pending.future = null;
+            }
+            pending.scheduled = false;
+        }
     }
 
     private void deleteFromRedis(String sessionId) {
@@ -451,7 +498,7 @@ public class SessionManager {
 
             // 触发异步提炼
             if (!evictedMessages.isEmpty() && manager != null) {
-                manager.triggerMemoryExtraction(sessionId, evictedMessages, memoryGeneration);
+                manager.enqueueMemoryExtraction(sessionId, evictedMessages, memoryGeneration);
             }
         }
 
@@ -543,6 +590,98 @@ public class SessionManager {
         triggerMemoryExtraction(sessionId, historyToArchive, currentMemoryGeneration(sessionId));
     }
 
+    private void enqueueMemoryExtraction(String sessionId,
+                                          List<Map<String, String>> historyToArchive,
+                                          long generation) {
+        if (sessionId == null || sessionId.isBlank() || historyToArchive == null || historyToArchive.isEmpty()
+                || memoryExtractionService == null || memoryExecutor == null) {
+            return;
+        }
+        PendingMemory pending = pendingMemories.computeIfAbsent(sessionId, ignored -> new PendingMemory());
+        synchronized (pending) {
+            int maxQueue = memoryProperties().getExtractionMaxQueueMessages();
+            if (pending.messages.size() + historyToArchive.size() > maxQueue) {
+                logger.warn("记忆提取队列已满，丢弃本次任务: sessionId={}, queuedMessages={}",
+                        sessionId, pending.messages.size());
+                return;
+            }
+            pending.generation = generation;
+            historyToArchive.forEach(message -> pending.messages.add(new HashMap<>(message)));
+            if (!pending.scheduled) {
+                pending.scheduled = true;
+                if (memoryFlushScheduler == null) {
+                    submitPendingMemory(sessionId, pending);
+                } else {
+                    schedulePendingMemory(sessionId, pending);
+                }
+            }
+        }
+    }
+
+    private void schedulePendingMemory(String sessionId, PendingMemory pending) {
+        try {
+            pending.future = memoryFlushScheduler.schedule(
+                    () -> submitPendingMemory(sessionId, pending),
+                    memoryProperties().getExtractionDebounceMillis(), TimeUnit.MILLISECONDS);
+        } catch (RuntimeException e) {
+            pending.scheduled = false;
+            pending.future = null;
+            logger.warn("调度记忆提取任务失败: sessionId={}", sessionId, e);
+        }
+    }
+
+    private void submitPendingMemory(String sessionId, PendingMemory pending) {
+        try {
+            memoryExecutor.execute(() -> processPendingMemory(sessionId, pending));
+        } catch (RuntimeException e) {
+            synchronized (pending) {
+                pending.scheduled = false;
+            }
+            logger.warn("提交记忆提取任务失败: sessionId={}", sessionId, e);
+        }
+    }
+
+    private void processPendingMemory(String sessionId, PendingMemory pending) {
+        List<Map<String, String>> batch = new ArrayList<>();
+        long generation;
+        synchronized (pending) {
+            generation = pending.generation;
+            int batchSize = memoryProperties().getExtractionBatchSize() * 2;
+            while (!pending.messages.isEmpty() && batch.size() < batchSize) {
+                batch.add(pending.messages.poll());
+            }
+            pending.scheduled = false;
+        }
+        if (generation != currentMemoryGeneration(sessionId)) {
+            batch.clear();
+            synchronized (pending) {
+                pending.messages.clear();
+            }
+        } else if (!batch.isEmpty()) {
+            synchronized (memoryOperationLock(sessionId)) {
+                if (generation == currentMemoryGeneration(sessionId)) {
+                    memoryExtractionService.extractAndStoreBatch(sessionId, batch);
+                }
+            }
+        }
+        synchronized (pending) {
+            if (!pending.messages.isEmpty() && !pending.scheduled) {
+                pending.scheduled = true;
+                if (memoryFlushScheduler == null) {
+                    submitPendingMemory(sessionId, pending);
+                } else {
+                    schedulePendingMemory(sessionId, pending);
+                }
+            } else if (pending.messages.isEmpty()) {
+                pendingMemories.remove(sessionId, pending);
+            }
+        }
+    }
+
+    private AppMemoryProperties memoryProperties() {
+        return appMemoryProperties == null ? new AppMemoryProperties() : appMemoryProperties;
+    }
+
     private void triggerMemoryExtraction(String sessionId,
                                          List<Map<String, String>> historyToArchive,
                                          long generation) {
@@ -558,5 +697,12 @@ public class SessionManager {
                 memoryExtractionService.extractAndStore(sessionId, historyToArchive);
             }
         });
+    }
+
+    private static final class PendingMemory {
+        private final ConcurrentLinkedQueue<Map<String, String>> messages = new ConcurrentLinkedQueue<>();
+        private long generation;
+        private boolean scheduled;
+        private ScheduledFuture<?> future;
     }
 }

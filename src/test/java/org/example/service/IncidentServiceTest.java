@@ -420,8 +420,8 @@ class IncidentServiceTest {
         AtomicInteger listCalls = new AtomicInteger();
         IncidentStore racingStore = new IncidentStore(properties, new ObjectMapper(), sharedDataSource) {
             @Override
-            public List<IncidentRecord> list() {
-                List<IncidentRecord> snapshot = super.list();
+            public List<IncidentStore.StaleRunCandidate> findStaleRunCandidates(long cutoffMillis) {
+                List<IncidentStore.StaleRunCandidate> snapshot = super.findStaleRunCandidates(cutoffMillis);
                 if (listCalls.getAndIncrement() == 0) {
                     completingService.get().completeRun(incident.getId(), stale.getRunId(), "# 已完成报告");
                 }

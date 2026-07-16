@@ -10,6 +10,7 @@ import org.springframework.web.bind.annotation.RestControllerAdvice;
 import org.springframework.web.multipart.MaxUploadSizeExceededException;
 
 import java.io.IOException;
+import java.util.UUID;
 
 @RestControllerAdvice
 public class GlobalExceptionHandler {
@@ -18,25 +19,38 @@ public class GlobalExceptionHandler {
 
     @ExceptionHandler(IllegalArgumentException.class)
     public ResponseEntity<ApiResponse<Void>> handleIllegalArgumentException(IllegalArgumentException ex) {
-        logger.warn("参数错误: {}", ex.getMessage());
-        return ResponseEntity.status(HttpStatus.BAD_REQUEST).body(ApiResponse.error(400, ex.getMessage()));
+        String requestId = requestId();
+        logger.warn("参数错误, requestId: {}, type: {}", requestId, ex.getClass().getSimpleName());
+        return errorResponse(400, "请求参数无效", requestId);
     }
 
     @ExceptionHandler(MaxUploadSizeExceededException.class)
     public ResponseEntity<ApiResponse<Void>> handleMaxSizeException(MaxUploadSizeExceededException ex) {
-        logger.warn("文件过大: {}", ex.getMessage());
+        logger.warn("文件过大, type: {}", ex.getClass().getSimpleName());
         return ResponseEntity.status(HttpStatus.PAYLOAD_TOO_LARGE).body(ApiResponse.error(413, "上传的文件超出了最大限制大小"));
     }
 
     @ExceptionHandler(IOException.class)
     public ResponseEntity<ApiResponse<Void>> handleIOException(IOException ex) {
-        logger.error("IO异常: ", ex);
-        return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).body(ApiResponse.error(500, "文件读写异常: " + ex.getMessage()));
+        String requestId = requestId();
+        logger.error("IO异常, requestId: {}", requestId, ex);
+        return errorResponse(500, "文件读写失败，请稍后重试", requestId);
     }
 
     @ExceptionHandler(Exception.class)
     public ResponseEntity<ApiResponse<Void>> handleException(Exception ex) {
-        logger.error("系统异常: ", ex);
-        return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).body(ApiResponse.error(500, "内部服务器错误: " + ex.getMessage()));
+        String requestId = requestId();
+        logger.error("系统异常, requestId: {}", requestId, ex);
+        return errorResponse(500, "内部服务器错误，请稍后重试", requestId);
+    }
+
+    private ResponseEntity<ApiResponse<Void>> errorResponse(int code, String message, String requestId) {
+        ApiResponse<Void> response = ApiResponse.error(code, message);
+        response.setRequestId(requestId);
+        return ResponseEntity.status(code).body(response);
+    }
+
+    private String requestId() {
+        return UUID.randomUUID().toString();
     }
 }

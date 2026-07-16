@@ -14,4 +14,9 @@ class AppMemoryPropertiesTest {
 
         assertEquals(1, properties.getPrivateRecallMaxPromptChars());
     }
+
+    @Test
+    void privateRecallGating_shouldBeEnabledByDefault() {
+        assertEquals(true, new AppMemoryProperties().isPrivateRecallGatingEnabled());
+    }
 }

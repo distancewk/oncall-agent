@@ -10,6 +10,7 @@ import io.milvus.param.dml.DeleteParam;
 import io.milvus.param.dml.InsertParam;
 import io.milvus.param.dml.UpsertParam;
 import org.example.config.AppMemoryProperties;
+import org.example.dto.MemoryFact;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
 import org.springframework.test.util.ReflectionTestUtils;
@@ -112,6 +113,15 @@ class MemoryLifecycleServiceTest {
     }
 
     @Test
+    void filterRecallResults_shouldDropExpiredMemory() {
+        MemoryLifecycleService service = new MemoryLifecycleService(insertHelper, objectMapper, properties);
+        VectorSearchService.SearchResult expired = result("expired", "[用户私人记忆] 旧偏好", 0.9f,
+                "{\"deleted\":false,\"expires_at\":1}");
+
+        assertEquals(0, service.filterRecallResults(List.of(expired)).size());
+    }
+
+    @Test
     void storeMemory_shouldUpsertNormalizedPrefixedMemoryWithoutDeletingFirst() {
         MemoryLifecycleService service = new MemoryLifecycleService(insertHelper, objectMapper, properties);
         MilvusServiceClient milvusClient = mock(MilvusServiceClient.class);
@@ -166,6 +176,44 @@ class MemoryLifecycleServiceTest {
         verify(milvusClient, never()).upsert(any(UpsertParam.class));
     }
 
+    @Test
+    void storeMemories_shouldEmbedAndUpsertUniqueFactsInOneBatch() {
+        MemoryLifecycleService service = new MemoryLifecycleService(insertHelper, objectMapper, properties);
+        MilvusServiceClient milvusClient = mock(MilvusServiceClient.class);
+        VectorEmbeddingService embeddingService = mock(VectorEmbeddingService.class);
+
+        @SuppressWarnings("unchecked")
+        R<RpcStatus> loadResponse = mock(R.class);
+        when(loadResponse.getStatus()).thenReturn(0);
+        @SuppressWarnings("unchecked")
+        R<MutationResult> mutationResponse = mock(R.class);
+        when(mutationResponse.getStatus()).thenReturn(0);
+        when(milvusClient.loadCollection(any(LoadCollectionParam.class))).thenReturn(loadResponse);
+        when(milvusClient.upsert(any(UpsertParam.class))).thenReturn(mutationResponse);
+        when(embeddingService.generateEmbeddings(any())).thenReturn(List.of(
+                List.of(0.1f, 0.2f), List.of(0.3f, 0.4f)));
+        SortedMap<Long, Float> sparse = new java.util.TreeMap<>();
+        sparse.put(1L, 0.5f);
+        when(embeddingService.generateSparseVector(any())).thenReturn(sparse);
+        ReflectionTestUtils.setField(service, "milvusClient", milvusClient);
+        ReflectionTestUtils.setField(service, "embeddingService", embeddingService);
+
+        service.storeMemories("session-1", List.of(
+                new MemoryFact("用户偏好 Java", "PROFILE", 0.9, 0.8, null),
+                new MemoryFact("用户偏好 Java", "PROFILE", 0.7, 0.6, null),
+                new MemoryFact("使用 Milvus", "WORK_CONTEXT", 0.8, 0.7, 1_725_000_000_000L)));
+
+        verify(embeddingService).generateEmbeddings(List.of(
+                "[用户私人记忆] 用户偏好 Java", "[用户私人记忆] 使用 Milvus"));
+        verify(milvusClient).loadCollection(any(LoadCollectionParam.class));
+        verify(milvusClient).upsert(any(UpsertParam.class));
+        org.mockito.ArgumentCaptor<UpsertParam> upsertCaptor =
+                org.mockito.ArgumentCaptor.forClass(UpsertParam.class);
+        verify(milvusClient).upsert(upsertCaptor.capture());
+        assertEquals(2, fieldValues(upsertCaptor.getValue(), "id").size());
+        assertEquals(2, fieldValues(upsertCaptor.getValue(), "metadata").size());
+    }
+
     private VectorSearchService.SearchResult result(String id, String content, float score, String metadata) {
         VectorSearchService.SearchResult result = new VectorSearchService.SearchResult();
         result.setId(id);
@@ -177,6 +225,14 @@ class MemoryLifecycleServiceTest {
 
     private List<?> fieldValues(InsertParam insertParam, String fieldName) {
         return insertParam.getFields().stream()
+                .filter(field -> fieldName.equals(field.getName()))
+                .findFirst()
+                .orElseThrow()
+                .getValues();
+    }
+
+    private List<?> fieldValues(UpsertParam upsertParam, String fieldName) {
+        return upsertParam.getFields().stream()
                 .filter(field -> fieldName.equals(field.getName()))
                 .findFirst()
                 .orElseThrow()

@@ -31,10 +31,19 @@ public class DiagnosisRunRecord {
     private boolean caseArchived;
     private String caseDocumentId;
     private String caseArchiveMessage;
+    private long version;
     private List<DiagnosisEvidence> evidence = new ArrayList<>();
 
     public String getRunId() {
         return runId;
+    }
+
+    public long getVersion() {
+        return version;
+    }
+
+    public void setVersion(long version) {
+        this.version = version;
     }
 
     public void setRunId(String runId) {

@@ -2,6 +2,7 @@ package org.example.service;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.example.config.AppChatHistoryProperties;
+import org.example.config.AppMemoryProperties;
 import org.springframework.jdbc.datasource.DriverManagerDataSource;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -15,13 +16,19 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.Executor;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.ScheduledFuture;
+import java.util.concurrent.TimeUnit;
 
 import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyLong;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.when;
 
 @ExtendWith(MockitoExtension.class)
 class SessionManagerTest {
@@ -302,6 +309,35 @@ class SessionManagerTest {
         assertTrue(result.deleted());
         assertTrue(result.privateMemoryDeleted());
         verify(memoryExtractionService, never()).extractAndStore(any(), any());
+    }
+
+    @Test
+    void evictedMessages_shouldCoalesceIntoOneBoundedBatch() {
+        AppMemoryProperties properties = new AppMemoryProperties();
+        properties.setExtractionBatchSize(6);
+        setField(sessionManager, "appMemoryProperties", properties);
+
+        ScheduledExecutorService scheduler = org.mockito.Mockito.mock(ScheduledExecutorService.class);
+        List<Runnable> scheduledTasks = new ArrayList<>();
+        when(scheduler.schedule(any(Runnable.class), anyLong(), any(TimeUnit.class)))
+                .thenAnswer(invocation -> {
+                    scheduledTasks.add(invocation.getArgument(0));
+                    return org.mockito.Mockito.mock(ScheduledFuture.class);
+                });
+        setField(sessionManager, "memoryFlushScheduler", scheduler);
+        setField(sessionManager, "memoryExecutor", (Executor) Runnable::run);
+
+        SessionManager.SessionInfo session = sessionManager.getOrCreateSession("evict-batch");
+        for (int i = 1; i <= 8; i++) {
+            session.addMessage("q" + i, "a" + i, sessionManager);
+        }
+
+        verify(scheduler).schedule(any(Runnable.class), anyLong(), any(TimeUnit.class));
+        assertEquals(1, scheduledTasks.size());
+        scheduledTasks.get(0).run();
+
+        verify(memoryExtractionService).extractAndStoreBatch(eq("evict-batch"),
+                org.mockito.ArgumentMatchers.argThat(messages -> messages.size() == 4));
     }
 
     private ChatHistoryStore newHistoryStore(Path historyDir) {

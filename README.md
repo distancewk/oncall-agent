@@ -326,13 +326,15 @@ node --test src/test/js/incidentFrontendActions.test.mjs
 
 ## 安全与配置
 
-默认本地开发不启用鉴权。生产 profile 中 `APP_SECURITY_ENABLED=true`，请求需要携带凭证。
+默认启用鉴权。浏览器通过 HttpOnly Cookie 登录，机器客户端可使用 `X-API-Key`；生产环境必须使用强随机密钥。
 启动 `prod` profile 时会执行生产配置校验：必须提供 DashScope Key、API Token、Webhook Secret 和非本地 CORS 白名单；同时禁止开启 Prometheus/CLS mock 和模拟告警接口。
 
 | 场景 | Header |
 |------|--------|
 | 普通 `/api/**` 请求 | `X-API-Key: ${APP_API_TOKEN}` |
 | `/api/webhook/**` 请求 | `X-Webhook-Secret: ${APP_WEBHOOK_SECRET}` |
+
+内置前端首次访问时会提示输入 `APP_API_TOKEN`，登录后使用 HttpOnly Cookie；SSE 连接会自动携带该 Cookie。
 
 模拟告警接口 `/api/alerts/simulate` 只有在 `APP_ALERT_SIMULATE_ENABLED=true` 时可用。CORS 使用 `APP_CORS_ALLOWED_ORIGINS` 白名单，不再默认放开 `*`。
 
@@ -354,15 +356,15 @@ node --test src/test/js/incidentFrontendActions.test.mjs
 | `CLS_TIMEOUT` | `10` | 日志查询超时秒数 |
 | `FILE_UPLOAD_PATH` | `./uploads` | 上传文件目录 |
 | `APP_CORS_ALLOWED_ORIGINS` | `http://localhost:9900,http://127.0.0.1:9900` | CORS 白名单 |
-| `APP_SECURITY_ENABLED` | `false` | API 鉴权开关，prod profile 为 true |
-| `APP_API_TOKEN` | 空 | 普通 API 令牌 |
-| `APP_WEBHOOK_SECRET` | 空 | Webhook 共享密钥 |
+| `APP_SECURITY_ENABLED` | `true` | API 鉴权开关，关闭仅限隔离测试环境 |
+| `APP_API_TOKEN` | 必填 | 普通 API 令牌 |
+| `APP_WEBHOOK_SECRET` | 必填 | Webhook 共享密钥 |
 | `APP_ALERT_SIMULATE_ENABLED` | `false` | 模拟告警接口开关 |
 | `APP_CHAT_HISTORY_PATH` | `./data/chat-history` | 完整聊天历史目录 |
 | `APP_INCIDENTS_PATH` | `./data/incidents` | 旧 JSON Incident 导入目录，仅用于从历史文件迁移到 JDBC |
 | `APP_INCIDENT_JDBC_URL` | `jdbc:postgresql://localhost:5432/superbizagent` | Incident JDBC 数据库地址 |
 | `APP_INCIDENT_JDBC_USERNAME` | `superbizagent` | JDBC 用户名 |
-| `APP_INCIDENT_JDBC_PASSWORD` | `superbizagent` | JDBC 密码，本地默认值仅用于开发 |
+| `APP_INCIDENT_JDBC_PASSWORD` | 必填 | JDBC 密码 |
 | `APP_INCIDENT_JDBC_DRIVER_CLASS_NAME` | 空 | 可选 JDBC Driver 类名 |
 | `APP_INCIDENT_JDBC_MAX_POOL_SIZE` | `10` | Incident JDBC 连接池最大连接数 |
 | `APP_INCIDENT_JDBC_MIN_IDLE` | `1` | Incident JDBC 连接池最小空闲连接数 |
@@ -424,8 +426,8 @@ node --test src/test/js/incidentFrontendActions.test.mjs
 |------|--------|------|
 | `POSTGRES_DB` | `superbizagent` | Compose 内 PostgreSQL 数据库名 |
 | `POSTGRES_USER` | `superbizagent` | Compose 内 PostgreSQL 用户 |
-| `POSTGRES_PASSWORD` | `superbizagent` | Compose 内 PostgreSQL 密码，本地演示默认值 |
-| `POSTGRES_PORT` | `5432` | 暴露到宿主机的 PostgreSQL 端口 |
+| `POSTGRES_PASSWORD` | 必填 | Compose 内 PostgreSQL 密码 |
+| `POSTGRES_PORT` | 不再暴露 | PostgreSQL 仅在 Compose 内部网络可访问 |
 | `DOCKER_VOLUME_DIRECTORY` | `.` | Compose 数据、上传和历史目录挂载根路径 |
 
 ## MCP 工具

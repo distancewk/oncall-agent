@@ -21,6 +21,7 @@ import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.sql.Statement;
 import java.util.Comparator;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
 import java.util.stream.Stream;
@@ -74,22 +75,154 @@ public class IncidentStore {
         return listFromJdbc();
     }
 
+    public List<IncidentRecord> listPage(int limit, int offset) {
+        return listPage(limit, offset, null, null, null, null, null);
+    }
+
+    public List<IncidentRecord> listPage(int limit, int offset,
+                                         String status, String severity, String query,
+                                         String latestRunStatus, String humanReviewStatus) {
+        ensureJdbcInitialized();
+        int safeLimit = Math.max(1, Math.min(100, limit));
+        int safeOffset = Math.max(0, offset);
+        StringBuilder sql = new StringBuilder("""
+                select id, aggregation_key, title, status, severity, alert_count,
+                       version, created_at, updated_at, last_alert_at
+                from incidents
+                where 1 = 1
+                """);
+        List<Object> parameters = new ArrayList<>();
+        if (notBlank(status)) {
+            sql.append(" and lower(status) = lower(?)");
+            parameters.add(status.trim());
+        }
+        if (notBlank(severity)) {
+            sql.append(" and lower(severity) = lower(?)");
+            parameters.add(severity.trim());
+        }
+        if (notBlank(query)) {
+            sql.append(" and (lower(id) like lower(?) or lower(title) like lower(?) "
+                    + "or lower(aggregation_key) like lower(?) or lower(severity) like lower(?) "
+                    + "or lower(status) like lower(?))");
+            String pattern = "%" + query.trim() + "%";
+            parameters.add(pattern);
+            parameters.add(pattern);
+            parameters.add(pattern);
+            parameters.add(pattern);
+            parameters.add(pattern);
+        }
+        appendLatestRunFilter(sql, parameters, latestRunStatus, "status");
+        appendLatestRunFilter(sql, parameters, humanReviewStatus, "human_review_status");
+        sql.append(" order by updated_at desc, id limit ? offset ?");
+        parameters.add(safeLimit);
+        parameters.add(safeOffset);
+
+        try (Connection connection = openConnection();
+             PreparedStatement statement = connection.prepareStatement(sql.toString())) {
+            for (int index = 0; index < parameters.size(); index++) {
+                Object parameter = parameters.get(index);
+                if (parameter instanceof Integer integer) {
+                    statement.setInt(index + 1, integer);
+                } else {
+                    statement.setString(index + 1, parameter.toString());
+                }
+            }
+            try (ResultSet resultSet = statement.executeQuery()) {
+                ArrayList<IncidentRecord> records = new ArrayList<>();
+                while (resultSet.next()) {
+                    records.add(readIncidentRow(resultSet));
+                }
+                var runsByIncident = diagnosisRunRepository.findByIncidentIds(
+                        connection, records.stream().map(IncidentRecord::getId).toList());
+                for (IncidentRecord record : records) {
+                    record.setDiagnosisRuns(runsByIncident.getOrDefault(record.getId(), List.of()));
+                }
+                return records;
+            }
+        } catch (Exception e) {
+            throw new IllegalStateException("读取 JDBC Incident 分页失败", e);
+        }
+    }
+
+    private void appendLatestRunFilter(StringBuilder sql, List<Object> parameters,
+                                       String expected, String column) {
+        if (!notBlank(expected)) {
+            return;
+        }
+        sql.append(" and exists (select 1 from diagnosis_runs latest "
+                + "where latest.incident_id = incidents.id and lower(latest.")
+                .append(column)
+                .append(") = lower(?) and latest.run_id = (select candidate.run_id "
+                        + "from diagnosis_runs candidate where candidate.incident_id = incidents.id "
+                        + "order by candidate.created_at desc, candidate.run_id desc limit 1))");
+        parameters.add(expected.trim());
+    }
+
+    private boolean notBlank(String value) {
+        return value != null && !value.isBlank();
+    }
+
+    public List<StaleRunCandidate> findStaleRunCandidates(long cutoffMillis) {
+        ensureJdbcInitialized();
+        try (Connection connection = openConnection();
+             PreparedStatement statement = connection.prepareStatement("""
+                     select incident_id, run_id
+                     from diagnosis_runs
+                     where status in ('QUEUED', 'RUNNING', 'WAITING_TOOL')
+                       and coalesce(started_at, created_at) < ?
+                     order by coalesce(started_at, created_at), run_id
+                     """)) {
+            statement.setLong(1, cutoffMillis);
+            try (ResultSet resultSet = statement.executeQuery()) {
+                List<StaleRunCandidate> candidates = new ArrayList<>();
+                while (resultSet.next()) {
+                    candidates.add(new StaleRunCandidate(
+                            resultSet.getString("incident_id"),
+                            resultSet.getString("run_id")));
+                }
+                return candidates;
+            }
+        } catch (Exception e) {
+            throw new IllegalStateException("读取超时诊断任务失败", e);
+        }
+    }
+
+    public record StaleRunCandidate(String incidentId, String runId) {
+    }
+
     public Optional<IncidentRecord> findByAggregationKey(String aggregationKey) {
         return findByAggregationKeyFromJdbc(aggregationKey);
     }
 
     public IncidentRecord recordAlert(IncidentRecord candidate, AlertPayload payload, long now) {
+        return recordAlert(candidate, payload, now, null);
+    }
+
+    public IncidentRecord recordAlert(IncidentRecord candidate, AlertPayload payload,
+                                      long now, String alertId) {
+        return recordAlertWithStatus(candidate, payload, now, alertId).incident();
+    }
+
+    public RecordAlertResult recordAlertWithStatus(IncidentRecord candidate, AlertPayload payload,
+                                                   long now, String alertId) {
         ensureJdbcInitialized();
         for (int attempt = 1; attempt <= 3; attempt++) {
             try (Connection connection = openConnection()) {
                 connection.setAutoCommit(false);
                 try {
+                    if (alertId != null) {
+                        String existingIncidentId = findIncidentIdByAlertId(connection, alertId);
+                        if (existingIncidentId != null) {
+                            connection.rollback();
+                            return new RecordAlertResult(load(existingIncidentId).orElseThrow(), false);
+                        }
+                    }
                     String incidentId = isPostgreSql(connection)
                             ? upsertPostgreSqlAlert(connection, candidate, now)
                             : upsertPortableAlert(connection, candidate, now);
-                    incidentAlertRepository.append(connection, incidentId, null, payload, now);
+                    incidentAlertRepository.append(connection, incidentId, alertId, payload, now);
                     connection.commit();
-                    return load(incidentId).orElseThrow();
+                    return new RecordAlertResult(load(incidentId).orElseThrow(), true);
                 } catch (SQLException e) {
                     connection.rollback();
                     if (attempt < 3 && isConstraintViolation(e)) {
@@ -105,6 +238,19 @@ public class IncidentStore {
             }
         }
         throw new IllegalStateException("原子记录 Incident 告警重试耗尽: " + candidate.getAggregationKey());
+    }
+
+    public record RecordAlertResult(IncidentRecord incident, boolean created) {
+    }
+
+    private String findIncidentIdByAlertId(Connection connection, String alertId) throws SQLException {
+        try (PreparedStatement statement = connection.prepareStatement(
+                "select incident_id from incident_alerts where alert_id = ?")) {
+            statement.setString(1, alertId);
+            try (ResultSet resultSet = statement.executeQuery()) {
+                return resultSet.next() ? resultSet.getString(1) : null;
+            }
+        }
     }
 
     public <T> T inTransaction(JdbcWork<T> work) {
@@ -140,6 +286,55 @@ public class IncidentStore {
             }
         }
         diagnosisRunRepository.insert(connection, run);
+    }
+
+    public long updateRunToolState(String incidentId,
+                                   String runId,
+                                   long expectedVersion,
+                                   String status,
+                                   String currentTool,
+                                   String currentStep,
+                                   String progressMessage) {
+        return inTransaction(connection -> {
+            long now = System.currentTimeMillis();
+            boolean updated = diagnosisRunRepository.updateToolState(
+                    connection, incidentId, runId, expectedVersion,
+                    status, currentTool, currentStep, progressMessage, now);
+            if (!updated) {
+                return -1L;
+            }
+            touchIncident(connection, incidentId, now);
+            return expectedVersion + 1L;
+        });
+    }
+
+    public long appendToolEvidence(String incidentId,
+                                   String runId,
+                                   long expectedVersion,
+                                   DiagnosisEvidence evidence) {
+        return inTransaction(connection -> {
+            boolean updated = diagnosisRunRepository.appendToolEvidence(
+                    connection, incidentId, runId, expectedVersion, evidence);
+            if (!updated) {
+                return -1L;
+            }
+            touchIncident(connection, incidentId, System.currentTimeMillis());
+            return expectedVersion + 1L;
+        });
+    }
+
+    private void touchIncident(Connection connection, String incidentId, long updatedAt) throws SQLException {
+        try (PreparedStatement statement = connection.prepareStatement("""
+                update incidents
+                set updated_at = ?, version = version + 1
+                where id = ?
+                """)) {
+            statement.setLong(1, updatedAt);
+            statement.setString(2, incidentId);
+            if (statement.executeUpdate() != 1) {
+                throw new IllegalArgumentException("Incident 不存在: " + incidentId);
+            }
+        }
     }
 
     public Optional<DiagnosisRunRecord> failStaleRunIfActive(String incidentId,
@@ -207,12 +402,12 @@ public class IncidentStore {
             connection.setAutoCommit(false);
             try (PreparedStatement statement = connection.prepareStatement("""
                          merge into incidents as target
-                         using (values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)) as source (
+                         using (values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)) as source (
                              id, aggregation_key, title, status, severity, alert_count,
-                             created_at, updated_at, last_alert_at, payload
+                             created_at, updated_at, last_alert_at, payload, version
                          )
                          on target.id = source.id
-                         when matched then update set
+                         when matched and target.version = source.version then update set
                              aggregation_key = source.aggregation_key,
                              title = source.title,
                              status = source.status,
@@ -221,18 +416,35 @@ public class IncidentStore {
                              created_at = source.created_at,
                              updated_at = source.updated_at,
                              last_alert_at = source.last_alert_at,
-                             payload = source.payload
+                             payload = source.payload,
+                             version = target.version + 1
                          when not matched then insert (
                              id, aggregation_key, title, status, severity, alert_count,
-                             created_at, updated_at, last_alert_at, payload
+                             created_at, updated_at, last_alert_at, payload, version
                          ) values (
                              source.id, source.aggregation_key, source.title, source.status,
                              source.severity, source.alert_count, source.created_at,
-                             source.updated_at, source.last_alert_at, source.payload
+                             source.updated_at, source.last_alert_at, source.payload, source.version
                          )
                          """)) {
                 bindIncidentUpsert(statement, record);
-                statement.executeUpdate();
+                int affectedRows = statement.executeUpdate();
+                try (PreparedStatement versionStatement = connection.prepareStatement(
+                        "select version from incidents where id = ?")) {
+                    versionStatement.setString(1, record.getId());
+                    try (ResultSet resultSet = versionStatement.executeQuery()) {
+                        if (!resultSet.next()) {
+                            throw new IllegalStateException("保存 JDBC Incident 后未找到记录: " + record.getId());
+                        }
+                        long persistedVersion = resultSet.getLong(1);
+                        boolean inserted = persistedVersion == record.getVersion();
+                        boolean updated = persistedVersion == record.getVersion() + 1;
+                        if (affectedRows == 0 || (!inserted && !updated)) {
+                            throw new IllegalStateException("Incident 更新冲突: " + record.getId());
+                        }
+                        record.setVersion(persistedVersion);
+                    }
+                }
                 incidentAlertRepository.saveSnapshot(
                         connection, record.getId(), record.getAlertPayloads(), record.getLastAlertAt());
                 for (var run : record.getDiagnosisRuns()) {
@@ -253,7 +465,7 @@ public class IncidentStore {
         try (Connection connection = openConnection();
              PreparedStatement statement = connection.prepareStatement("""
                      select id, aggregation_key, title, status, severity, alert_count,
-                            created_at, updated_at, last_alert_at
+                            version, created_at, updated_at, last_alert_at
                      from incidents where id = ?
                      """)) {
             statement.setString(1, incidentId);
@@ -274,7 +486,7 @@ public class IncidentStore {
              PreparedStatement statement = connection.prepareStatement(
                      """
                      select id, aggregation_key, title, status, severity, alert_count,
-                            created_at, updated_at, last_alert_at
+                            version, created_at, updated_at, last_alert_at
                      from incidents order by updated_at desc
                      """)) {
             try (ResultSet resultSet = statement.executeQuery()) {
@@ -294,7 +506,7 @@ public class IncidentStore {
         try (Connection connection = openConnection();
              PreparedStatement statement = connection.prepareStatement("""
                      select id, aggregation_key, title, status, severity, alert_count,
-                            created_at, updated_at, last_alert_at
+                            version, created_at, updated_at, last_alert_at
                      from incidents
                      where aggregation_key = ?
                      order by updated_at desc
@@ -323,6 +535,7 @@ public class IncidentStore {
         statement.setLong(8, record.getUpdatedAt());
         statement.setLong(9, record.getLastAlertAt());
         statement.setString(10, "{}");
+        statement.setLong(11, record.getVersion());
     }
 
     private IncidentRecord readIncidentPayload(String payload) throws IOException {
@@ -345,6 +558,7 @@ public class IncidentStore {
         record.setStatus(resultSet.getString("status"));
         record.setSeverity(resultSet.getString("severity"));
         record.setAlertCount(resultSet.getInt("alert_count"));
+        record.setVersion(resultSet.getLong("version"));
         record.setCreatedAt(resultSet.getLong("created_at"));
         record.setUpdatedAt(resultSet.getLong("updated_at"));
         record.setLastAlertAt(resultSet.getLong("last_alert_at"));

@@ -6,7 +6,10 @@ import org.example.dto.DiagnosisRunRecord;
 import org.example.dto.IncidentRecord;
 import org.example.service.AiOpsService;
 import org.example.service.AlertService;
+import org.example.service.AlertIdentity;
 import org.example.service.IncidentService;
+import org.example.service.IncidentStore;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.Test;
 import org.springframework.ai.tool.ToolCallbackProvider;
 import org.springframework.http.HttpStatus;
@@ -42,11 +45,12 @@ class WebhookControllerTest {
         run.setIncidentId("incident-1");
 
         AlertPayload payload = alertPayload();
-        when(incidentService.recordAlert(payload)).thenReturn(incident);
-        when(alertService.storeAlert(payload, "incident-1")).thenReturn("alert-1");
+        String alertId = AlertIdentity.id(payload, new ObjectMapper());
+        when(incidentService.recordAlertWithStatus(any(), any()))
+                .thenReturn(new IncidentStore.RecordAlertResult(incident, true));
         when(incidentService.buildAlertContext(incident)).thenReturn("告警上下文");
         when(incidentService.createDiagnosisRunAndEnqueue(
-                "incident-1", "告警上下文", "alert-1")).thenReturn(run);
+                "incident-1", "告警上下文", alertId)).thenReturn(run);
 
         WebhookController controller = new WebhookController();
         ReflectionTestUtils.setField(controller, "alertService", alertService);
@@ -55,7 +59,7 @@ class WebhookControllerTest {
 
         assertEquals(HttpStatus.OK, response.getStatusCode());
         verify(incidentService).createDiagnosisRunAndEnqueue(
-                "incident-1", "告警上下文", "alert-1");
+                "incident-1", "告警上下文", alertId);
         verify(aiOpsService, never()).executeAiOpsAnalysis(any(), any(), any(), any(), any());
     }
 
@@ -77,8 +81,9 @@ class WebhookControllerTest {
         reused.setReusedFromRunId("run-original");
 
         AlertPayload payload = alertPayload();
-        when(incidentService.recordAlert(payload)).thenReturn(incident);
-        when(alertService.storeAlert(payload, "incident-1")).thenReturn("alert-1");
+        String alertId = AlertIdentity.id(payload, new ObjectMapper());
+        when(incidentService.recordAlertWithStatus(any(), any()))
+                .thenReturn(new IncidentStore.RecordAlertResult(incident, true));
         when(incidentService.buildAlertContext(incident)).thenReturn("告警上下文");
         when(incidentService.createReusedDiagnosisRunIfAvailable("incident-1", "告警上下文"))
                 .thenReturn(Optional.of(reused));
@@ -91,7 +96,7 @@ class WebhookControllerTest {
 
         assertEquals(HttpStatus.OK, response.getStatusCode());
         assertEquals("Alert received and reused existing diagnosis report.", response.getBody());
-        verify(alertService).storeReport("alert-1", "# 复用报告");
+        verify(alertService).storeReport(alertId, "# 复用报告");
         verify(incidentService, never()).createDiagnosisRunAndEnqueue(eq("incident-1"), any(), any());
         verify(aiOpsService, never()).executeAiOpsAnalysis(any(), any(), any(), any(), any());
     }

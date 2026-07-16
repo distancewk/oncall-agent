@@ -9,12 +9,15 @@ import org.example.dto.DiagnosisRunRecord;
 import org.example.dto.IncidentRecord;
 import org.springframework.ai.tool.ToolCallback;
 import org.springframework.ai.tool.ToolCallbackProvider;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.lang.Nullable;
 import org.springframework.stereotype.Service;
 
 import java.util.List;
 import java.util.Optional;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.Executor;
 
 @Service
 public class DiagnosisJobHandler implements BackgroundJobHandler {
@@ -28,6 +31,30 @@ public class DiagnosisJobHandler implements BackgroundJobHandler {
     private final MetricTrendPrefetchService metricTrendPrefetchService;
     private final BackgroundJobRepository jobRepository;
     private final AlertService alertService;
+    private final Executor diagnosisPrefetchExecutor;
+
+    @Autowired
+    public DiagnosisJobHandler(ObjectMapper objectMapper,
+                               IncidentService incidentService,
+                               AiOpsService aiOpsService,
+                               @Qualifier("dashScopeChatModelAiOps") DashScopeChatModel chatModel,
+                               @Nullable ToolCallbackProvider tools,
+                               @Nullable IncidentCaseService incidentCaseService,
+                               @Nullable MetricTrendPrefetchService metricTrendPrefetchService,
+                               BackgroundJobRepository jobRepository,
+                               @Nullable AlertService alertService,
+                               @Qualifier("diagnosisPrefetchExecutor") @Nullable Executor diagnosisPrefetchExecutor) {
+        this.objectMapper = objectMapper;
+        this.incidentService = incidentService;
+        this.aiOpsService = aiOpsService;
+        this.chatModel = chatModel;
+        this.tools = tools;
+        this.incidentCaseService = incidentCaseService;
+        this.metricTrendPrefetchService = metricTrendPrefetchService;
+        this.jobRepository = jobRepository;
+        this.alertService = alertService;
+        this.diagnosisPrefetchExecutor = diagnosisPrefetchExecutor == null ? Runnable::run : diagnosisPrefetchExecutor;
+    }
 
     public DiagnosisJobHandler(ObjectMapper objectMapper,
                                IncidentService incidentService,
@@ -38,15 +65,8 @@ public class DiagnosisJobHandler implements BackgroundJobHandler {
                                @Nullable MetricTrendPrefetchService metricTrendPrefetchService,
                                BackgroundJobRepository jobRepository,
                                @Nullable AlertService alertService) {
-        this.objectMapper = objectMapper;
-        this.incidentService = incidentService;
-        this.aiOpsService = aiOpsService;
-        this.chatModel = chatModel;
-        this.tools = tools;
-        this.incidentCaseService = incidentCaseService;
-        this.metricTrendPrefetchService = metricTrendPrefetchService;
-        this.jobRepository = jobRepository;
-        this.alertService = alertService;
+        this(objectMapper, incidentService, aiOpsService, chatModel, tools, incidentCaseService,
+                metricTrendPrefetchService, jobRepository, alertService, Runnable::run);
     }
 
     @Override
@@ -73,11 +93,15 @@ public class DiagnosisJobHandler implements BackgroundJobHandler {
         if (cancelled(job)) {
             return;
         }
-        context = prefetchSimilarCases(incident, run, context);
-        if (cancelled(job)) {
-            return;
+        String baseContext = context;
+        CompletableFuture<String> similarCases = CompletableFuture.supplyAsync(
+                () -> prefetchSimilarCases(incident, run, baseContext), diagnosisPrefetchExecutor);
+        CompletableFuture<String> metricTrends = CompletableFuture.supplyAsync(
+                () -> prefetchMetricTrends(incident, run, baseContext), diagnosisPrefetchExecutor);
+        context = mergePrefetchContexts(baseContext, similarCases, metricTrends);
+        if (!context.equals(baseContext)) {
+            incidentService.updateRunAlertContext(incident.getId(), run.getRunId(), context);
         }
-        context = prefetchMetricTrends(incident, run, context);
         if (cancelled(job)) {
             return;
         }
@@ -114,9 +138,6 @@ public class DiagnosisJobHandler implements BackgroundJobHandler {
             return context;
         }
         String enriched = incidentCaseService.prefetchAndAppend(incident, run, context);
-        if (!enriched.equals(context)) {
-            incidentService.updateRunAlertContext(incident.getId(), run.getRunId(), enriched);
-        }
         return enriched;
     }
 
@@ -126,10 +147,35 @@ public class DiagnosisJobHandler implements BackgroundJobHandler {
             return context;
         }
         String enriched = metricTrendPrefetchService.prefetchAndAppend(incident, run, context);
-        if (!enriched.equals(context)) {
-            incidentService.updateRunAlertContext(incident.getId(), run.getRunId(), enriched);
-        }
         return enriched;
+    }
+
+    private String mergePrefetchContexts(String baseContext,
+                                         CompletableFuture<String> similarCases,
+                                         CompletableFuture<String> metricTrends) {
+        String base = baseContext == null ? "" : baseContext;
+        StringBuilder merged = new StringBuilder(base);
+        appendPrefetchDelta(merged, base, awaitPrefetch(similarCases, base));
+        appendPrefetchDelta(merged, base, awaitPrefetch(metricTrends, base));
+        return merged.toString();
+    }
+
+    private String awaitPrefetch(CompletableFuture<String> future, String fallback) {
+        try {
+            return future.join();
+        } catch (RuntimeException e) {
+            return fallback;
+        }
+    }
+
+    private void appendPrefetchDelta(StringBuilder merged, String base, String enriched) {
+        if (enriched == null || enriched.equals(base)) {
+            return;
+        }
+        String delta = enriched.startsWith(base) ? enriched.substring(base.length()) : enriched;
+        if (!delta.isBlank()) {
+            merged.append(delta);
+        }
     }
 
     private DiagnosisRunRecord findRun(String incidentId, String runId) {

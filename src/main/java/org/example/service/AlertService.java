@@ -9,8 +9,13 @@ import org.springframework.stereotype.Service;
 
 import javax.sql.DataSource;
 import java.util.List;
-import java.util.UUID;
+import java.util.concurrent.ArrayBlockingQueue;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.ThreadPoolExecutor;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.CopyOnWriteArrayList;
+import jakarta.annotation.PreDestroy;
 
 @Service
 public class AlertService {
@@ -18,13 +23,22 @@ public class AlertService {
     private static final Logger LOGGER = LoggerFactory.getLogger(AlertService.class);
 
     private final IncidentAlertRepository repository;
+    private final ObjectMapper objectMapper;
     private final List<AlertListener> listeners = new CopyOnWriteArrayList<>();
+    private final ExecutorService listenerExecutor = new ThreadPoolExecutor(
+            2, 4, 30, TimeUnit.SECONDS, new ArrayBlockingQueue<>(256),
+            runnable -> {
+                Thread thread = new Thread(runnable, "alert-listener-dispatch");
+                thread.setDaemon(true);
+                return thread;
+            }, new ThreadPoolExecutor.AbortPolicy());
 
     @Autowired
     public AlertService(DataSource dataSource, ObjectMapper objectMapper,
                         IncidentSchemaMigrator schemaMigrator) {
         schemaMigrator.migrate();
         this.repository = new IncidentAlertRepository(dataSource, objectMapper);
+        this.objectMapper = objectMapper;
     }
 
     public String storeAlert(AlertPayload payload) {
@@ -32,7 +46,10 @@ public class AlertService {
     }
 
     public String storeAlert(AlertPayload payload, String incidentId) {
-        String alertId = UUID.randomUUID().toString().substring(0, 8);
+        String alertId = AlertIdentity.id(payload, objectMapper);
+        if (repository.findStoredAlert(alertId) != null) {
+            return alertId;
+        }
         long receivedAt = System.currentTimeMillis();
         repository.appendStoredAlert(alertId, incidentId, payload, receivedAt);
         StoredAlert storedAlert = toStoredAlert(
@@ -89,11 +106,22 @@ public class AlertService {
     private void notifyListeners(StoredAlert alert) {
         for (AlertListener listener : listeners) {
             try {
-                listener.onAlert(alert);
-            } catch (Exception e) {
-                LOGGER.warn("通知告警监听器失败", e);
+                listenerExecutor.execute(() -> {
+                    try {
+                        listener.onAlert(alert);
+                    } catch (Exception e) {
+                        LOGGER.warn("通知告警监听器失败, type: {}", e.getClass().getSimpleName());
+                    }
+                });
+            } catch (RejectedExecutionException e) {
+                LOGGER.warn("告警监听器队列已满，跳过本次广播");
             }
         }
+    }
+
+    @PreDestroy
+    void shutdownListenerExecutor() {
+        listenerExecutor.shutdownNow();
     }
 
     public interface AlertListener {

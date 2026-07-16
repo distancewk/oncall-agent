@@ -6,7 +6,12 @@ import org.springframework.scheduling.annotation.EnableAsync;
 import org.springframework.scheduling.concurrent.ThreadPoolTaskExecutor;
 
 import java.util.concurrent.Executor;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ThreadPoolExecutor;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ArrayBlockingQueue;
+import java.util.concurrent.TimeUnit;
 
 @Configuration
 @EnableAsync
@@ -39,5 +44,31 @@ public class ThreadPoolConfig {
         executor.setThreadNamePrefix("memory-task-");
         executor.initialize();
         return executor;
+    }
+
+    @Bean(destroyMethod = "shutdownNow")
+    public ScheduledExecutorService memoryFlushScheduler() {
+        return Executors.newSingleThreadScheduledExecutor(runnable -> {
+            Thread thread = new Thread(runnable, "memory-flush-scheduler");
+            thread.setDaemon(true);
+            return thread;
+        });
+    }
+
+    @Bean(name = "diagnosisPrefetchExecutor", destroyMethod = "shutdownNow")
+    public ExecutorService diagnosisPrefetchExecutor(AppJobProperties properties) {
+        int concurrency = Math.max(1, properties.getDiagnosisPrefetchConcurrency());
+        return new ThreadPoolExecutor(
+                concurrency,
+                concurrency,
+                0L,
+                TimeUnit.MILLISECONDS,
+                new ArrayBlockingQueue<>(32),
+                runnable -> {
+                    Thread thread = new Thread(runnable, "diagnosis-prefetch-");
+                    thread.setDaemon(true);
+                    return thread;
+                },
+                new ThreadPoolExecutor.CallerRunsPolicy());
     }
 }

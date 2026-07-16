@@ -40,6 +40,6 @@ class SystemDependencyControllerTest {
                 .andExpect(jsonPath("$.data[0].name").value("prometheus"))
                 .andExpect(jsonPath("$.data[0].state").value("OPEN"))
                 .andExpect(jsonPath("$.data[0].failureRate").value(66.7))
-                .andExpect(jsonPath("$.data[0].lastError").value("connection refused"));
+                .andExpect(jsonPath("$.data[0].lastError").value("依赖暂时不可用"));
     }
 }

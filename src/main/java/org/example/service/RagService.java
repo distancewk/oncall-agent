@@ -78,7 +78,7 @@ public class RagService {
      */
     public void queryStream(String question, List<Map<String, String>> history, StreamCallback callback) {
         try {
-            logger.info("收到 RAG 流式查询: {}", question);
+            logger.info("收到 RAG 流式查询, questionLength: {}", question == null ? 0 : question.length());
 
             // 1. 从向量数据库检索相关文档
             List<VectorSearchService.SearchResult> searchResults = 
@@ -205,7 +205,7 @@ public class RagService {
                     String content = firstChoice.getMessage().getContent();
 
                     if (content != null && !content.isEmpty()) {
-                        logger.debug("收到AI模型内容块: {}", content);
+                        logger.debug("收到AI模型内容块, length: {}", content.length());
 
                         // 对于 thinking 模型，content 可能包含思考过程和最终答案
                         // 这里我们将所有内容都作为答案返回

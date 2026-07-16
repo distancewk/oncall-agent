@@ -52,8 +52,12 @@ public class IncidentAlertRepository {
         }
         for (int index = 0; index < payloads.size(); index++) {
             AlertPayload payload = payloads.get(index);
+            String serializedPayload = objectMapper.writeValueAsString(payload);
+            if (payloadExists(connection, incidentId, serializedPayload)) {
+                continue;
+            }
             String rowId = "ial-" + UUID.nameUUIDFromBytes(
-                    (incidentId + "|" + index + "|" + objectMapper.writeValueAsString(payload))
+                    (incidentId + "|" + index + "|" + serializedPayload)
                             .getBytes(StandardCharsets.UTF_8));
             try (PreparedStatement statement = connection.prepareStatement("""
                     merge into incident_alerts as target
@@ -74,9 +78,21 @@ public class IncidentAlertRepository {
                 statement.setString(1, rowId);
                 statement.setString(2, incidentId);
                 statement.setString(3, null);
-                statement.setString(4, objectMapper.writeValueAsString(payload));
+                statement.setString(4, serializedPayload);
                 statement.setLong(5, receivedAt + index);
                 statement.executeUpdate();
+            }
+        }
+    }
+
+    private boolean payloadExists(Connection connection, String incidentId, String payload)
+            throws Exception {
+        try (PreparedStatement statement = connection.prepareStatement(
+                "select 1 from incident_alerts where incident_id = ? and payload = ? limit 1")) {
+            statement.setString(1, incidentId);
+            statement.setString(2, payload);
+            try (ResultSet resultSet = statement.executeQuery()) {
+                return resultSet.next();
             }
         }
     }

@@ -37,7 +37,7 @@ class ConfigurationContractTest {
         assertTrue(yaml.contains("mock-enabled: ${PROMETHEUS_MOCK_ENABLED:false}"));
         assertTrue(yaml.contains("mock-enabled: ${CLS_MOCK_ENABLED:false}"));
         assertTrue(yaml.contains("search-ef: ${RAG_SEARCH_EF:64}"));
-        assertTrue(yaml.contains("enabled: ${APP_SECURITY_ENABLED:false}"));
+        assertTrue(yaml.contains("enabled: ${APP_SECURITY_ENABLED:true}"));
         assertTrue(yaml.contains("webhook-secret: ${APP_WEBHOOK_SECRET:}"));
         assertTrue(yaml.contains("retry-max-attempts: ${APP_RESILIENCE_RETRY_MAX_ATTEMPTS:1}"));
         assertTrue(yaml.contains("retry-max-attempts: ${APP_PROMETHEUS_RETRY_MAX_ATTEMPTS:2}"));
@@ -223,8 +223,8 @@ class ConfigurationContractTest {
         assertTrue(compose.contains("POSTGRES_DB: ${POSTGRES_DB:-superbizagent}"));
         assertTrue(compose.contains("APP_INCIDENT_JDBC_URL: ${APP_INCIDENT_JDBC_URL:-jdbc:postgresql://postgres:5432/superbizagent}"));
         assertTrue(compose.contains("APP_INCIDENT_JDBC_USERNAME: ${APP_INCIDENT_JDBC_USERNAME:-superbizagent}"));
-        assertTrue(compose.contains("PROMETHEUS_MOCK_ENABLED: ${PROMETHEUS_MOCK_ENABLED:-true}"));
-        assertTrue(compose.contains("CLS_MOCK_ENABLED: ${CLS_MOCK_ENABLED:-true}"));
+        assertTrue(compose.contains("PROMETHEUS_MOCK_ENABLED: ${PROMETHEUS_MOCK_ENABLED:-false}"));
+        assertTrue(compose.contains("CLS_MOCK_ENABLED: ${CLS_MOCK_ENABLED:-false}"));
     }
 
     @Test

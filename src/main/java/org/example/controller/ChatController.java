@@ -11,6 +11,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.Getter;
 import lombok.Setter;
 import org.example.config.AppMemoryProperties;
+import org.example.config.AppChatProperties;
 import org.example.dto.ApiResponse;
 import org.example.dto.ChatSessionRecord;
 import org.example.dto.ChatSessionSummary;
@@ -20,6 +21,7 @@ import org.example.service.AlertService;
 import org.example.service.ChatService;
 import org.example.service.DependencyGuard;
 import org.example.service.MemoryLifecycleService;
+import org.example.service.MemoryRelevanceGate;
 import org.example.service.SessionManager;
 import org.example.service.VectorSearchService;
 import org.slf4j.Logger;
@@ -82,7 +84,13 @@ public class ChatController {
     private AppMemoryProperties appMemoryProperties;
 
     @Autowired(required = false)
+    private AppChatProperties appChatProperties;
+
+    @Autowired(required = false)
     private MemoryLifecycleService memoryLifecycleService;
+
+    @Autowired(required = false)
+    private MemoryRelevanceGate memoryRelevanceGate;
 
     @Autowired(required = false)
     private ObjectMapper objectMapper = new ObjectMapper();
@@ -97,7 +105,8 @@ public class ChatController {
     @PostMapping("/chat")
     public ResponseEntity<ApiResponse<ChatResponse>> chat(@RequestBody ChatRequest request) {
         try {
-            logger.info("收到对话请求 - SessionId: {}, Question: {}", request.getId(), request.getQuestion());
+            logger.info("收到对话请求 - SessionId: {}, questionLength: {}", request.getId(),
+                    request.getQuestion() == null ? 0 : request.getQuestion().length());
 
             // 参数校验
             if (request.getQuestion() == null || request.getQuestion().trim().isEmpty()) {
@@ -126,11 +135,14 @@ public class ChatController {
             // 构建系统提示词（包含历史消息）
             String systemPrompt = chatService.buildSystemPrompt(history, privateMemories);
             
-            // 创建 ReactAgent
-            ReactAgent agent = chatService.createReactAgent(chatModel, systemPrompt);
-            
-            // 执行对话
-            String fullAnswer = chatService.executeChat(agent, request.getQuestion());
+            String fullAnswer;
+            if (shouldUseDirectModel(request.getQuestion())) {
+                logger.debug("普通问题走直接模型快速路径, questionLength: {}", request.getQuestion().length());
+                fullAnswer = chatService.executeDirectChat(chatModel, systemPrompt, request.getQuestion());
+            } else {
+                ReactAgent agent = chatService.createReactAgent(chatModel, systemPrompt);
+                fullAnswer = chatService.executeChat(agent, request.getQuestion());
+            }
             
             // 更新会话历史
             session.addMessage(request.getQuestion(), fullAnswer, sessionManager);
@@ -170,7 +182,7 @@ public class ChatController {
 
         } catch (Exception e) {
             logger.error("清空会话历史失败", e);
-            return ResponseEntity.ok(ApiResponse.error(e.getMessage()));
+            return ResponseEntity.ok(ApiResponse.error("清空会话失败，请稍后重试"));
         }
     }
 
@@ -196,7 +208,8 @@ public class ChatController {
 
         executor.execute(() -> {
             try {
-                logger.info("收到 ReactAgent 对话请求 - SessionId: {}, Question: {}", request.getId(), request.getQuestion());
+                logger.info("收到 ReactAgent 对话请求 - SessionId: {}, questionLength: {}",
+                        request.getId(), request.getQuestion() == null ? 0 : request.getQuestion().length());
 
                 // 获取或创建会话
                 SessionManager.SessionInfo session = sessionManager.getOrCreateSession(request.getId());
@@ -258,7 +271,7 @@ public class ChatController {
                                                 .name("message")
                                                 .data(SseMessage.content(chunk), MediaType.APPLICATION_JSON));
                                         
-                                        logger.info("发送流式内容: {}", chunk);
+                                        logger.debug("发送流式内容块, length: {}", chunk.length());
                                     }
                                 } else if (type == OutputType.AGENT_MODEL_FINISHED) {
                                     // 模型推理完成
@@ -435,7 +448,7 @@ public class ChatController {
                 logger.error("AI Ops 多 Agent 协作失败", e);
                 try {
                     emitter.send(SseEmitter.event().name("message")
-                            .data(SseMessage.error("AI Ops 流程失败: " + e.getMessage()), MediaType.APPLICATION_JSON));
+                            .data(SseMessage.error("服务暂时不可用，请稍后重试", requestId()), MediaType.APPLICATION_JSON));
                 } catch (IOException ex) {
                     logger.error("发送错误消息失败", ex);
                 }
@@ -468,7 +481,7 @@ public class ChatController {
 
         } catch (Exception e) {
             logger.error("获取会话信息失败", e);
-            return ResponseEntity.ok(ApiResponse.error(e.getMessage()));
+            return ResponseEntity.ok(ApiResponse.error("获取会话失败，请稍后重试"));
         }
     }
 
@@ -506,6 +519,12 @@ public class ChatController {
         if (!enabled) {
             return List.of();
         }
+        boolean gatingEnabled = appMemoryProperties != null && appMemoryProperties.isPrivateRecallGatingEnabled();
+        if (gatingEnabled && memoryRelevanceGate != null && !memoryRelevanceGate.shouldRecall(question)) {
+            logger.debug("跳过与长期记忆无关的私人记忆召回, questionLength: {}",
+                    question == null ? 0 : question.length());
+            return List.of();
+        }
         int memoryTopK = appMemoryProperties == null ? 3 : Math.max(1, appMemoryProperties.getPrivateRecallTopK());
         try {
             List<VectorSearchService.SearchResult> results =
@@ -515,7 +534,7 @@ public class ChatController {
             }
             return filterRecallResults(results);
         } catch (RuntimeException e) {
-            logger.warn("检索私人长期记忆失败，继续普通对话: {}", e.getMessage());
+            logger.warn("检索私人长期记忆失败，继续普通对话, type: {}", e.getClass().getSimpleName());
             return List.of();
         }
     }
@@ -542,6 +561,20 @@ public class ChatController {
         return filtered;
     }
 
+    private boolean shouldUseDirectModel(String question) {
+        if (appChatProperties == null || !appChatProperties.isDirectModelRoutingEnabled()
+                || question == null || question.isBlank()) {
+            return false;
+        }
+        String normalized = question.toLowerCase(Locale.ROOT);
+        return !(normalized.contains("时间") || normalized.contains("几点") || normalized.contains("天气")
+                || normalized.contains("最新") || normalized.contains("新闻") || normalized.contains("联网")
+                || normalized.contains("内部") || normalized.contains("文档") || normalized.contains("知识库")
+                || normalized.contains("告警") || normalized.contains("日志") || normalized.contains("指标")
+                || normalized.contains("prometheus") || normalized.contains("搜索")
+                || normalized.contains("查询") || normalized.contains("工具") || normalized.contains("数据库"));
+    }
+
     private boolean isDeletedMemory(VectorSearchService.SearchResult result) {
         if (result.getMetadata() == null || result.getMetadata().isBlank()) {
             return false;
@@ -557,9 +590,13 @@ public class ChatController {
 
     private String errorMessage(Throwable error) {
         if (error instanceof DependencyUnavailableException unavailable) {
-            return unavailable.getErrorCode() + ": " + unavailable.getMessage();
+            return "服务暂时不可用（" + unavailable.getErrorCode() + "）";
         }
-        return error.getMessage();
+        return "服务暂时不可用，请稍后重试";
+    }
+
+    private String requestId() {
+        return java.util.UUID.randomUUID().toString();
     }
 
     private DependencyUnavailableException dashscopeDependencyError(String operation, Throwable error) {
@@ -646,6 +683,7 @@ public class ChatController {
     public static class SseMessage {
         private String type;  // content: 内容块, error: 错误, done: 完成
         private String data;
+        private String requestId;
 
         public static SseMessage content(String data) {
             SseMessage message = new SseMessage();
@@ -655,9 +693,14 @@ public class ChatController {
         }
 
         public static SseMessage error(String errorMessage) {
+            return error(errorMessage, null);
+        }
+
+        public static SseMessage error(String errorMessage, String requestId) {
             SseMessage message = new SseMessage();
             message.setType("error");
             message.setData(errorMessage);
+            message.setRequestId(requestId);
             return message;
         }
 

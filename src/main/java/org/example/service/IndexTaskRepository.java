@@ -30,9 +30,9 @@ public class IndexTaskRepository {
     public void insert(Connection connection, IndexTaskStatus status) throws SQLException {
         try (PreparedStatement statement = connection.prepareStatement("""
                 insert into index_tasks (
-                    task_id, file_name, file_path, status, message,
+                    task_id, file_name, file_path, document_id, content_hash, status, message,
                     error_message, created_at, updated_at
-                ) values (?, ?, ?, ?, ?, ?, ?, ?)
+                ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """)) {
             bind(statement, status);
             statement.executeUpdate();
@@ -91,11 +91,13 @@ public class IndexTaskRepository {
         statement.setString(1, status.getTaskId());
         statement.setString(2, status.getFileName());
         statement.setString(3, status.getFilePath());
-        statement.setString(4, status.getStatus());
-        statement.setString(5, status.getMessage());
-        statement.setString(6, status.getErrorMessage());
-        statement.setLong(7, status.getCreatedAt());
-        statement.setLong(8, status.getUpdatedAt());
+        statement.setString(4, status.getDocumentId());
+        statement.setString(5, status.getContentHash());
+        statement.setString(6, status.getStatus());
+        statement.setString(7, status.getMessage());
+        statement.setString(8, status.getErrorMessage());
+        statement.setLong(9, status.getCreatedAt());
+        statement.setLong(10, status.getUpdatedAt());
     }
 
     private IndexTaskStatus map(ResultSet resultSet) throws Exception {
@@ -103,6 +105,8 @@ public class IndexTaskRepository {
         status.setTaskId(resultSet.getString("task_id"));
         status.setFileName(resultSet.getString("file_name"));
         status.setFilePath(resultSet.getString("file_path"));
+        status.setDocumentId(resultSet.getString("document_id"));
+        status.setContentHash(resultSet.getString("content_hash"));
         status.setStatus(resultSet.getString("status"));
         status.setMessage(resultSet.getString("message"));
         status.setErrorMessage(resultSet.getString("error_message"));

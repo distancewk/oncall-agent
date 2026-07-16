@@ -2,6 +2,7 @@ package org.example.service;
 
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import org.example.dto.DiagnosisEvidence;
 import org.example.dto.DiagnosisRunRecord;
 
 import javax.sql.DataSource;
@@ -9,7 +10,9 @@ import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 
 public class DiagnosisRunRepository {
@@ -34,16 +37,16 @@ public class DiagnosisRunRepository {
     public void save(Connection connection, DiagnosisRunRecord run) throws Exception {
         try (PreparedStatement statement = connection.prepareStatement("""
                 merge into diagnosis_runs as target
-                using (values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?))
+                using (values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?))
                 as source (
                     run_id, incident_id, status, created_at, started_at, completed_at,
                     alert_context, report, error_message, current_step, progress_message,
                     current_tool, reused_from_run_id, reuse_reason, reuse_confidence,
                     reuse_validated_at, quality_score, quality_grade, quality_summary,
                     quality_issues, human_review_status, human_review_comment,
-                    human_reviewed_at, case_archived, case_document_id, case_archive_message
+                    human_reviewed_at, case_archived, case_document_id, case_archive_message, version
                 )
-                on target.run_id = source.run_id
+                on target.run_id = source.run_id and target.version = source.version
                 when matched then update set
                     status = source.status,
                     started_at = source.started_at,
@@ -75,7 +78,7 @@ public class DiagnosisRunRepository {
                     current_tool, reused_from_run_id, reuse_reason, reuse_confidence,
                     reuse_validated_at, quality_score, quality_grade, quality_summary,
                     quality_issues, human_review_status, human_review_comment,
-                    human_reviewed_at, case_archived, case_document_id, case_archive_message
+                    human_reviewed_at, case_archived, case_document_id, case_archive_message, version
                 ) values (
                     source.run_id, source.incident_id, source.status, source.created_at,
                     source.started_at, source.completed_at, source.alert_context, source.report,
@@ -85,11 +88,20 @@ public class DiagnosisRunRepository {
                     source.quality_grade, source.quality_summary, source.quality_issues,
                     source.human_review_status, source.human_review_comment,
                     source.human_reviewed_at, source.case_archived, source.case_document_id,
-                    source.case_archive_message
+                    source.case_archive_message, source.version
                 )
                 """)) {
             bind(statement, run);
             statement.executeUpdate();
+            try (PreparedStatement versionStatement = connection.prepareStatement(
+                    "select version from diagnosis_runs where run_id = ?")) {
+                versionStatement.setString(1, run.getRunId());
+                try (ResultSet resultSet = versionStatement.executeQuery()) {
+                    if (resultSet.next()) {
+                        run.setVersion(resultSet.getLong(1));
+                    }
+                }
+            }
         }
         for (var evidence : run.getEvidence()) {
             evidenceRepository.save(connection, run.getRunId(), evidence);
@@ -104,8 +116,8 @@ public class DiagnosisRunRepository {
                     current_tool, reused_from_run_id, reuse_reason, reuse_confidence,
                     reuse_validated_at, quality_score, quality_grade, quality_summary,
                     quality_issues, human_review_status, human_review_comment,
-                    human_reviewed_at, case_archived, case_document_id, case_archive_message
-                ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    human_reviewed_at, case_archived, case_document_id, case_archive_message, version
+                ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """)) {
             bind(statement, run);
             statement.executeUpdate();
@@ -135,6 +147,30 @@ public class DiagnosisRunRepository {
         } catch (Exception e) {
             throw new IllegalStateException("读取诊断运行失败: " + incidentId, e);
         }
+    }
+
+    public Map<String, List<DiagnosisRunRecord>> findByIncidentIds(Connection connection,
+                                                                     List<String> incidentIds)
+            throws Exception {
+        Map<String, List<DiagnosisRunRecord>> result = new HashMap<>();
+        if (incidentIds == null || incidentIds.isEmpty()) {
+            return result;
+        }
+        String placeholders = String.join(",", java.util.Collections.nCopies(incidentIds.size(), "?"));
+        try (PreparedStatement statement = connection.prepareStatement(
+                "select * from diagnosis_runs where incident_id in (" + placeholders
+                        + ") order by created_at, run_id")) {
+            for (int index = 0; index < incidentIds.size(); index++) {
+                statement.setString(index + 1, incidentIds.get(index));
+            }
+            try (ResultSet resultSet = statement.executeQuery()) {
+                while (resultSet.next()) {
+                    DiagnosisRunRecord run = map(resultSet);
+                    result.computeIfAbsent(run.getIncidentId(), ignored -> new ArrayList<>()).add(run);
+                }
+            }
+        }
+        return result;
     }
 
     public boolean cancelActive(Connection connection,
@@ -200,6 +236,54 @@ public class DiagnosisRunRepository {
                 return Optional.of(run);
             }
         }
+    }
+
+    public boolean updateToolState(Connection connection,
+                                   String incidentId,
+                                   String runId,
+                                   long expectedVersion,
+                                   String status,
+                                   String currentTool,
+                                   String currentStep,
+                                   String progressMessage,
+                                   long now) throws Exception {
+        try (PreparedStatement statement = connection.prepareStatement("""
+                update diagnosis_runs
+                set status = ?,
+                    started_at = case when started_at is null or started_at = 0 then ? else started_at end,
+                    current_tool = ?,
+                    current_step = ?,
+                    progress_message = ?,
+                    version = version + 1
+                where incident_id = ?
+                  and run_id = ?
+                  and version = ?
+                  and status in ('QUEUED', 'RUNNING', 'WAITING_TOOL')
+                """)) {
+            statement.setString(1, status);
+            statement.setLong(2, now);
+            statement.setString(3, currentTool);
+            statement.setString(4, currentStep);
+            statement.setString(5, progressMessage);
+            statement.setString(6, incidentId);
+            statement.setString(7, runId);
+            statement.setLong(8, expectedVersion);
+            return statement.executeUpdate() == 1;
+        }
+    }
+
+    public boolean appendToolEvidence(Connection connection,
+                                      String incidentId,
+                                      String runId,
+                                      long expectedVersion,
+                                      DiagnosisEvidence evidence) throws Exception {
+        if (!updateToolState(connection, incidentId, runId, expectedVersion,
+                "RUNNING", null, "已完成工具调用 " + evidence.getToolName(), evidence.getSummary(),
+                System.currentTimeMillis())) {
+            return false;
+        }
+        evidenceRepository.insert(connection, runId, evidence);
+        return true;
     }
 
     public Optional<DiagnosisRunRecord> failActiveStaleRun(Connection connection,
@@ -279,7 +363,8 @@ public class DiagnosisRunRepository {
         setNullableLong(statement, index++, run.getHumanReviewedAt());
         statement.setBoolean(index++, run.isCaseArchived());
         statement.setString(index++, run.getCaseDocumentId());
-        statement.setString(index, run.getCaseArchiveMessage());
+        statement.setString(index++, run.getCaseArchiveMessage());
+        statement.setLong(index, run.getVersion());
     }
 
     private DiagnosisRunRecord map(ResultSet resultSet) throws Exception {
@@ -313,6 +398,7 @@ public class DiagnosisRunRepository {
         run.setCaseArchived(resultSet.getBoolean("case_archived"));
         run.setCaseDocumentId(resultSet.getString("case_document_id"));
         run.setCaseArchiveMessage(resultSet.getString("case_archive_message"));
+        run.setVersion(resultSet.getLong("version"));
         return run;
     }
 

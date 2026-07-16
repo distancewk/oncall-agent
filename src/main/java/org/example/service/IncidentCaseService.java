@@ -105,6 +105,14 @@ public class IncidentCaseService {
     }
 
     public String prefetchAndAppend(IncidentRecord incident, DiagnosisRunRecord run, String alertContext) {
+        Optional<DiagnosisEvidence> existingEvidence = findSuccessfulEvidence(incident, run);
+        if (existingEvidence.isPresent()) {
+            DiagnosisEvidence evidence = existingEvidence.get();
+            return (alertContext == null ? "" : alertContext)
+                    + "\n\n## 相似历史故障案例\n"
+                    + "- evidence: [evidence: " + evidence.getId() + "]\n"
+                    + "- " + value(evidence.getSummary()) + "\n";
+        }
         List<VectorSearchService.SearchResult> cases;
         try {
             cases = findSimilarCases(incident, 3);
@@ -163,6 +171,19 @@ public class IncidentCaseService {
                     .append('\n');
         }
         return builder.toString();
+    }
+
+    private Optional<DiagnosisEvidence> findSuccessfulEvidence(IncidentRecord incident,
+                                                                DiagnosisRunRecord run) {
+        if (run == null || run.getEvidence() == null) {
+            return Optional.empty();
+        }
+        String expectedParams = buildSearchParams(incident, 3);
+        return run.getEvidence().stream()
+                .filter(evidence -> evidence != null && evidence.isSuccess())
+                .filter(evidence -> TOOL_SEARCH_SIMILAR_CASES.equals(evidence.getToolName()))
+                .filter(evidence -> expectedParams.equals(evidence.getQueryParams()))
+                .findFirst();
     }
 
     private CaseDocument buildCaseDocument(IncidentRecord incident, DiagnosisRunRecord run) {

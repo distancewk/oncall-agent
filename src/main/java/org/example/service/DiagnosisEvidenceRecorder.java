@@ -66,7 +66,11 @@ public class DiagnosisEvidenceRecorder {
 
     public <T> T withRun(String incidentId, String runId, RunSupplier<T> supplier) throws Exception {
         ActiveRun previous = activeRun.get();
-        activeRun.set(new ActiveRun(incidentId, runId));
+        Optional<DiagnosisRunRecord> snapshot = incidentService.getDiagnosisRun(incidentId, runId);
+        activeRun.set(new ActiveRun(incidentId, runId,
+                snapshot.map(DiagnosisRunRecord::getVersion).orElse(-1L),
+                snapshot.map(DiagnosisRunRecord::getEvidence).map(ArrayList::new).orElseGet(ArrayList::new),
+                snapshot.isPresent()));
         try {
             return supplier.get();
         } finally {
@@ -97,7 +101,9 @@ public class DiagnosisEvidenceRecorder {
             return recordSkippedToolCall(run, safeToolName, safeQueryParams, safeTimeRange, message, errorCode);
         }
 
-        markWaiting(run, safeToolName, safeQueryParams);
+        if (!markWaiting(run, safeToolName, safeQueryParams)) {
+            throw new IllegalStateException("诊断工具状态写入失败");
+        }
 
         String rawResult = null;
         boolean success = false;
@@ -134,7 +140,9 @@ public class DiagnosisEvidenceRecorder {
         evidence.setAttemptCount(attemptCount);
         evidence.setDurationMs(durationMs);
         evidence.setRetryable(isRetryableTool(safeToolName) || attemptCount > 1);
-        addEvidence(run, evidence);
+        if (!addEvidence(run, evidence)) {
+            throw new IllegalStateException("诊断证据写入失败");
+        }
 
         if (runtimeFailure != null) {
             throw runtimeFailure;
@@ -260,6 +268,9 @@ public class DiagnosisEvidenceRecorder {
     }
 
     private List<DiagnosisEvidence> currentEvidence(ActiveRun run) {
+        if (run.incremental()) {
+            return new ArrayList<>(run.evidence());
+        }
         try {
             Optional<List<DiagnosisRunRecord>> runs = incidentService.getDiagnosisRuns(run.incidentId());
             if (runs == null || runs.isEmpty()) {
@@ -408,22 +419,67 @@ public class DiagnosisEvidenceRecorder {
         }
     }
 
-    private void markWaiting(ActiveRun run, String toolName, String queryParams) {
+    private boolean markWaiting(ActiveRun run, String toolName, String queryParams) {
+        if (run.incremental()) {
+            for (int attempt = 0; attempt < 3; attempt++) {
+                long nextVersion = incidentService.updateRunToolStateIncremental(
+                        run.incidentId(), run.runId(), run.version(), "WAITING_TOOL", toolName,
+                        "正在调用工具 " + toolName, queryParams);
+                if (nextVersion > run.version()) {
+                    run.setVersion(nextVersion);
+                    return true;
+                }
+                if (!refresh(run)) {
+                    return false;
+                }
+            }
+            return false;
+        }
         try {
             incidentService.markRunWaitingTool(run.incidentId(), run.runId(), toolName, queryParams);
+            return true;
         } catch (RuntimeException e) {
             logger.warn("记录工具等待状态失败, incidentId: {}, runId: {}, tool: {}",
                     run.incidentId(), run.runId(), toolName, e);
+            return false;
         }
     }
 
-    private void addEvidence(ActiveRun run, DiagnosisEvidence evidence) {
+    private boolean addEvidence(ActiveRun run, DiagnosisEvidence evidence) {
+        if (run.incremental()) {
+            for (int attempt = 0; attempt < 3; attempt++) {
+                long nextVersion = incidentService.appendToolEvidenceIncremental(
+                        run.incidentId(), run.runId(), run.version(), evidence);
+                if (nextVersion > run.version()) {
+                    run.setVersion(nextVersion);
+                    run.evidence().add(evidence);
+                    return true;
+                }
+                if (!refresh(run)) {
+                    return false;
+                }
+            }
+            return false;
+        }
         try {
             incidentService.addToolEvidence(run.incidentId(), run.runId(), evidence);
+            return true;
         } catch (RuntimeException e) {
             logger.warn("保存诊断工具证据失败, incidentId: {}, runId: {}, evidenceId: {}",
                     run.incidentId(), run.runId(), evidence.getId(), e);
+            return false;
         }
+    }
+
+    private boolean refresh(ActiveRun run) {
+        Optional<DiagnosisRunRecord> snapshot = incidentService.getDiagnosisRun(run.incidentId(), run.runId());
+        if (snapshot.isEmpty()) {
+            return false;
+        }
+        run.setVersion(snapshot.get().getVersion());
+        run.evidence().clear();
+        run.evidence().addAll(snapshot.get().getEvidence());
+        return true;
     }
 
     private boolean detectSuccess(String rawResult) {
@@ -551,7 +607,31 @@ public class DiagnosisEvidenceRecorder {
         String get() throws Exception;
     }
 
-    private record ActiveRun(String incidentId, String runId) {
+    private static final class ActiveRun {
+        private final String incidentId;
+        private final String runId;
+        private final List<DiagnosisEvidence> evidence;
+        private final boolean incremental;
+        private long version;
+
+        private ActiveRun(String incidentId,
+                          String runId,
+                          long version,
+                          List<DiagnosisEvidence> evidence,
+                          boolean incremental) {
+            this.incidentId = incidentId;
+            this.runId = runId;
+            this.version = version;
+            this.evidence = evidence;
+            this.incremental = incremental;
+        }
+
+        private String incidentId() { return incidentId; }
+        private String runId() { return runId; }
+        private List<DiagnosisEvidence> evidence() { return evidence; }
+        private boolean incremental() { return incremental; }
+        private long version() { return version; }
+        private void setVersion(long version) { this.version = version; }
     }
 
     private class RecordingToolCallback implements ToolCallback {

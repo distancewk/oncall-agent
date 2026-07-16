@@ -73,7 +73,7 @@ class IncidentControllerTest {
         summary.setLatestRunQualityGrade("HIGH");
         summary.setLatestRunHumanReviewStatus("CONFIRMED");
 
-        when(incidentService.listIncidents("OPEN", "critical", "COMPLETED", "payment", "CONFIRMED"))
+        when(incidentService.listIncidents("OPEN", "critical", "COMPLETED", "payment", "CONFIRMED", 0, 100))
                 .thenReturn(List.of(summary));
 
         mockMvc.perform(get("/api/incidents")

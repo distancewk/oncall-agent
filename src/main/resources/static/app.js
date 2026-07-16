@@ -30,9 +30,54 @@ class SuperBizAgentApp {
         this.initMarkdown();
         this.checkAndSetCentered();
         this.renderChatHistory();
-        this.loadServerChatHistories();
-        this.connectAlertSSE();
         this.setupMobileSidebar();
+        this.bootstrapSecurity();
+    }
+
+    async bootstrapSecurity() {
+        try {
+            const probe = await fetch(`${this.apiBaseUrl}/chat/sessions`, {
+                credentials: 'include'
+            });
+            if (probe.status === 401) {
+                const apiKey = window.prompt('请输入 API Token 以登录智能OnCall助手');
+                if (!apiKey) {
+                    this.addMessage('assistant', '未完成登录，暂时无法访问服务端功能。');
+                    return;
+                }
+                const login = await fetch(`${this.apiBaseUrl}/auth/login`, {
+                    method: 'POST',
+                    credentials: 'include',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ apiKey })
+                });
+                if (!login.ok) {
+                    this.addMessage('assistant', '登录失败，请检查 API Token。');
+                    return;
+                }
+            } else if (!probe.ok) {
+                this.addMessage('assistant', '服务暂时不可用，请稍后重试。');
+                return;
+            }
+            await this.loadServerChatHistories();
+            this.connectAlertSSE();
+        } catch (error) {
+            console.warn('认证初始化失败:', error);
+        }
+    }
+
+    apiFetch(url, options = {}) {
+        const requestOptions = { ...options, credentials: 'include' };
+        const method = (requestOptions.method || 'GET').toUpperCase();
+        const headers = new Headers(requestOptions.headers || {});
+        if (['POST', 'PUT', 'PATCH', 'DELETE'].includes(method)) {
+            const csrf = document.cookie.split('; ').find(item => item.startsWith('SB_CSRF='));
+            if (csrf) {
+                headers.set('X-CSRF-Token', decodeURIComponent(csrf.substring('SB_CSRF='.length)));
+            }
+        }
+        requestOptions.headers = headers;
+        return fetch(url, requestOptions);
     }
 
     // 动态检测API基础URL
@@ -530,19 +575,26 @@ class SuperBizAgentApp {
         if (this.chatHistories.length === 0) return;
 
         this.chatHistories.forEach((history) => {
+            if (typeof history.id !== 'string' || !/^[A-Za-z0-9_-]{1,64}$/.test(history.id)) {
+                console.warn('跳过非法历史会话 ID');
+                return;
+            }
             const historyItem = document.createElement('div');
             historyItem.className = 'history-item';
             historyItem.dataset.historyId = history.id;
-            historyItem.innerHTML = `
-                <div class="history-item-content">
-                    <span class="history-item-title">${this.escapeHtml(history.title)}</span>
-                </div>
-                <button class="history-item-delete" data-history-id="${history.id}" title="删除">
-                    <svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
-                        <path d="M18 6L6 18M6 6L18 18" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
-                    </svg>
-                </button>
-            `;
+            const content = document.createElement('div');
+            content.className = 'history-item-content';
+            const title = document.createElement('span');
+            title.className = 'history-item-title';
+            title.textContent = history.title || '新对话';
+            content.appendChild(title);
+            const deleteBtn = document.createElement('button');
+            deleteBtn.className = 'history-item-delete';
+            deleteBtn.dataset.historyId = history.id;
+            deleteBtn.title = '删除';
+            deleteBtn.setAttribute('aria-label', '删除对话');
+            deleteBtn.innerHTML = '<svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M18 6L6 18M6 6L18 18" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>';
+            historyItem.append(content, deleteBtn);
 
             historyItem.addEventListener('click', (e) => {
                 if (!e.target.closest('.history-item-delete')) {
@@ -551,7 +603,6 @@ class SuperBizAgentApp {
                 }
             });
 
-            const deleteBtn = historyItem.querySelector('.history-item-delete');
             deleteBtn.addEventListener('click', (e) => {
                 e.stopPropagation();
                 this.deleteChatHistory(history.id);
@@ -616,7 +667,7 @@ class SuperBizAgentApp {
 
     async deleteChatHistory(historyId) {
         try {
-            const response = await fetch(`${this.apiBaseUrl}/chat/session/${encodeURIComponent(historyId)}`, {
+            const response = await this.apiFetch(`${this.apiBaseUrl}/chat/session/${encodeURIComponent(historyId)}`, {
                 method: 'DELETE'
             });
             if (!response.ok) throw new Error(`HTTP错误: ${response.status}`);
@@ -737,7 +788,7 @@ class SuperBizAgentApp {
         const loadingMessage = this.addLoadingMessage('正在思考...');
 
         try {
-            const response = await fetch(`${this.apiBaseUrl}/chat`, {
+            const response = await this.apiFetch(`${this.apiBaseUrl}/chat`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ Id: this.sessionId, Question: message })
@@ -773,7 +824,7 @@ class SuperBizAgentApp {
 
     async sendStreamMessage(message) {
         try {
-            const response = await fetch(`${this.apiBaseUrl}/chat_stream`, {
+            const response = await this.apiFetch(`${this.apiBaseUrl}/chat_stream`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ Id: this.sessionId, Question: message })
@@ -1073,7 +1124,7 @@ class SuperBizAgentApp {
             const formData = new FormData();
             formData.append('file', file);
 
-            const response = await fetch(`${this.apiBaseUrl}/upload`, {
+            const response = await this.apiFetch(`${this.apiBaseUrl}/upload`, {
                 method: 'POST',
                 body: formData
             });
@@ -1448,7 +1499,7 @@ class SuperBizAgentApp {
             : '{}';
 
         try {
-            const response = await fetch(`${this.apiBaseUrl}/ai_ops`, {
+            const response = await this.apiFetch(`${this.apiBaseUrl}/ai_ops`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: body
@@ -2074,7 +2125,7 @@ class SuperBizAgentApp {
 
     async simulateAlert() {
         try {
-            const response = await fetch(`${this.apiBaseUrl}/alerts/simulate`, {
+            const response = await this.apiFetch(`${this.apiBaseUrl}/alerts/simulate`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: '{}'
@@ -2098,7 +2149,7 @@ class SuperBizAgentApp {
 
     async triggerIncidentDiagnosis(incidentId) {
         try {
-            const response = await fetch(`${this.apiBaseUrl}/incidents/${incidentId}/diagnose`, {
+            const response = await this.apiFetch(`${this.apiBaseUrl}/incidents/${incidentId}/diagnose`, {
                 method: 'POST'
             });
             if (!response.ok) throw new Error(`HTTP错误: ${response.status}`);
@@ -2117,7 +2168,7 @@ class SuperBizAgentApp {
 
     async archiveIncidentCase(incidentId) {
         try {
-            const response = await fetch(`${this.apiBaseUrl}/incidents/${incidentId}/archive-case`, {
+            const response = await this.apiFetch(`${this.apiBaseUrl}/incidents/${incidentId}/archive-case`, {
                 method: 'POST'
             });
             if (!response.ok) throw new Error(`HTTP错误: ${response.status}`);
@@ -2151,7 +2202,7 @@ class SuperBizAgentApp {
 
     async invokeDiagnosisRunAction(incidentId, runId, action, comment) {
         try {
-            const response = await fetch(this.incidentRunActionUrl(incidentId, runId, action, comment), {
+            const response = await this.apiFetch(this.incidentRunActionUrl(incidentId, runId, action, comment), {
                 method: 'POST'
             });
             if (!response.ok) throw new Error(`HTTP错误: ${response.status}`);

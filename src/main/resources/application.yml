@@ -102,7 +102,10 @@ app:
     recovery-delay-millis: ${APP_JOB_RECOVERY_DELAY_MILLIS:15000}
     worker-concurrency: ${APP_JOB_WORKER_CONCURRENCY:4}
     diagnosis-max-attempts: ${APP_JOB_DIAGNOSIS_MAX_ATTEMPTS:2}
+    diagnosis-prefetch-concurrency: ${APP_JOB_DIAGNOSIS_PREFETCH_CONCURRENCY:4}
     index-max-attempts: ${APP_JOB_INDEX_MAX_ATTEMPTS:3}
+  chat:
+    direct-model-routing-enabled: ${APP_DIRECT_MODEL_ROUTING_ENABLED:true}
   resilience:
     enabled: ${APP_RESILIENCE_ENABLED:true}
     default-config:
@@ -147,10 +150,14 @@ app:
         retry-wait-duration: ${APP_MCP_DBHUB_RETRY_WAIT_DURATION:500ms}
   cors:
     allowed-origins: ${APP_CORS_ALLOWED_ORIGINS:http://localhost:9900,http://127.0.0.1:9900}
+  network:
+    trusted-proxies: ${APP_TRUSTED_PROXIES:}
   security:
-    enabled: ${APP_SECURITY_ENABLED:false}
+    enabled: ${APP_SECURITY_ENABLED:true}
     api-token: ${APP_API_TOKEN:}
     webhook-secret: ${APP_WEBHOOK_SECRET:}
+    session-ttl-seconds: ${APP_SECURITY_SESSION_TTL_SECONDS:28800}
+    cookie-secure: ${APP_SECURITY_COOKIE_SECURE:false}
   alerts:
     simulate-enabled: ${APP_ALERT_SIMULATE_ENABLED:false}
   chat-history:
@@ -159,7 +166,7 @@ app:
     path: ${APP_INCIDENTS_PATH:./data/incidents}
     jdbc-url: ${APP_INCIDENT_JDBC_URL:jdbc:postgresql://localhost:5432/superbizagent}
     jdbc-username: ${APP_INCIDENT_JDBC_USERNAME:superbizagent}
-    jdbc-password: ${APP_INCIDENT_JDBC_PASSWORD:superbizagent}
+    jdbc-password: ${APP_INCIDENT_JDBC_PASSWORD:}
     jdbc-driver-class-name: ${APP_INCIDENT_JDBC_DRIVER_CLASS_NAME:}
     jdbc-maximum-pool-size: ${APP_INCIDENT_JDBC_MAX_POOL_SIZE:10}
     jdbc-minimum-idle: ${APP_INCIDENT_JDBC_MIN_IDLE:1}
@@ -177,6 +184,12 @@ app:
     stale-run-sweep-delay-millis: ${APP_STALE_RUN_SWEEP_DELAY_MILLIS:60000}
   memory:
     private-recall-enabled: ${APP_PRIVATE_MEMORY_RECALL_ENABLED:true}
+    private-recall-gating-enabled: ${APP_PRIVATE_MEMORY_RECALL_GATING_ENABLED:true}
     private-recall-top-k: ${APP_PRIVATE_MEMORY_RECALL_TOP_K:3}
     private-recall-min-score: ${APP_PRIVATE_MEMORY_RECALL_MIN_SCORE:0.0}
     private-recall-max-prompt-chars: ${APP_PRIVATE_MEMORY_RECALL_MAX_PROMPT_CHARS:1200}
+    extraction-debounce-millis: ${APP_MEMORY_EXTRACTION_DEBOUNCE_MILLIS:5000}
+    extraction-batch-size: ${APP_MEMORY_EXTRACTION_BATCH_SIZE:6}
+    extraction-max-queue-messages: ${APP_MEMORY_EXTRACTION_MAX_QUEUE_MESSAGES:100}
+    extraction-max-prompt-chars: ${APP_MEMORY_EXTRACTION_MAX_PROMPT_CHARS:6000}
+    extraction-max-facts: ${APP_MEMORY_EXTRACTION_MAX_FACTS:8}

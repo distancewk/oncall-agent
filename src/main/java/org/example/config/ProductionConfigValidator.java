@@ -19,7 +19,8 @@ public class ProductionConfigValidator {
 
     @PostConstruct
     public void validate() {
-        if (!environment.acceptsProfiles(Profiles.of("prod"))) {
+        if (!environment.acceptsProfiles(Profiles.of("prod"))
+                && !environment.getProperty("app.security.enabled", Boolean.class, true)) {
             return;
         }
 

@@ -9,6 +9,8 @@ public class FileUploadRes {
 
     private String fileName;
     private String filePath;
+    private String documentId;
+    private String contentHash;
     private Long fileSize;
     private String indexTaskId;
     private String indexStatus;

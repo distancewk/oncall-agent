@@ -9,6 +9,7 @@ public class ApiResponse<T> {
     private int code;
     private String message;
     private T data;
+    private String requestId;
 
     public static <T> ApiResponse<T> success(T data) {
         ApiResponse<T> response = new ApiResponse<>();

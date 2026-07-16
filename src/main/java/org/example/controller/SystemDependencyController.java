@@ -21,6 +21,18 @@ public class SystemDependencyController {
 
     @GetMapping("/dependencies")
     public ApiResponse<List<DependencyHealthSnapshot>> dependencies() {
-        return ApiResponse.success(dependencyGuard.snapshot());
+        return ApiResponse.success(dependencyGuard.snapshot().stream().map(this::sanitize).toList());
+    }
+
+    private DependencyHealthSnapshot sanitize(DependencyHealthSnapshot source) {
+        DependencyHealthSnapshot safe = new DependencyHealthSnapshot();
+        safe.setName(source.getName());
+        safe.setState(source.getState());
+        safe.setFailureRate(source.getFailureRate());
+        safe.setSlowCallRate(source.getSlowCallRate());
+        safe.setBufferedCalls(source.getBufferedCalls());
+        safe.setOpenedAt(source.getOpenedAt());
+        safe.setLastError(source.getLastError() == null ? null : "依赖暂时不可用");
+        return safe;
     }
 }

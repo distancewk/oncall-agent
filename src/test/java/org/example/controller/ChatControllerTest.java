@@ -3,12 +3,14 @@ package org.example.controller;
 import com.alibaba.cloud.ai.dashscope.chat.DashScopeChatModel;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.example.config.AppMemoryProperties;
+import org.example.config.AppChatProperties;
 import org.example.dto.ApiResponse;
 import org.example.dto.ChatSessionRecord;
 import org.example.dto.ChatSessionSummary;
 import org.example.service.AiOpsService;
 import org.example.service.AlertService;
 import org.example.service.ChatService;
+import org.example.service.MemoryRelevanceGate;
 import org.example.service.SessionManager;
 import org.example.service.VectorSearchService;
 import org.junit.jupiter.api.Test;
@@ -30,6 +32,7 @@ import static org.mockito.ArgumentMatchers.*;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
+import static org.mockito.Mockito.never;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.delete;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
@@ -75,6 +78,12 @@ class ChatControllerTest {
 
     @MockBean
     private AppMemoryProperties appMemoryProperties;
+
+    @MockBean
+    private AppChatProperties appChatProperties;
+
+    @MockBean
+    private MemoryRelevanceGate memoryRelevanceGate;
 
     @Test
     void chat_shouldReturnError_whenQuestionIsEmpty() throws Exception {
@@ -232,6 +241,8 @@ class ChatControllerTest {
         SessionManager.SessionInfo session = new SessionManager.SessionInfo("session-1");
         when(sessionManager.getOrCreateSession("session-1")).thenReturn(session);
         when(appMemoryProperties.isPrivateRecallEnabled()).thenReturn(true);
+        when(appMemoryProperties.isPrivateRecallGatingEnabled()).thenReturn(true);
+        when(memoryRelevanceGate.shouldRecall("继续上次的话题")).thenReturn(true);
         when(appMemoryProperties.getPrivateRecallTopK()).thenReturn(3);
         when(appMemoryProperties.getPrivateRecallMinScore()).thenReturn(0.0f);
         when(appMemoryProperties.getPrivateRecallMaxPromptChars()).thenReturn(1200);
@@ -264,6 +275,8 @@ class ChatControllerTest {
         SessionManager.SessionInfo session = new SessionManager.SessionInfo("session-1");
         when(sessionManager.getOrCreateSession("session-1")).thenReturn(session);
         when(appMemoryProperties.isPrivateRecallEnabled()).thenReturn(true);
+        when(appMemoryProperties.isPrivateRecallGatingEnabled()).thenReturn(true);
+        when(memoryRelevanceGate.shouldRecall("继续上次的话题")).thenReturn(true);
         when(appMemoryProperties.getPrivateRecallTopK()).thenReturn(3);
         when(appMemoryProperties.getPrivateRecallMinScore()).thenReturn(0.5f);
         when(appMemoryProperties.getPrivateRecallMaxPromptChars()).thenReturn(20);
@@ -304,5 +317,44 @@ class ChatControllerTest {
                 .andExpect(jsonPath("$.data.answer").value("好的"));
 
         verify(chatService).buildSystemPrompt(eq(List.of()), eq(List.of(kept)));
+    }
+
+    @Test
+    void chat_shouldSkipPrivateMemorySearchForOrdinaryQuestion() throws Exception {
+        SessionManager.SessionInfo session = new SessionManager.SessionInfo("session-1");
+        when(sessionManager.getOrCreateSession("session-1")).thenReturn(session);
+        when(appMemoryProperties.isPrivateRecallEnabled()).thenReturn(true);
+        when(appMemoryProperties.isPrivateRecallGatingEnabled()).thenReturn(true);
+        when(chatService.buildSystemPrompt(eq(List.of()), eq(List.of()))).thenReturn("prompt");
+        when(chatService.executeChat(any(), eq("请解释什么是幂等性"))).thenReturn("好的");
+
+        mockMvc.perform(post("/api/chat")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"Id\":\"session-1\",\"Question\":\"请解释什么是幂等性\"}"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.data.success").value(true));
+
+        verify(vectorSearchService, never()).searchSessionMemories(anyString(), anyString(), anyInt());
+        verify(chatService).buildSystemPrompt(eq(List.of()), eq(List.of()));
+    }
+
+    @Test
+    void chat_shouldUseDirectModelForOrdinaryQuestionWhenEnabled() throws Exception {
+        SessionManager.SessionInfo session = new SessionManager.SessionInfo("session-1");
+        when(sessionManager.getOrCreateSession("session-1")).thenReturn(session);
+        when(appMemoryProperties.isPrivateRecallEnabled()).thenReturn(false);
+        when(appChatProperties.isDirectModelRoutingEnabled()).thenReturn(true);
+        when(chatService.buildSystemPrompt(eq(List.of()), eq(List.of()))).thenReturn("prompt");
+        when(chatService.executeDirectChat(any(), eq("prompt"), eq("请解释什么是幂等性"))).thenReturn("直接回答");
+
+        mockMvc.perform(post("/api/chat")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"Id\":\"session-1\",\"Question\":\"请解释什么是幂等性\"}"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.data.success").value(true))
+                .andExpect(jsonPath("$.data.answer").value("直接回答"));
+
+        verify(chatService).executeDirectChat(any(), eq("prompt"), eq("请解释什么是幂等性"));
+        verify(chatService, never()).executeChat(any(), anyString());
     }
 }

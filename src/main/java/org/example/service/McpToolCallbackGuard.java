@@ -113,10 +113,7 @@ public class McpToolCallbackGuard {
     }
 
     private String errorMessage(Throwable error) {
-        if (error == null) {
-            return "MCP tool dependency failed";
-        }
-        return error.getMessage() == null ? error.getClass().getSimpleName() : error.getMessage();
+        return "MCP 工具依赖暂时不可用，请稍后重试";
     }
 
     private String value(Object value) {

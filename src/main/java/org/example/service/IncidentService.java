@@ -68,14 +68,22 @@ public class IncidentService {
     }
 
     public IncidentRecord recordAlert(AlertPayload payload) {
+        return recordAlert(payload, null);
+    }
+
+    public IncidentRecord recordAlert(AlertPayload payload, String alertId) {
+        return recordAlertWithStatus(payload, alertId).incident();
+    }
+
+    public IncidentStore.RecordAlertResult recordAlertWithStatus(AlertPayload payload, String alertId) {
         String aggregationKey = aggregationKey(payload);
         long now = System.currentTimeMillis();
         IncidentRecord candidate = newIncident(payload, aggregationKey, now);
-        return incidentStore.recordAlert(candidate, payload, now);
+        return incidentStore.recordAlertWithStatus(candidate, payload, now, alertId);
     }
 
     public List<IncidentSummary> listIncidents() {
-        return listIncidents(null, null, null, null, null);
+        return listIncidents(null, null, null, null, null, 0, 100);
     }
 
     public List<IncidentSummary> listIncidents(String status,
@@ -83,7 +91,20 @@ public class IncidentService {
                                                String latestRunStatus,
                                                String query,
                                                String humanReviewStatus) {
-        return incidentStore.list().stream()
+        return listIncidents(status, severity, latestRunStatus, query, humanReviewStatus, 0, 100);
+    }
+
+    public List<IncidentSummary> listIncidents(String status,
+                                               String severity,
+                                               String latestRunStatus,
+                                               String query,
+                                               String humanReviewStatus,
+                                               int page,
+                                               int pageSize) {
+        int safePage = Math.max(0, page);
+        int safePageSize = Math.max(1, Math.min(100, pageSize));
+        return incidentStore.listPage(safePageSize, safePage * safePageSize,
+                        status, severity, query, latestRunStatus, humanReviewStatus).stream()
                 .filter(record -> matchesIncidentFilters(record, status, severity, latestRunStatus, query, humanReviewStatus))
                 .map(this::summary)
                 .sorted(Comparator.comparingLong(IncidentSummary::getUpdatedAt).reversed())
@@ -103,7 +124,14 @@ public class IncidentService {
                 .flatMap(record -> record.getDiagnosisRuns().stream()
                         .filter(run -> runId.equals(run.getRunId()))
                         .findFirst()
-                        .map(run -> new ArrayList<>(run.getEvidence())));
+                .map(run -> new ArrayList<>(run.getEvidence())));
+    }
+
+    public Optional<DiagnosisRunRecord> getDiagnosisRun(String incidentId, String runId) {
+        return getIncident(incidentId)
+                .flatMap(incident -> incident.getDiagnosisRuns().stream()
+                        .filter(run -> runId.equals(run.getRunId()))
+                        .findFirst());
     }
 
     public DiagnosisRunRecord createDiagnosisRun(String incidentId, String alertContext) {
@@ -268,41 +296,65 @@ public class IncidentService {
                                                  String runId,
                                                  String toolName,
                                                  String queryParams) {
-        IncidentRecord incident = requireIncident(incidentId);
-        DiagnosisRunRecord run = requireRun(incident, runId);
-        if (!isActiveRun(run)) {
-            return run;
+        for (int attempt = 0; attempt < 3; attempt++) {
+            IncidentRecord incident = requireIncident(incidentId);
+            DiagnosisRunRecord run = requireRun(incident, runId);
+            if (!isActiveRun(run)) {
+                return run;
+            }
+            long nextVersion = incidentStore.updateRunToolState(incidentId, runId, run.getVersion(),
+                    "WAITING_TOOL", toolName, "正在调用工具 " + toolName, queryParams);
+            if (nextVersion > run.getVersion()) {
+                run.setVersion(nextVersion);
+                run.setStatus("WAITING_TOOL");
+                run.setCurrentTool(toolName);
+                run.setCurrentStep("正在调用工具 " + toolName);
+                run.setProgressMessage(queryParams);
+                return run;
+            }
         }
-        long now = System.currentTimeMillis();
-        if (run.getStartedAt() == 0L) {
-            run.setStartedAt(now);
-        }
-        run.setStatus("WAITING_TOOL");
-        run.setCurrentTool(toolName);
-        run.setCurrentStep("正在调用工具 " + toolName);
-        run.setProgressMessage(queryParams);
-        incident.setUpdatedAt(now);
-        incidentStore.save(incident);
-        return run;
+        throw new IllegalStateException("诊断运行状态更新冲突: " + runId);
     }
 
     public DiagnosisRunRecord addToolEvidence(String incidentId,
                                               String runId,
                                               DiagnosisEvidence evidence) {
-        IncidentRecord incident = requireIncident(incidentId);
-        DiagnosisRunRecord run = requireRun(incident, runId);
-        if (!isActiveRun(run)) {
-            return run;
+        for (int attempt = 0; attempt < 3; attempt++) {
+            IncidentRecord incident = requireIncident(incidentId);
+            DiagnosisRunRecord run = requireRun(incident, runId);
+            if (!isActiveRun(run)) {
+                return run;
+            }
+            long nextVersion = incidentStore.appendToolEvidence(incidentId, runId, run.getVersion(), evidence);
+            if (nextVersion > run.getVersion()) {
+                run.setVersion(nextVersion);
+                run.setStatus("RUNNING");
+                run.setCurrentTool(null);
+                run.setCurrentStep("已完成工具调用 " + evidence.getToolName());
+                run.setProgressMessage(evidence.getSummary());
+                run.getEvidence().add(evidence);
+                return run;
+            }
         }
-        long now = System.currentTimeMillis();
-        run.getEvidence().add(evidence);
-        run.setStatus("RUNNING");
-        run.setCurrentTool(null);
-        run.setCurrentStep("已完成工具调用 " + evidence.getToolName());
-        run.setProgressMessage(evidence.getSummary());
-        incident.setUpdatedAt(now);
-        incidentStore.save(incident);
-        return run;
+        throw new IllegalStateException("诊断证据写入冲突: " + runId);
+    }
+
+    public long updateRunToolStateIncremental(String incidentId,
+                                              String runId,
+                                              long expectedVersion,
+                                              String status,
+                                              String currentTool,
+                                              String currentStep,
+                                              String progressMessage) {
+        return incidentStore.updateRunToolState(incidentId, runId, expectedVersion,
+                status, currentTool, currentStep, progressMessage);
+    }
+
+    public long appendToolEvidenceIncremental(String incidentId,
+                                              String runId,
+                                              long expectedVersion,
+                                              DiagnosisEvidence evidence) {
+        return incidentStore.appendToolEvidence(incidentId, runId, expectedVersion, evidence);
     }
 
     public DiagnosisRunRecord completeRun(String incidentId, String runId, String report) {
@@ -422,22 +474,18 @@ public class IncidentService {
             return List.of();
         }
         List<DiagnosisRunRecord> failedRuns = new ArrayList<>();
-        for (IncidentRecord incident : incidentStore.list()) {
-            for (DiagnosisRunRecord run : incident.getDiagnosisRuns()) {
-                if (!isActiveRun(run) || !isStaleRun(run, nowMillis, timeoutMillis)) {
-                    continue;
-                }
-                String message = "诊断任务超时，已自动标记失败";
-                DiagnosisEvidence evidence =
-                        DiagnosisEvidence.of("diagnosis_timeout", "诊断超时原因", message, nowMillis);
-                incidentStore.failStaleRunIfActive(
-                                incident.getId(),
-                                run.getRunId(),
-                                nowMillis,
-                                timeoutMillis,
-                                evidence)
-                        .ifPresent(failedRuns::add);
-            }
+        for (IncidentStore.StaleRunCandidate candidate : incidentStore.findStaleRunCandidates(
+                nowMillis - timeoutMillis)) {
+            String message = "诊断任务超时，已自动标记失败";
+            DiagnosisEvidence evidence =
+                    DiagnosisEvidence.of("diagnosis_timeout", "诊断超时原因", message, nowMillis);
+            incidentStore.failStaleRunIfActive(
+                            candidate.incidentId(),
+                            candidate.runId(),
+                            nowMillis,
+                            timeoutMillis,
+                            evidence)
+                    .ifPresent(failedRuns::add);
         }
         return failedRuns;
     }

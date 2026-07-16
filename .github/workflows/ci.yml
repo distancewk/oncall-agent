@@ -2,13 +2,51 @@ name: CI
 
 on:
   push:
-    branches: [ "main" ]
+    branches: ["main"]
   pull_request:
-    branches: [ "main" ]
+    branches: ["main"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
-  build:
+  checks:
+    name: Frontend and Compose checks
     runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Check frontend JavaScript syntax
+        run: node --check src/main/resources/static/app.js
+
+      - name: Validate Docker Compose configuration
+        env:
+          DASHSCOPE_API_KEY: ci-placeholder
+          MINIO_ROOT_USER: ci-minio
+          MINIO_ROOT_PASSWORD: ci-minio-password
+          POSTGRES_PASSWORD: ci-postgres
+          APP_API_TOKEN: ci-api-token
+          APP_WEBHOOK_SECRET: ci-webhook-secret
+          APP_INCIDENT_JDBC_PASSWORD: ci-postgres
+        run: docker compose config --quiet
+
+  maven:
+    name: Maven verification and PostgreSQL integration tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
 
     steps:
       - name: Checkout code
@@ -17,11 +55,12 @@ jobs:
       - name: Set up JDK 17
         uses: actions/setup-java@v4
         with:
-          java-version: '17'
-          distribution: 'temurin'
+          java-version: "17"
+          distribution: temurin
           cache: maven
 
-      - name: Build and analyze
-        run: mvn clean verify -B
+      - name: Build, analyze, and run integration tests
         env:
-          DASHSCOPE_API_KEY: ${{ secrets.DASHSCOPE_API_KEY }}
+          # Tests use mocks/Testcontainers; never expose a production API key to CI.
+          DASHSCOPE_API_KEY: ci-placeholder
+        run: mvn -B -ntp -Ppostgres-it verify

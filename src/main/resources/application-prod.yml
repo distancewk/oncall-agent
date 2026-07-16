@@ -1,6 +1,7 @@
 app:
   security:
     enabled: true
+    cookie-secure: true
   alerts:
     simulate-enabled: false
   incidents:

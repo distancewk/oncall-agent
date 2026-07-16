@@ -5,6 +5,9 @@ import org.example.dto.DiagnosisRunRecord;
 import org.example.dto.IncidentRecord;
 import org.example.service.AlertService;
 import org.example.service.IncidentService;
+import org.example.service.IncidentStore;
+import org.example.service.AlertIdentity;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -28,6 +31,9 @@ public class WebhookController {
     @Autowired
     private IncidentService incidentService;
 
+    @Autowired
+    private ObjectMapper objectMapper;
+
 
     @PostMapping("/alert")
     public ResponseEntity<String> receiveAlert(@RequestBody AlertPayload payload) {
@@ -37,8 +43,17 @@ public class WebhookController {
             return ResponseEntity.ok("No alerts to process.");
         }
 
-        IncidentRecord incident = incidentService.recordAlert(payload);
-        String alertId = alertService.storeAlert(payload, incident.getId());
+        String alertId = AlertIdentity.id(payload, objectMapper);
+        if (alertService.getAlert(alertId) != null) {
+            logger.info("忽略重复告警投递, alertId: {}", alertId);
+            return ResponseEntity.ok("Alert already processed.");
+        }
+        IncidentStore.RecordAlertResult recordResult = incidentService.recordAlertWithStatus(payload, alertId);
+        IncidentRecord incident = recordResult.incident();
+        if (!recordResult.created()) {
+            logger.info("忽略并发重复告警投递, alertId: {}, incidentId: {}", alertId, incident.getId());
+            return ResponseEntity.ok("Alert already processed.");
+        }
         logger.info("告警已存储, alertId: {}, incidentId: {}", alertId, incident.getId());
 
         String alertContext = incidentService.buildAlertContext(incident);

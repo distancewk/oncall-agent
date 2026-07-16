@@ -24,6 +24,8 @@ public class AppJobProperties {
     private int workerConcurrency = 4;
     @Positive(message = "diagnosisMaxAttempts must be greater than 0")
     private int diagnosisMaxAttempts = 2;
+    @Positive(message = "diagnosisPrefetchConcurrency must be greater than 0")
+    private int diagnosisPrefetchConcurrency = 4;
     @Positive(message = "indexMaxAttempts must be greater than 0")
     private int indexMaxAttempts = 3;
 
@@ -81,6 +83,14 @@ public class AppJobProperties {
 
     public void setDiagnosisMaxAttempts(int diagnosisMaxAttempts) {
         this.diagnosisMaxAttempts = diagnosisMaxAttempts;
+    }
+
+    public int getDiagnosisPrefetchConcurrency() {
+        return diagnosisPrefetchConcurrency;
+    }
+
+    public void setDiagnosisPrefetchConcurrency(int diagnosisPrefetchConcurrency) {
+        this.diagnosisPrefetchConcurrency = diagnosisPrefetchConcurrency;
     }
 
     public int getIndexMaxAttempts() {

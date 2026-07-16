@@ -17,6 +17,8 @@ import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
 
 import java.io.IOException;
 import java.util.*;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
 
 /**
  * 告警 SSE 推送与查询控制器
@@ -26,6 +28,18 @@ import java.util.*;
 public class AlertSseController {
 
     private static final Logger logger = LoggerFactory.getLogger(AlertSseController.class);
+    private static final AtomicInteger ACTIVE_CONNECTIONS = new AtomicInteger();
+    private static final java.util.concurrent.ConcurrentHashMap<String, AtomicInteger> ACTIVE_BY_IP =
+            new java.util.concurrent.ConcurrentHashMap<>();
+    private static final int MAX_CONNECTIONS = 100;
+    private static final int MAX_CONNECTIONS_PER_IP = 10;
+    private static final long SSE_TIMEOUT_MILLIS = 30 * 60 * 1000L;
+    private static final java.util.concurrent.ScheduledExecutorService HEARTBEAT_EXECUTOR =
+            java.util.concurrent.Executors.newScheduledThreadPool(1, runnable -> {
+                Thread thread = new Thread(runnable, "alert-sse-heartbeat");
+                thread.setDaemon(true);
+                return thread;
+            });
 
     @Autowired
     private AlertService alertService;
@@ -41,7 +55,38 @@ public class AlertSseController {
      */
     @GetMapping(value = "/stream", produces = "text/event-stream;charset=UTF-8")
     public SseEmitter streamAlerts() {
-        SseEmitter emitter = new SseEmitter(Long.MAX_VALUE); // 无超时
+        String clientKey = connectionClientKey();
+        AtomicInteger clientConnections = ACTIVE_BY_IP.computeIfAbsent(clientKey,
+                ignored -> new AtomicInteger());
+        int globalCount = ACTIVE_CONNECTIONS.incrementAndGet();
+        int clientCount = clientConnections.incrementAndGet();
+        if (globalCount > MAX_CONNECTIONS || clientCount > MAX_CONNECTIONS_PER_IP) {
+            ACTIVE_CONNECTIONS.decrementAndGet();
+            if (clientConnections.decrementAndGet() == 0) {
+                ACTIVE_BY_IP.remove(clientKey, clientConnections);
+            }
+            throw new org.springframework.web.server.ResponseStatusException(
+                    HttpStatus.TOO_MANY_REQUESTS, "SSE connections are temporarily limited");
+        }
+        SseEmitter emitter = new SseEmitter(SSE_TIMEOUT_MILLIS);
+        AtomicBoolean released = new AtomicBoolean();
+        java.util.concurrent.atomic.AtomicReference<AlertService.AlertListener> listenerRef =
+                new java.util.concurrent.atomic.AtomicReference<>();
+        java.util.concurrent.atomic.AtomicReference<java.util.concurrent.ScheduledFuture<?>> heartbeatRef =
+                new java.util.concurrent.atomic.AtomicReference<>();
+        Runnable release = () -> {
+            if (released.compareAndSet(false, true)) {
+                ACTIVE_CONNECTIONS.decrementAndGet();
+                if (clientConnections.decrementAndGet() == 0) {
+                    ACTIVE_BY_IP.remove(clientKey, clientConnections);
+                }
+                alertService.removeListener(listenerRef.get());
+                java.util.concurrent.ScheduledFuture<?> heartbeat = heartbeatRef.get();
+                if (heartbeat != null) {
+                    heartbeat.cancel(false);
+                }
+            }
+        };
 
         // 注册监听器
         AlertService.AlertListener listener = alert -> {
@@ -69,20 +114,39 @@ public class AlertSseController {
                         .data(data, MediaType.APPLICATION_JSON));
             } catch (IOException e) {
                 logger.warn("向 SSE 客户端推送告警通知失败", e);
-                // 连接已断开，抛出异常让框架处理
-                throw new RuntimeException(e);
+                release.run();
+                emitter.completeWithError(e);
             }
         };
+        listenerRef.set(listener);
 
         alertService.addListener(listener);
+        heartbeatRef.set(HEARTBEAT_EXECUTOR.scheduleAtFixedRate(() -> {
+            try {
+                emitter.send(SseEmitter.event().comment("heartbeat"));
+            } catch (IOException e) {
+                release.run();
+                emitter.completeWithError(e);
+            }
+        }, 20, 20, java.util.concurrent.TimeUnit.SECONDS));
 
         // 连接完成/超时/出错时移除监听器
-        emitter.onCompletion(() -> alertService.removeListener(listener));
-        emitter.onTimeout(() -> alertService.removeListener(listener));
-        emitter.onError(e -> alertService.removeListener(listener));
+        emitter.onCompletion(release);
+        emitter.onTimeout(release);
+        emitter.onError(e -> release.run());
 
         logger.info("新的 SSE 告警流客户端已连接");
         return emitter;
+    }
+
+    private String connectionClientKey() {
+        org.springframework.web.context.request.RequestAttributes attributes =
+                org.springframework.web.context.request.RequestContextHolder.getRequestAttributes();
+        if (attributes instanceof org.springframework.web.context.request.ServletRequestAttributes servletAttributes) {
+            String remoteAddress = servletAttributes.getRequest().getRemoteAddr();
+            return remoteAddress == null || remoteAddress.isBlank() ? "unknown" : remoteAddress;
+        }
+        return "unknown";
     }
 
     /**

@@ -37,20 +37,29 @@ public class IndexTaskStatusService {
     }
 
     public IndexTaskStatus createTask(String fileName, String filePath) {
-        IndexTaskStatus status = newQueuedTask(fileName, filePath);
+        IndexTaskStatus status = newQueuedTask(fileName, filePath,
+                DocumentIdentity.documentId(fileName), null);
         repository.insert(status);
         return status;
     }
 
     public IndexTaskStatus createTaskAndEnqueue(String fileName, String filePath) {
-        IndexTaskStatus status = newQueuedTask(fileName, filePath);
+        return createTaskAndEnqueue(fileName, filePath,
+                DocumentIdentity.documentId(fileName), null);
+    }
+
+    public IndexTaskStatus createTaskAndEnqueue(String fileName, String filePath,
+                                                String documentId, String contentHash) {
+        IndexTaskStatus status = newQueuedTask(fileName, filePath, documentId, contentHash);
         try (Connection connection = dataSource.getConnection()) {
             connection.setAutoCommit(false);
             try {
                 String payload = objectMapper.writeValueAsString(java.util.Map.of(
                         "taskId", status.getTaskId(),
                         "fileName", fileName,
-                        "filePath", filePath
+                        "filePath", filePath,
+                        "documentId", documentId,
+                        "contentHash", contentHash == null ? "" : contentHash
                 ));
                 repository.insert(connection, status);
                 backgroundJobRepository.enqueue(
@@ -81,12 +90,15 @@ public class IndexTaskStatusService {
         }
     }
 
-    private IndexTaskStatus newQueuedTask(String fileName, String filePath) {
+    private IndexTaskStatus newQueuedTask(String fileName, String filePath,
+                                          String documentId, String contentHash) {
         long now = System.currentTimeMillis();
         IndexTaskStatus status = new IndexTaskStatus();
         status.setTaskId(UUID.randomUUID().toString());
         status.setFileName(fileName);
         status.setFilePath(filePath);
+        status.setDocumentId(documentId);
+        status.setContentHash(contentHash);
         status.setStatus("INDEXING");
         status.setMessage("文件已接收，索引处理中");
         status.setCreatedAt(now);

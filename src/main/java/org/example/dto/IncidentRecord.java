@@ -14,6 +14,7 @@ public class IncidentRecord {
     private long updatedAt;
     private long lastAlertAt;
     private int alertCount;
+    private long version;
     private List<AlertPayload> alertPayloads = new ArrayList<>();
     private List<DiagnosisRunRecord> diagnosisRuns = new ArrayList<>();
 
@@ -87,6 +88,14 @@ public class IncidentRecord {
 
     public void setAlertCount(int alertCount) {
         this.alertCount = alertCount;
+    }
+
+    public long getVersion() {
+        return version;
+    }
+
+    public void setVersion(long version) {
+        this.version = version;
     }
 
     public List<AlertPayload> getAlertPayloads() {

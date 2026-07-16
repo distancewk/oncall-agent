@@ -1,11 +1,14 @@
 package org.example.service;
 
 import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.example.agent.tool.QueryMetricsTools;
 import org.example.dto.AlertPayload;
+import org.example.dto.DiagnosisEvidence;
 import org.example.dto.DiagnosisRunRecord;
 import org.example.dto.IncidentRecord;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.lang.Nullable;
@@ -17,6 +20,9 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
+import java.util.Optional;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.Executor;
 
 @Service
 public class MetricTrendPrefetchService {
@@ -26,12 +32,21 @@ public class MetricTrendPrefetchService {
 
     private final QueryMetricsTools queryMetricsTools;
     private final DiagnosisEvidenceRecorder diagnosisEvidenceRecorder;
+    private final Executor prefetchExecutor;
     private final ObjectMapper objectMapper = new ObjectMapper();
 
     public MetricTrendPrefetchService(@Nullable QueryMetricsTools queryMetricsTools,
                                       @Nullable DiagnosisEvidenceRecorder diagnosisEvidenceRecorder) {
+        this(queryMetricsTools, diagnosisEvidenceRecorder, Runnable::run);
+    }
+
+    @org.springframework.beans.factory.annotation.Autowired
+    public MetricTrendPrefetchService(@Nullable QueryMetricsTools queryMetricsTools,
+                                      @Nullable DiagnosisEvidenceRecorder diagnosisEvidenceRecorder,
+                                      @Qualifier("diagnosisPrefetchExecutor") @Nullable Executor prefetchExecutor) {
         this.queryMetricsTools = queryMetricsTools;
         this.diagnosisEvidenceRecorder = diagnosisEvidenceRecorder;
+        this.prefetchExecutor = prefetchExecutor == null ? Runnable::run : prefetchExecutor;
     }
 
     public String prefetchAndAppend(IncidentRecord incident, DiagnosisRunRecord run, String alertContext) {
@@ -40,12 +55,14 @@ public class MetricTrendPrefetchService {
             return alertContext;
         }
 
-        List<TrendObservation> observations = new ArrayList<>();
+        List<CompletableFuture<TrendObservation>> futures = new ArrayList<>();
         for (MetricTarget target : targets) {
             for (String window : PREFETCH_WINDOWS) {
-                observations.add(queryTrend(incident, run, target, window));
+                futures.add(CompletableFuture.supplyAsync(
+                        () -> queryTrend(incident, run, target, window), prefetchExecutor));
             }
         }
+        List<TrendObservation> observations = futures.stream().map(CompletableFuture::join).toList();
 
         if (observations.isEmpty()) {
             return alertContext;
@@ -58,6 +75,12 @@ public class MetricTrendPrefetchService {
                                         MetricTarget target,
                                         String window) {
         try {
+            Optional<DiagnosisEvidence> existing = findSuccessfulEvidence(run, target, window);
+            if (existing.isPresent()) {
+                DiagnosisEvidence evidence = existing.get();
+                return new TrendObservation(target, window, true, evidence.getId(),
+                        evidence.getSummary(), null);
+            }
             String result;
             if (diagnosisEvidenceRecorder != null && notBlank(incident.getId()) && notBlank(run.getRunId())) {
                 result = diagnosisEvidenceRecorder.withRun(incident.getId(), run.getRunId(),
@@ -72,6 +95,31 @@ public class MetricTrendPrefetchService {
             logger.warn("预取指标趋势失败, metric: {}, service: {}, instance: {}, window: {}",
                     target.metric(), target.service(), target.instance(), window, e);
             return parseObservation(target, window, null, e.getMessage());
+        }
+    }
+
+    private Optional<DiagnosisEvidence> findSuccessfulEvidence(DiagnosisRunRecord run,
+                                                               MetricTarget target,
+                                                               String window) {
+        if (run == null || run.getEvidence() == null) {
+            return Optional.empty();
+        }
+        return run.getEvidence().stream()
+                .filter(evidence -> evidence != null && evidence.isSuccess())
+                .filter(evidence -> QueryMetricsTools.TOOL_QUERY_METRIC_TREND.equals(evidence.getToolName()))
+                .filter(evidence -> matchesMetricQuery(evidence.getQueryParams(), target, window))
+                .findFirst();
+    }
+
+    private boolean matchesMetricQuery(String queryParams, MetricTarget target, String window) {
+        try {
+            JsonNode query = objectMapper.readTree(queryParams == null ? "{}" : queryParams);
+            return target.metric().equals(query.path("metric").asText())
+                    && target.service().equals(query.path("service").asText())
+                    && target.instance().equals(query.path("instance").asText())
+                    && window.equals(query.path("window").asText());
+        } catch (JsonProcessingException e) {
+            return false;
         }
     }
 

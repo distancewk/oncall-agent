@@ -39,9 +39,11 @@ public class IncidentController {
             @RequestParam(required = false) String severity,
             @RequestParam(required = false) String latestRunStatus,
             @RequestParam(required = false) String q,
-            @RequestParam(required = false) String humanReviewStatus) {
+            @RequestParam(required = false) String humanReviewStatus,
+            @RequestParam(defaultValue = "0") int page,
+            @RequestParam(defaultValue = "100") int pageSize) {
         return ResponseEntity.ok(ApiResponse.success(incidentService.listIncidents(
-                status, severity, latestRunStatus, q, humanReviewStatus)));
+                status, severity, latestRunStatus, q, humanReviewStatus, page, pageSize)));
     }
 
     @GetMapping("/{incidentId}")
@@ -75,9 +77,9 @@ public class IncidentController {
             DiagnosisRunRecord run = incidentService.cancelRun(incidentId, runId, reason);
             return ResponseEntity.ok(ApiResponse.success(run));
         } catch (IllegalArgumentException e) {
-            return ResponseEntity.status(404).body(ApiResponse.error(404, e.getMessage()));
+            return ResponseEntity.status(404).body(ApiResponse.error(404, "DiagnosisRun 不存在"));
         } catch (IllegalStateException e) {
-            return ResponseEntity.badRequest().body(ApiResponse.error(400, e.getMessage()));
+            return ResponseEntity.badRequest().body(ApiResponse.error(400, "当前诊断状态不允许取消"));
         }
     }
 
@@ -104,13 +106,13 @@ public class IncidentController {
                         runId,
                         false,
                         null,
-                        "历史案例写入失败: " + archiveError.getMessage());
+                        "历史案例写入失败，请稍后重试");
                 return ResponseEntity.ok(ApiResponse.success(updated));
             }
         } catch (IllegalArgumentException e) {
-            return ResponseEntity.status(404).body(ApiResponse.error(404, e.getMessage()));
+            return ResponseEntity.status(404).body(ApiResponse.error(404, "DiagnosisRun 不存在"));
         } catch (IllegalStateException e) {
-            return ResponseEntity.badRequest().body(ApiResponse.error(400, e.getMessage()));
+            return ResponseEntity.badRequest().body(ApiResponse.error(400, "当前诊断状态不允许确认"));
         }
     }
 
@@ -122,9 +124,9 @@ public class IncidentController {
             DiagnosisRunRecord run = incidentService.rejectRun(incidentId, runId, comment);
             return ResponseEntity.ok(ApiResponse.success(run));
         } catch (IllegalArgumentException e) {
-            return ResponseEntity.status(404).body(ApiResponse.error(404, e.getMessage()));
+            return ResponseEntity.status(404).body(ApiResponse.error(404, "DiagnosisRun 不存在"));
         } catch (IllegalStateException e) {
-            return ResponseEntity.badRequest().body(ApiResponse.error(400, e.getMessage()));
+            return ResponseEntity.badRequest().body(ApiResponse.error(400, "当前诊断状态不允许驳回"));
         }
     }
 

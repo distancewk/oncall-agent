@@ -5,6 +5,7 @@ import org.junit.jupiter.api.Test;
 import org.springframework.mock.web.MockHttpServletRequest;
 import org.springframework.mock.web.MockHttpServletResponse;
 import org.springframework.test.util.ReflectionTestUtils;
+import jakarta.servlet.http.Cookie;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -43,6 +44,33 @@ class SecurityInterceptorTest {
         boolean allowed = interceptor.preHandle(request, response, new Object());
 
         assertTrue(allowed);
+        assertEquals(200, response.getStatus());
+    }
+
+    @Test
+    void preHandle_shouldAllowProtectedApiWithSignedHttpOnlySessionCookie() throws Exception {
+        MockHttpServletRequest request = new MockHttpServletRequest("GET", "/api/chat/sessions");
+        request.setCookies(new Cookie("SB_SESSION", interceptor.createSessionValue()));
+        MockHttpServletResponse response = new MockHttpServletResponse();
+
+        assertTrue(interceptor.preHandle(request, response, new Object()));
+        assertEquals(200, response.getStatus());
+    }
+
+    @Test
+    void preHandle_shouldRequireMatchingCsrfTokenForCookieMutation() throws Exception {
+        String csrf = interceptor.createCsrfToken();
+        MockHttpServletRequest request = new MockHttpServletRequest("POST", "/api/chat");
+        request.setCookies(new Cookie("SB_SESSION", interceptor.createSessionValue()),
+                new Cookie("SB_CSRF", csrf));
+        MockHttpServletResponse response = new MockHttpServletResponse();
+
+        assertFalse(interceptor.preHandle(request, response, new Object()));
+        assertEquals(401, response.getStatus());
+
+        request.addHeader("X-CSRF-Token", csrf);
+        response = new MockHttpServletResponse();
+        assertTrue(interceptor.preHandle(request, response, new Object()));
         assertEquals(200, response.getStatus());
     }
 

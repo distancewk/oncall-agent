@@ -78,7 +78,7 @@ class FileUploadControllerTest {
         assertNotNull(data.getIndexTaskId());
         assertEquals("INDEXING", data.getIndexStatus());
         assertEquals("文件已接收，索引处理中", data.getMessage());
-        assertTrue(Files.exists(uploadDir.resolve("runbook.md")));
+        assertTrue(Files.exists(uploadDir.resolve(data.getDocumentId()).resolve(data.getContentHash() + ".md")));
         IndexTaskStatus storedTask = indexTaskStatusService.getStatus(data.getIndexTaskId()).orElseThrow();
         assertEquals("INDEXING", storedTask.getStatus());
         assertEquals("runbook.md", storedTask.getFileName());

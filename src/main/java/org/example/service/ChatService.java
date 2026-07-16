@@ -7,6 +7,10 @@ import org.example.exception.DependencyUnavailableException;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.ai.chat.messages.AssistantMessage;
+import org.springframework.ai.chat.messages.SystemMessage;
+import org.springframework.ai.chat.messages.UserMessage;
+import org.springframework.ai.chat.model.ChatResponse;
+import org.springframework.ai.chat.prompt.Prompt;
 import org.springframework.ai.tool.ToolCallback;
 import org.springframework.ai.tool.ToolCallbackProvider;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -19,6 +23,7 @@ import java.io.InputStreamReader;
 import java.nio.charset.StandardCharsets;
 import java.util.List;
 import java.util.Map;
+import java.util.Arrays;
 import java.util.stream.Collectors;
 
 /**
@@ -203,6 +208,36 @@ public class ChatService {
         }
         logger.info("ReactAgent 对话完成，答案长度: {}", answer.length());
         return answer;
+    }
+
+    public String executeDirectChat(DashScopeChatModel chatModel,
+                                    String systemPrompt,
+                                    String question) {
+        Prompt prompt = new Prompt(Arrays.asList(
+                new SystemMessage(systemPrompt == null ? "" : systemPrompt),
+                new UserMessage(question == null ? "" : question)));
+        ChatResponse response = callDirectModel(chatModel, prompt);
+        if (response == null || response.getResult() == null
+                || response.getResult().getOutput() == null
+                || response.getResult().getOutput().getText() == null) {
+            return "";
+        }
+        return response.getResult().getOutput().getText();
+    }
+
+    private ChatResponse callDirectModel(DashScopeChatModel chatModel, Prompt prompt) {
+        if (dependencyGuard == null) {
+            return chatModel.call(prompt);
+        }
+        return dependencyGuard.execute("dashscope-chat", "chatDirectCall",
+                () -> chatModel.call(prompt),
+                error -> {
+                    if (error instanceof DependencyUnavailableException unavailable) {
+                        throw unavailable;
+                    }
+                    throw new DependencyUnavailableException(
+                            "dashscope-chat", "chatDirectCall", "DEPENDENCY_ERROR", error);
+                });
     }
 
     @SuppressWarnings("PMD.PreserveStackTrace")
