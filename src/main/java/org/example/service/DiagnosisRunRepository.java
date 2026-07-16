@@ -9,6 +9,7 @@ import javax.sql.DataSource;
 import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
+import java.sql.Types;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
@@ -35,71 +36,47 @@ public class DiagnosisRunRepository {
     }
 
     public void save(Connection connection, DiagnosisRunRecord run) throws Exception {
+        int updated;
         try (PreparedStatement statement = connection.prepareStatement("""
-                merge into diagnosis_runs as target
-                using (values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?))
-                as source (
-                    run_id, incident_id, status, created_at, started_at, completed_at,
-                    alert_context, report, error_message, current_step, progress_message,
-                    current_tool, reused_from_run_id, reuse_reason, reuse_confidence,
-                    reuse_validated_at, quality_score, quality_grade, quality_summary,
-                    quality_issues, human_review_status, human_review_comment,
-                    human_reviewed_at, case_archived, case_document_id, case_archive_message, version
-                )
-                on target.run_id = source.run_id and target.version = source.version
-                when matched then update set
-                    status = source.status,
-                    started_at = source.started_at,
-                    completed_at = source.completed_at,
-                    alert_context = source.alert_context,
-                    report = source.report,
-                    error_message = source.error_message,
-                    current_step = source.current_step,
-                    progress_message = source.progress_message,
-                    current_tool = source.current_tool,
-                    reused_from_run_id = source.reused_from_run_id,
-                    reuse_reason = source.reuse_reason,
-                    reuse_confidence = source.reuse_confidence,
-                    reuse_validated_at = source.reuse_validated_at,
-                    quality_score = source.quality_score,
-                    quality_grade = source.quality_grade,
-                    quality_summary = source.quality_summary,
-                    quality_issues = source.quality_issues,
-                    human_review_status = source.human_review_status,
-                    human_review_comment = source.human_review_comment,
-                    human_reviewed_at = source.human_reviewed_at,
-                    case_archived = source.case_archived,
-                    case_document_id = source.case_document_id,
-                    case_archive_message = source.case_archive_message,
-                    version = target.version + 1
-                when not matched then insert (
-                    run_id, incident_id, status, created_at, started_at, completed_at,
-                    alert_context, report, error_message, current_step, progress_message,
-                    current_tool, reused_from_run_id, reuse_reason, reuse_confidence,
-                    reuse_validated_at, quality_score, quality_grade, quality_summary,
-                    quality_issues, human_review_status, human_review_comment,
-                    human_reviewed_at, case_archived, case_document_id, case_archive_message, version
-                ) values (
-                    source.run_id, source.incident_id, source.status, source.created_at,
-                    source.started_at, source.completed_at, source.alert_context, source.report,
-                    source.error_message, source.current_step, source.progress_message,
-                    source.current_tool, source.reused_from_run_id, source.reuse_reason,
-                    source.reuse_confidence, source.reuse_validated_at, source.quality_score,
-                    source.quality_grade, source.quality_summary, source.quality_issues,
-                    source.human_review_status, source.human_review_comment,
-                    source.human_reviewed_at, source.case_archived, source.case_document_id,
-                    source.case_archive_message, source.version
-                )
+                update diagnosis_runs
+                set status = ?,
+                    started_at = ?,
+                    completed_at = ?,
+                    alert_context = ?,
+                    report = ?,
+                    error_message = ?,
+                    current_step = ?,
+                    progress_message = ?,
+                    current_tool = ?,
+                    reused_from_run_id = ?,
+                    reuse_reason = ?,
+                    reuse_confidence = ?,
+                    reuse_validated_at = ?,
+                    quality_score = ?,
+                    quality_grade = ?,
+                    quality_summary = ?,
+                    quality_issues = ?,
+                    human_review_status = ?,
+                    human_review_comment = ?,
+                    human_reviewed_at = ?,
+                    case_archived = ?,
+                    case_document_id = ?,
+                    case_archive_message = ?,
+                    version = version + 1
+                where run_id = ? and version = ?
                 """)) {
-            bind(statement, run);
-            statement.executeUpdate();
-            try (PreparedStatement versionStatement = connection.prepareStatement(
-                    "select version from diagnosis_runs where run_id = ?")) {
-                versionStatement.setString(1, run.getRunId());
-                try (ResultSet resultSet = versionStatement.executeQuery()) {
-                    if (resultSet.next()) {
-                        run.setVersion(resultSet.getLong(1));
-                    }
+            bindForUpdate(statement, run);
+            updated = statement.executeUpdate();
+        }
+        if (updated == 0) {
+            insertRunRecord(connection, run);
+        }
+        try (PreparedStatement versionStatement = connection.prepareStatement(
+                "select version from diagnosis_runs where run_id = ?")) {
+            versionStatement.setString(1, run.getRunId());
+            try (ResultSet resultSet = versionStatement.executeQuery()) {
+                if (resultSet.next()) {
+                    run.setVersion(resultSet.getLong(1));
                 }
             }
         }
@@ -109,19 +86,7 @@ public class DiagnosisRunRepository {
     }
 
     public void insert(Connection connection, DiagnosisRunRecord run) throws Exception {
-        try (PreparedStatement statement = connection.prepareStatement("""
-                insert into diagnosis_runs (
-                    run_id, incident_id, status, created_at, started_at, completed_at,
-                    alert_context, report, error_message, current_step, progress_message,
-                    current_tool, reused_from_run_id, reuse_reason, reuse_confidence,
-                    reuse_validated_at, quality_score, quality_grade, quality_summary,
-                    quality_issues, human_review_status, human_review_comment,
-                    human_reviewed_at, case_archived, case_document_id, case_archive_message, version
-                ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """)) {
-            bind(statement, run);
-            statement.executeUpdate();
-        }
+        insertRunRecord(connection, run);
         for (var evidence : run.getEvidence()) {
             evidenceRepository.insert(connection, run.getRunId(), evidence);
         }
@@ -342,6 +307,19 @@ public class DiagnosisRunRepository {
         statement.setString(index++, run.getIncidentId());
         statement.setString(index++, run.getStatus());
         statement.setLong(index++, run.getCreatedAt());
+        index = bindAfterStatus(statement, index, run);
+        statement.setLong(index, run.getVersion());
+    }
+
+    private void bindForUpdate(PreparedStatement statement, DiagnosisRunRecord run) throws Exception {
+        int index = 1;
+        statement.setString(index++, run.getStatus());
+        index = bindAfterStatus(statement, index, run);
+        statement.setString(index++, run.getRunId());
+        statement.setLong(index, run.getVersion());
+    }
+
+    private int bindAfterStatus(PreparedStatement statement, int index, DiagnosisRunRecord run) throws Exception {
         setNullableLong(statement, index++, run.getStartedAt());
         setNullableLong(statement, index++, run.getCompletedAt());
         statement.setString(index++, run.getAlertContext());
@@ -364,7 +342,23 @@ public class DiagnosisRunRepository {
         statement.setBoolean(index++, run.isCaseArchived());
         statement.setString(index++, run.getCaseDocumentId());
         statement.setString(index++, run.getCaseArchiveMessage());
-        statement.setLong(index, run.getVersion());
+        return index;
+    }
+
+    private void insertRunRecord(Connection connection, DiagnosisRunRecord run) throws Exception {
+        try (PreparedStatement statement = connection.prepareStatement("""
+                insert into diagnosis_runs (
+                    run_id, incident_id, status, created_at, started_at, completed_at,
+                    alert_context, report, error_message, current_step, progress_message,
+                    current_tool, reused_from_run_id, reuse_reason, reuse_confidence,
+                    reuse_validated_at, quality_score, quality_grade, quality_summary,
+                    quality_issues, human_review_status, human_review_comment,
+                    human_reviewed_at, case_archived, case_document_id, case_archive_message, version
+                ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """)) {
+            bind(statement, run);
+            statement.executeUpdate();
+        }
     }
 
     private DiagnosisRunRecord map(ResultSet resultSet) throws Exception {
@@ -404,7 +398,7 @@ public class DiagnosisRunRepository {
 
     private void setNullableLong(PreparedStatement statement, int index, long value) throws Exception {
         if (value <= 0L) {
-            statement.setObject(index, null);
+            statement.setNull(index, Types.BIGINT);
         } else {
             statement.setLong(index, value);
         }
