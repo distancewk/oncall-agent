@@ -481,6 +481,13 @@ super-biz-agent/
 └── pom.xml                          # Maven 构建与质量门禁
 ```
 
+### 文档与知识库文件
+
+- `README.md` 是仓库入口文档，保留在 GitHub，用于说明部署、配置、接口和验证方式。
+- `aiops-docs/` 是随仓库发布的示例运维知识库，上传后可用于本地 RAG 索引和检索。
+- `docs/` 仅保存本地技术资料，不上传 GitHub。
+- `OPTIMIZATION_PLAN.md` 是本地规划文件，保留在开发机但不纳入 Git 跟踪。
+
 ## 测试与质量
 
 ```bash
