@@ -163,6 +163,10 @@ public class IncidentStore {
     }
 
     public List<StaleRunCandidate> findStaleRunCandidates(long cutoffMillis) {
+        return findStaleRunCandidates(cutoffMillis, System.currentTimeMillis());
+    }
+
+    public List<StaleRunCandidate> findStaleRunCandidates(long cutoffMillis, long nowMillis) {
         ensureJdbcInitialized();
         try (Connection connection = openConnection();
              PreparedStatement statement = connection.prepareStatement("""
@@ -170,9 +174,18 @@ public class IncidentStore {
                      from diagnosis_runs
                      where status in ('QUEUED', 'RUNNING', 'WAITING_TOOL')
                        and coalesce(started_at, created_at) < ?
+                       and not exists (
+                           select 1
+                           from background_jobs job
+                           where job.job_type = 'DIAGNOSIS'
+                             and job.business_key = diagnosis_runs.run_id
+                             and job.status = 'RUNNING'
+                             and job.lease_expires_at >= ?
+                       )
                      order by coalesce(started_at, created_at), run_id
                      """)) {
             statement.setLong(1, cutoffMillis);
+            statement.setLong(2, nowMillis);
             try (ResultSet resultSet = statement.executeQuery()) {
                 List<StaleRunCandidate> candidates = new ArrayList<>();
                 while (resultSet.next()) {
@@ -288,6 +301,49 @@ public class IncidentStore {
         diagnosisRunRepository.insert(connection, run);
     }
 
+    public DiagnosisRunCreationResult persistNewDiagnosisRunIfNoActive(Connection connection,
+                                                                        String incidentId,
+                                                                        DiagnosisRunRecord run,
+                                                                        long updatedAt) throws Exception {
+        lockIncident(connection, incidentId);
+        Optional<DiagnosisRunRecord> active = diagnosisRunRepository.findActiveByIncidentId(connection, incidentId);
+        if (active.isPresent()) {
+            return new DiagnosisRunCreationResult(active.get(), false);
+        }
+        persistNewDiagnosisRun(connection, incidentId, run, updatedAt);
+        return new DiagnosisRunCreationResult(run, true);
+    }
+
+    public boolean persistReusedDiagnosisRunIfNoActive(String incidentId,
+                                                        DiagnosisRunRecord run,
+                                                        long updatedAt) {
+        return inTransaction(connection -> {
+            lockIncident(connection, incidentId);
+            if (diagnosisRunRepository.findActiveByIncidentId(connection, incidentId).isPresent()) {
+                return false;
+            }
+            diagnosisRunRepository.insert(connection, run);
+            touchIncident(connection, incidentId, updatedAt);
+            return true;
+        });
+    }
+
+    private void lockIncident(Connection connection, String incidentId) throws SQLException {
+        try (PreparedStatement statement = connection.prepareStatement("""
+                update incidents
+                set updated_at = updated_at
+                where id = ?
+                """)) {
+            statement.setString(1, incidentId);
+            if (statement.executeUpdate() == 0) {
+                throw new IllegalArgumentException("Incident 不存在: " + incidentId);
+            }
+        }
+    }
+
+    public record DiagnosisRunCreationResult(DiagnosisRunRecord run, boolean created) {
+    }
+
     public long updateRunToolState(String incidentId,
                                    String runId,
                                    long expectedVersion,
@@ -320,6 +376,22 @@ public class IncidentStore {
             }
             touchIncident(connection, incidentId, System.currentTimeMillis());
             return expectedVersion + 1L;
+        });
+    }
+
+    public DiagnosisRunRecord updateRunCaseArchive(String incidentId,
+                                                   String runId,
+                                                   boolean archived,
+                                                   String documentId,
+                                                   String message) {
+        return inTransaction(connection -> {
+            boolean updated = diagnosisRunRepository.updateCaseArchive(
+                    connection, incidentId, runId, archived, documentId, message);
+            if (updated) {
+                touchIncident(connection, incidentId, System.currentTimeMillis());
+            }
+            return diagnosisRunRepository.findById(connection, incidentId, runId)
+                    .orElseThrow(() -> new IllegalArgumentException("DiagnosisRun 不存在: " + runId));
         });
     }
 

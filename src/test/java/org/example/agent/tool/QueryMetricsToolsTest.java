@@ -11,6 +11,7 @@ import okhttp3.Response;
 import okhttp3.ResponseBody;
 import org.example.config.AppResilienceProperties;
 import org.example.dto.DiagnosisEvidence;
+import org.example.dto.DiagnosisRunRecord;
 import org.example.service.DependencyGuard;
 import org.example.service.DiagnosisEvidenceRecorder;
 import org.example.service.IncidentService;
@@ -49,6 +50,7 @@ class QueryMetricsToolsTest {
 
         JsonNode json = objectMapper.readTree(result);
         assertTrue(json.path("success").asBoolean());
+        assertEquals("MOCK", json.path("dataMode").asText());
         assertEquals("cpu_usage", json.path("metric").asText());
         assertEquals("1h", json.path("window").asText());
         assertFalse(json.path("points").isEmpty());
@@ -64,6 +66,19 @@ class QueryMetricsToolsTest {
         JsonNode json = objectMapper.readTree(result);
         assertFalse(json.path("success").asBoolean());
         assertTrue(json.path("message").asText().contains("不支持的指标"));
+        assertEquals("UNSUPPORTED_METRIC", json.path("errorCode").asText());
+        assertEquals("STOP_TOOL_DIRECTION", json.path("nextAction").asText());
+    }
+
+    @Test
+    void queryMetricTrend_shouldSupportJvmGcCollectionMetricInMockMode() throws Exception {
+        JsonNode json = objectMapper.readTree(tools.queryMetricTrend(
+                "jvm_gc_collection_seconds_count", "order-service", "pod-1", "15m", null));
+
+        assertTrue(json.path("success").asBoolean());
+        assertEquals("jvm_gc_collection_seconds_count", json.path("metric").asText());
+        assertEquals("MOCK", json.path("dataMode").asText());
+        assertTrue(json.path("summary").path("anomalous").asBoolean());
     }
 
     @Test
@@ -78,6 +93,10 @@ class QueryMetricsToolsTest {
     @Test
     void queryMetricTrend_shouldRecordEvidenceWhenDiagnosisContextExists() throws Exception {
         IncidentService incidentService = mock(IncidentService.class);
+        DiagnosisRunRecord run = new DiagnosisRunRecord();
+        run.setRunId("run-1");
+        when(incidentService.getDiagnosisRun("inc-1", "run-1"))
+                .thenReturn(java.util.Optional.of(run));
         DiagnosisEvidenceRecorder recorder = new DiagnosisEvidenceRecorder(incidentService, objectMapper);
         ReflectionTestUtils.setField(tools, "diagnosisEvidenceRecorder", recorder);
 

@@ -22,8 +22,12 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Optional;
 import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ConcurrentMap;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Predicate;
+import java.util.concurrent.locks.ReentrantLock;
 
 @Service
 public class DiagnosisEvidenceRecorder {
@@ -42,6 +46,7 @@ public class DiagnosisEvidenceRecorder {
     private final AppIncidentProperties incidentProperties;
     private final ToolCallAttemptContext attemptContext;
     private final ThreadLocal<ActiveRun> activeRun = new ThreadLocal<>();
+    private final ConcurrentMap<String, RunLock> runLocks = new ConcurrentHashMap<>();
 
     public DiagnosisEvidenceRecorder(IncidentService incidentService, ObjectMapper objectMapper) {
         this(incidentService, objectMapper, new AppIncidentProperties(), new ToolCallAttemptContext());
@@ -65,20 +70,28 @@ public class DiagnosisEvidenceRecorder {
     }
 
     public <T> T withRun(String incidentId, String runId, RunSupplier<T> supplier) throws Exception {
-        ActiveRun previous = activeRun.get();
-        Optional<DiagnosisRunRecord> snapshot = incidentService.getDiagnosisRun(incidentId, runId);
-        activeRun.set(new ActiveRun(incidentId, runId,
-                snapshot.map(DiagnosisRunRecord::getVersion).orElse(-1L),
-                snapshot.map(DiagnosisRunRecord::getEvidence).map(ArrayList::new).orElseGet(ArrayList::new),
-                snapshot.isPresent()));
+        RunLock runLock = acquireRunLock(incidentId, runId);
         try {
-            return supplier.get();
-        } finally {
-            if (previous == null) {
-                activeRun.remove();
-            } else {
-                activeRun.set(previous);
+            ActiveRun previous = activeRun.get();
+            Optional<DiagnosisRunRecord> snapshot = incidentService.getDiagnosisRun(incidentId, runId);
+            if (snapshot.isEmpty()) {
+                throw new IllegalArgumentException("DiagnosisRun 不存在: " + runId);
             }
+            activeRun.set(new ActiveRun(incidentId, runId,
+                    snapshot.get().getVersion(),
+                    new ArrayList<>(snapshot.get().getEvidence()),
+                    false));
+            try {
+                return supplier.get();
+            } finally {
+                if (previous == null) {
+                    activeRun.remove();
+                } else {
+                    activeRun.set(previous);
+                }
+            }
+        } finally {
+            releaseRunLock(incidentId, runId, runLock);
         }
     }
 
@@ -244,7 +257,9 @@ public class DiagnosisEvidenceRecorder {
         evidence.setAttemptCount(0);
         evidence.setDurationMs(0);
         evidence.setRetryable(false);
-        addEvidence(run, evidence);
+        if (!addEvidence(run, evidence)) {
+            throw new IllegalStateException("策略拦截证据写入失败");
+        }
         logger.info("诊断工具调用被策略拦截, incidentId: {}, runId: {}, tool: {}, errorCode: {}",
                 run.incidentId(), run.runId(), toolName, errorCode);
         return decorateResult(rawResult, evidence);
@@ -257,6 +272,10 @@ public class DiagnosisEvidenceRecorder {
         node.put("message", message);
         node.put("error", message);
         node.put("errorCode", errorCode);
+        node.put("stop", true);
+        node.put("nextAction", ERROR_DUPLICATE.equals(errorCode)
+                ? "STOP_TOOL_DIRECTION"
+                : "STOP_DIAGNOSTIC_TOOLS");
         return node.toString();
     }
 
@@ -282,9 +301,9 @@ public class DiagnosisEvidenceRecorder {
                     .map(DiagnosisRunRecord::getEvidence)
                     .orElse(List.of());
         } catch (RuntimeException e) {
-            logger.warn("读取当前诊断证据失败，将跳过工具预算检查, incidentId: {}, runId: {}",
+            logger.error("读取当前诊断证据失败，拒绝继续工具调用, incidentId: {}, runId: {}",
                     run.incidentId(), run.runId(), e);
-            return List.of();
+            throw new IllegalStateException("读取诊断证据失败，已阻止工具调用", e);
         }
     }
 
@@ -482,9 +501,35 @@ public class DiagnosisEvidenceRecorder {
         return true;
     }
 
+    private RunLock acquireRunLock(String incidentId, String runId) {
+        String key = runKey(incidentId, runId);
+        RunLock runLock = runLocks.compute(key, (ignored, existing) -> {
+            RunLock lock = existing == null ? new RunLock() : existing;
+            lock.references.incrementAndGet();
+            return lock;
+        });
+        runLock.lock.lock();
+        return runLock;
+    }
+
+    private void releaseRunLock(String incidentId, String runId, RunLock runLock) {
+        runLock.lock.unlock();
+        String key = runKey(incidentId, runId);
+        runLocks.computeIfPresent(key, (ignored, current) -> {
+            if (current != runLock) {
+                return current;
+            }
+            return runLock.references.decrementAndGet() == 0 ? null : current;
+        });
+    }
+
+    private String runKey(String incidentId, String runId) {
+        return String.valueOf(incidentId) + "\u0000" + String.valueOf(runId);
+    }
+
     private boolean detectSuccess(String rawResult) {
         if (rawResult == null || rawResult.isBlank()) {
-            return true;
+            return false;
         }
         try {
             JsonNode json = objectMapper.readTree(rawResult);
@@ -632,6 +677,11 @@ public class DiagnosisEvidenceRecorder {
         private boolean incremental() { return incremental; }
         private long version() { return version; }
         private void setVersion(long version) { this.version = version; }
+    }
+
+    private static final class RunLock {
+        private final ReentrantLock lock = new ReentrantLock();
+        private final AtomicInteger references = new AtomicInteger();
     }
 
     private class RecordingToolCallback implements ToolCallback {

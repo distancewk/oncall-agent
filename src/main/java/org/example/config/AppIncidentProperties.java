@@ -20,10 +20,13 @@ public class AppIncidentProperties {
     private long diagnosisReuseWindowMillis = 3_600_000L;
     private boolean toolCallDeduplicationEnabled = true;
     private int queryLogsMaxCallsPerRun = 3;
+    private int queryLogsMaxAttemptsPerRun = 5;
     private int queryInternalDocsMaxCallsPerRun = 3;
     private int tavilyMaxCallsPerRun = 2;
     private int dbhubMaxCallsPerRun = 2;
     private int maxToolCallsPerRun = 12;
+    private int maxToolAttemptsPerRun = 16;
+    private int maxSupervisorRounds = 8;
     private long staleRunTimeoutMillis = 600_000L;
     private long staleRunSweepDelayMillis = 60_000L;
 
@@ -131,6 +134,14 @@ public class AppIncidentProperties {
         this.queryLogsMaxCallsPerRun = queryLogsMaxCallsPerRun;
     }
 
+    public int getQueryLogsMaxAttemptsPerRun() {
+        return queryLogsMaxAttemptsPerRun;
+    }
+
+    public void setQueryLogsMaxAttemptsPerRun(int queryLogsMaxAttemptsPerRun) {
+        this.queryLogsMaxAttemptsPerRun = queryLogsMaxAttemptsPerRun;
+    }
+
     public int getQueryInternalDocsMaxCallsPerRun() {
         return queryInternalDocsMaxCallsPerRun;
     }
@@ -161,6 +172,22 @@ public class AppIncidentProperties {
 
     public void setMaxToolCallsPerRun(int maxToolCallsPerRun) {
         this.maxToolCallsPerRun = maxToolCallsPerRun;
+    }
+
+    public int getMaxToolAttemptsPerRun() {
+        return maxToolAttemptsPerRun;
+    }
+
+    public void setMaxToolAttemptsPerRun(int maxToolAttemptsPerRun) {
+        this.maxToolAttemptsPerRun = maxToolAttemptsPerRun;
+    }
+
+    public int getMaxSupervisorRounds() {
+        return maxSupervisorRounds;
+    }
+
+    public void setMaxSupervisorRounds(int maxSupervisorRounds) {
+        this.maxSupervisorRounds = maxSupervisorRounds;
     }
 
     public long getStaleRunTimeoutMillis() {

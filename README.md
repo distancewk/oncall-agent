@@ -359,6 +359,9 @@ node --test src/test/js/incidentFrontendActions.test.mjs
 | `APP_SECURITY_ENABLED` | `true` | API 鉴权开关，关闭仅限隔离测试环境 |
 | `APP_API_TOKEN` | 必填 | 普通 API 令牌 |
 | `APP_WEBHOOK_SECRET` | 必填 | Webhook 共享密钥 |
+| `APP_SECURITY_SESSION_TTL_SECONDS` | `28800` | 浏览器登录会话有效期（秒） |
+| `APP_SECURITY_COOKIE_SECURE` | `false` | 是否要求登录 Cookie 仅通过 HTTPS 发送；prod profile 默认 true |
+| `APP_TRUSTED_PROXIES` | 空 | 受信任反向代理地址，用于安全地解析转发请求信息 |
 | `APP_ALERT_SIMULATE_ENABLED` | `false` | 模拟告警接口开关 |
 | `APP_CHAT_HISTORY_PATH` | `./data/chat-history` | 完整聊天历史目录 |
 | `APP_INCIDENTS_PATH` | `./data/incidents` | 旧 JSON Incident 导入目录，仅用于从历史文件迁移到 JDBC |
@@ -377,12 +380,21 @@ node --test src/test/js/incidentFrontendActions.test.mjs
 | `APP_JOB_RECOVERY_DELAY_MILLIS` | `15000` | 失败重试延迟和过期租约扫描间隔 |
 | `APP_JOB_WORKER_CONCURRENCY` | `4` | 后台任务执行并发数 |
 | `APP_JOB_DIAGNOSIS_MAX_ATTEMPTS` | `2` | 诊断任务最大尝试次数 |
+| `APP_JOB_DIAGNOSIS_PREFETCH_CONCURRENCY` | `4` | 诊断任务预取证据的并发数 |
 | `APP_JOB_INDEX_MAX_ATTEMPTS` | `3` | 文档索引任务最大尝试次数 |
+| `APP_JOB_ARCHIVE_MAX_ATTEMPTS` | `3` | 历史案例归档任务最大尝试次数 |
+| `APP_DIRECT_MODEL_ROUTING_ENABLED` | `true` | 是否启用直接模型路由 |
 | `APP_DIAGNOSIS_REUSE_ENABLED` | `true` | 同一 Incident 内重复告警是否复用最近完成报告 |
 | `APP_DIAGNOSIS_REUSE_WINDOW_MILLIS` | `3600000` | 诊断报告复用时间窗口 |
 | `APP_TOOL_CALL_DEDUPLICATION_ENABLED` | `true` | 同一 DiagnosisRun 内工具调用去重开关 |
 | `APP_QUERY_LOGS_MAX_CALLS_PER_RUN` | `3` | 单次 DiagnosisRun 中 `queryLogs` 最大调用次数 |
+| `APP_QUERY_LOGS_MAX_ATTEMPTS_PER_RUN` | `5` | 单次 DiagnosisRun 中 `queryLogs` 最大尝试次数 |
+| `APP_QUERY_INTERNAL_DOCS_MAX_CALLS_PER_RUN` | `3` | 单次 DiagnosisRun 中内部文档工具最大调用次数 |
+| `APP_TAVILY_MAX_CALLS_PER_RUN` | `2` | 单次 DiagnosisRun 中 Tavily 最大调用次数 |
+| `APP_DBHUB_MAX_CALLS_PER_RUN` | `2` | 单次 DiagnosisRun 中 DBHub 最大调用次数 |
 | `APP_MAX_TOOL_CALLS_PER_RUN` | `12` | 单次 DiagnosisRun 最大工具调用预算 |
+| `APP_MAX_TOOL_ATTEMPTS_PER_RUN` | `16` | 单次 DiagnosisRun 最大工具尝试预算 |
+| `APP_MAX_SUPERVISOR_ROUNDS` | `8` | 单次 DiagnosisRun 最大 Supervisor 轮数 |
 | `APP_STALE_RUN_TIMEOUT_MILLIS` | `600000` | 活跃诊断 run 超时判定窗口 |
 | `APP_STALE_RUN_SWEEP_DELAY_MILLIS` | `60000` | 超时诊断 run 扫描间隔 |
 | `APP_RESILIENCE_ENABLED` | `true` | 依赖熔断/重试总开关 |
@@ -403,7 +415,15 @@ node --test src/test/js/incidentFrontendActions.test.mjs
 | `APP_MCP_DBHUB_RETRY_MAX_ATTEMPTS` | `2` | DBHub MCP 只读查询最大尝试次数 |
 | `APP_MCP_DBHUB_RETRY_WAIT_DURATION` | `500ms` | DBHub MCP 查询重试等待时间 |
 | `APP_PRIVATE_MEMORY_RECALL_ENABLED` | `true` | 私人记忆召回开关 |
+| `APP_PRIVATE_MEMORY_RECALL_GATING_ENABLED` | `true` | 是否启用私人记忆相关性门控 |
 | `APP_PRIVATE_MEMORY_RECALL_TOP_K` | `3` | 私人记忆召回数量 |
+| `APP_PRIVATE_MEMORY_RECALL_MIN_SCORE` | `0.0` | 私人记忆召回最低相关性分数 |
+| `APP_PRIVATE_MEMORY_RECALL_MAX_PROMPT_CHARS` | `1200` | 注入提示词的私人记忆最大字符数 |
+| `APP_MEMORY_EXTRACTION_DEBOUNCE_MILLIS` | `5000` | 记忆提炼防抖时间（毫秒） |
+| `APP_MEMORY_EXTRACTION_BATCH_SIZE` | `6` | 单批记忆提炼消息数 |
+| `APP_MEMORY_EXTRACTION_MAX_QUEUE_MESSAGES` | `100` | 记忆提炼队列最大消息数 |
+| `APP_MEMORY_EXTRACTION_MAX_PROMPT_CHARS` | `6000` | 记忆提炼提示词最大字符数 |
+| `APP_MEMORY_EXTRACTION_MAX_FACTS` | `8` | 单批最多提炼事实数 |
 | `RAG_SEARCH_EF` | `64` | Milvus HNSW 搜索 ef 参数 |
 | `MCP_CLIENT_ENABLED` | `true` | MCP profile 下 MCP Client 开关 |
 | `MCP_REQUEST_TIMEOUT` | `60s` | MCP 工具请求超时 |
@@ -427,7 +447,7 @@ node --test src/test/js/incidentFrontendActions.test.mjs
 | `POSTGRES_DB` | `superbizagent` | Compose 内 PostgreSQL 数据库名 |
 | `POSTGRES_USER` | `superbizagent` | Compose 内 PostgreSQL 用户 |
 | `POSTGRES_PASSWORD` | 必填 | Compose 内 PostgreSQL 密码 |
-| `POSTGRES_PORT` | 不再暴露 | PostgreSQL 仅在 Compose 内部网络可访问 |
+| `POSTGRES_PORT` | `5433` | PostgreSQL 仅绑定宿主机 `127.0.0.1`，不对外网卡暴露 |
 | `DOCKER_VOLUME_DIRECTORY` | `.` | Compose 数据、上传和历史目录挂载根路径 |
 
 ## MCP 工具
@@ -490,12 +510,13 @@ super-biz-agent/
 
 ## 测试与质量
 
+完整测试分层、PR 门禁、故障处理和发布前检查见 [TESTING.md](TESTING.md)。
+
 ```bash
 mvn test
 mvn -Ppostgres-it verify
 node --check src/main/resources/static/app.js
-node --test src/test/js/evidenceRendering.test.mjs
-node --test src/test/js/incidentFrontendActions.test.mjs
+node --test src/test/js/evidenceRendering.test.mjs src/test/js/incidentFrontendActions.test.mjs
 docker compose config
 ```
 

@@ -4,8 +4,8 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import io.milvus.client.MilvusServiceClient;
 import io.milvus.grpc.MutationResult;
 import io.milvus.param.R;
-import io.milvus.param.dml.DeleteParam;
 import io.milvus.param.dml.InsertParam;
+import io.milvus.param.dml.UpsertParam;
 import lombok.Getter;
 import lombok.Setter;
 import org.example.constant.MilvusConstants;
@@ -43,6 +43,9 @@ public class IncidentCaseService {
     @Autowired(required = false)
     private DependencyGuard dependencyGuard;
 
+    @Autowired(required = false)
+    private DiagnosisEvidenceRecorder diagnosisEvidenceRecorder;
+
     @Autowired
     public IncidentCaseService(IncidentService incidentService,
                                @Lazy MilvusServiceClient milvusClient,
@@ -61,6 +64,9 @@ public class IncidentCaseService {
                 .orElseThrow(() -> new IllegalArgumentException("Incident 不存在: " + incidentId));
         DiagnosisRunRecord run = latestCompletedRun(incident)
                 .orElseThrow(() -> new IllegalStateException("Incident 尚无已完成诊断，不能写入历史案例"));
+        if (!"CONFIRMED".equals(run.getHumanReviewStatus())) {
+            throw new IllegalStateException("DiagnosisRun 未被人工确认，不能写入历史案例: " + run.getRunId());
+        }
         return archiveCase(incident, run);
     }
 
@@ -71,7 +77,7 @@ public class IncidentCaseService {
                 .filter(item -> runId.equals(item.getRunId()))
                 .findFirst()
                 .orElseThrow(() -> new IllegalArgumentException("DiagnosisRun 不存在: " + runId));
-        if (!"COMPLETED".equals(run.getStatus()) || run.getReport() == null || run.getReport().isBlank()) {
+        if (!isCompletedRun(run) || run.getReport() == null || run.getReport().isBlank()) {
             throw new IllegalStateException("DiagnosisRun 尚无已完成报告，不能写入历史案例: " + runId);
         }
         if (!"CONFIRMED".equals(run.getHumanReviewStatus())) {
@@ -82,8 +88,7 @@ public class IncidentCaseService {
 
     private ArchiveResult archiveCase(IncidentRecord incident, DiagnosisRunRecord run) {
         CaseDocument document = buildCaseDocument(incident, run);
-        deleteExistingCase(incident.getId());
-        insertCaseDocument(document);
+        upsertCaseDocument(document);
 
         ArchiveResult result = new ArchiveResult();
         result.setSuccess(true);
@@ -115,8 +120,30 @@ public class IncidentCaseService {
         }
         List<VectorSearchService.SearchResult> cases;
         try {
-            cases = findSimilarCases(incident, 3);
+            if (diagnosisEvidenceRecorder == null) {
+                cases = findSimilarCases(incident, 3);
+            } else {
+                @SuppressWarnings("unchecked")
+                List<VectorSearchService.SearchResult>[] holder = new List[]{null};
+                diagnosisEvidenceRecorder.withRun(incident.getId(), run.getRunId(), () -> {
+                    diagnosisEvidenceRecorder.recordToolCall(
+                            TOOL_SEARCH_SIMILAR_CASES,
+                            buildSearchParams(incident, 3),
+                            "历史故障案例",
+                            () -> {
+                                List<VectorSearchService.SearchResult> found = findSimilarCases(incident, 3);
+                                holder[0] = found;
+                                return toJson(found);
+                            });
+                    return null;
+                });
+                cases = holder[0] == null ? List.of() : holder[0];
+            }
         } catch (DependencyUnavailableException e) {
+            if (diagnosisEvidenceRecorder != null) {
+                return alertContext + "\n\n## 相似历史故障案例\n- 召回失败: "
+                        + e.getErrorCode() + " " + e.getMessage() + "\n";
+            }
             DiagnosisEvidence evidence = DiagnosisEvidence.toolCall(
                     TOOL_SEARCH_SIMILAR_CASES,
                     buildSearchParams(incident, 3),
@@ -131,6 +158,10 @@ public class IncidentCaseService {
             return alertContext + "\n\n## 相似历史故障案例\n- 召回失败 [evidence: "
                     + evidence.getId() + "]: " + e.getErrorCode() + " " + e.getMessage() + "\n";
         } catch (Exception e) {
+            if (diagnosisEvidenceRecorder != null) {
+                return alertContext + "\n\n## 相似历史故障案例\n- 召回失败: "
+                        + value(e.getMessage()) + "\n";
+            }
             DiagnosisEvidence evidence = DiagnosisEvidence.toolCall(
                     TOOL_SEARCH_SIMILAR_CASES,
                     buildSearchParams(incident, 3),
@@ -230,19 +261,7 @@ public class IncidentCaseService {
         return new CaseDocument(id, content.toString(), metadata);
     }
 
-    private void deleteExistingCase(String incidentId) {
-        String expr = "metadata[\"doc_type\"] == \"" + MilvusConstants.DOC_TYPE_INCIDENT_CASE
-                + "\" && metadata[\"incident_id\"] == \"" + escapeExpr(incidentId) + "\"";
-        R<MutationResult> response = guardedMilvus("deleteExistingCase", () -> milvusClient.delete(DeleteParam.newBuilder()
-                .withCollectionName(MilvusConstants.MILVUS_COLLECTION_NAME)
-                .withExpr(expr)
-                .build()));
-        if (response.getStatus() != 0) {
-            throw new RuntimeException("删除旧历史案例失败: " + response.getMessage());
-        }
-    }
-
-    private void insertCaseDocument(CaseDocument document) {
+    private void upsertCaseDocument(CaseDocument document) {
         List<Float> vector = embeddingService.generateEmbedding(document.content());
         SortedMap<Long, Float> sparseVector = embeddingService.generateSparseVector(document.content());
         InsertParam insertParam = insertHelper.buildInsertParam(
@@ -251,9 +270,13 @@ public class IncidentCaseService {
                 List.of(vector),
                 List.of(sparseVector),
                 List.of(document.metadata()));
-        R<MutationResult> response = guardedMilvus("insertCaseDocument", () -> milvusClient.insert(insertParam));
+        UpsertParam upsertParam = UpsertParam.newBuilder()
+                .withCollectionName(MilvusConstants.MILVUS_COLLECTION_NAME)
+                .withFields(insertParam.getFields())
+                .build();
+        R<MutationResult> response = guardedMilvus("upsertCaseDocument", () -> milvusClient.upsert(upsertParam));
         if (response.getStatus() != 0) {
-            throw new RuntimeException("写入历史案例失败: " + response.getMessage());
+            throw new RuntimeException("更新历史案例失败: " + response.getMessage());
         }
     }
 
@@ -284,11 +307,15 @@ public class IncidentCaseService {
         List<DiagnosisRunRecord> runs = incident.getDiagnosisRuns();
         for (int i = runs.size() - 1; i >= 0; i--) {
             DiagnosisRunRecord run = runs.get(i);
-            if ("COMPLETED".equals(run.getStatus()) && run.getReport() != null && !run.getReport().isBlank()) {
+            if (isCompletedRun(run) && run.getReport() != null && !run.getReport().isBlank()) {
                 return Optional.of(run);
             }
         }
         return Optional.empty();
+    }
+
+    private boolean isCompletedRun(DiagnosisRunRecord run) {
+        return "COMPLETED".equals(run.getStatus()) || "COMPLETED_WITH_GAPS".equals(run.getStatus());
     }
 
     private String buildIncidentCaseQuery(IncidentRecord incident) {
@@ -393,10 +420,6 @@ public class IncidentCaseService {
 
     private String escapeJson(String value) {
         return value(value).replace("\\", "\\\\").replace("\"", "\\\"");
-    }
-
-    private String escapeExpr(String value) {
-        return escapeJson(value);
     }
 
     private record CaseDocument(String id, String content, Map<String, Object> metadata) {

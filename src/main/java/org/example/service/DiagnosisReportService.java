@@ -8,6 +8,7 @@ import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 import java.util.regex.Matcher;
@@ -18,7 +19,28 @@ public class DiagnosisReportService {
 
     private static final Pattern EVIDENCE_REF_PATTERN = Pattern.compile("\\[evidence:\\s*([^\\]\\s]+)\\s*]", Pattern.CASE_INSENSITIVE);
     private static final Pattern VALIDATION_SECTION_PATTERN = Pattern.compile("(?ms)^## 证据校验\\s*$.*?(?=^## (?!证据校验)|\\z)");
+    private static final Pattern CONFIDENCE_SECTION_PATTERN = Pattern.compile("(?ms)^(### 置信度\\s*$).*?(?=^### |^## |\\z)");
     private static final int SUMMARY_LIMIT = 180;
+    private static final String TOOL_DUPLICATE_SKIPPED = "TOOL_DUPLICATE_SKIPPED";
+    private static final String TOOL_BUDGET_EXCEEDED = "TOOL_BUDGET_EXCEEDED";
+
+    public static boolean isFinalReportCandidate(String report) {
+        if (report == null || report.isBlank()) {
+            return false;
+        }
+        String safeReport = report.trim();
+        if (!safeReport.startsWith("# 告警分析报告")) {
+            return false;
+        }
+        if (safeReport.matches("(?is).*['\"]decision['\"]\\s*:\\s*['\"](?:PLAN|EXECUTE|FINISH)['\"].*")) {
+            return false;
+        }
+        return safeReport.contains("告警根因分析")
+                && safeReport.contains("处理方案执行")
+                && safeReport.contains("结论")
+                && safeReport.contains("置信度")
+                && safeReport.contains("缺失证据");
+    }
 
     public String augmentAlertContext(String alertContext, List<DiagnosisEvidence> evidence) {
         StringBuilder builder = new StringBuilder(alertContext == null ? "" : alertContext.trim());
@@ -37,7 +59,8 @@ public class DiagnosisReportService {
     public String buildEvidenceTable(List<DiagnosisEvidence> evidence) {
         List<DiagnosisEvidence> usableEvidence = usableToolEvidence(evidence);
         List<DiagnosisEvidence> failedEvidence = failedToolEvidence(evidence);
-        if (usableEvidence.isEmpty() && failedEvidence.isEmpty()) {
+        List<DiagnosisEvidence> skippedEvidence = skippedToolEvidence(evidence);
+        if (usableEvidence.isEmpty() && failedEvidence.isEmpty() && skippedEvidence.isEmpty()) {
             return "";
         }
 
@@ -91,6 +114,25 @@ public class DiagnosisReportService {
                         .append(" |\n");
             }
         }
+        if (!skippedEvidence.isEmpty()) {
+            if (!builder.isEmpty()) {
+                builder.append("\n");
+            }
+            builder.append("## 工具策略拦截说明（不可作为失败或事实证据）\n");
+            builder.append("| Evidence ID | 工具 | 状态 | 错误码 | 摘要 |\n");
+            builder.append("|---|---|---|---|---|\n");
+            for (DiagnosisEvidence item : skippedEvidence) {
+                builder.append("| ")
+                        .append(cell(item.getId()))
+                        .append(" | ")
+                        .append(cell(item.getToolName()))
+                        .append(" | skipped | ")
+                        .append(cell(item.getErrorCode()))
+                        .append(" | ")
+                        .append(cell(compact(item.getSummary(), SUMMARY_LIMIT)))
+                        .append(" |\n");
+            }
+        }
         return builder.toString().trim();
     }
 
@@ -114,7 +156,15 @@ public class DiagnosisReportService {
         }
         if (!refs.toolEvidence().isEmpty() && refs.citedIds().isEmpty()) {
             issues.add("报告没有引用工具 evidence id");
-            score -= 25;
+            score = Math.min(score, 59);
+        }
+        if (refs.usableEvidence().isEmpty()) {
+            issues.add("没有成功工具 evidence");
+            score = Math.min(score, 59);
+        }
+        if (hasCitedMockEvidence(refs.knownCitedIds(), refs.usableEvidenceById())) {
+            issues.add("报告引用了 Mock 数据，不能视为真实诊断证据");
+            score = Math.min(score, 59);
         }
         if (!refs.unknownIds().isEmpty()) {
             issues.add("引用了未知 evidence");
@@ -133,7 +183,14 @@ public class DiagnosisReportService {
         boolean containsJvmClaim = containsJvmEvidenceClaim(safeReport);
         boolean hasSuccessfulJvmText = hasCitedEvidenceText(refs.knownCitedIds(), refs.usableEvidenceById(),
                 "GC", "Full GC", "gc_", "OutOfMemory", "OutOfMemoryError", "OOM");
-        if (containsLogClaim(safeReport) && !hasSuccessfulLogs && !(containsJvmClaim && hasSuccessfulJvmText)) {
+        boolean hasSuccessfulJvmMetric = hasCitedSuccessfulMetric(refs.knownCitedIds(), refs.usableEvidenceById(),
+                "jvm_gc_collection_seconds_count");
+        if (containsJvmClaim && !hasSuccessfulLogs && !hasSuccessfulJvmText && !hasSuccessfulJvmMetric) {
+            issues.add("GC/Full GC 结论缺少对应日志或 JVM 指标 evidence");
+            score -= 15;
+        }
+        if (containsLogClaim(safeReport) && !hasSuccessfulLogs
+                && !(containsJvmClaim && (hasSuccessfulJvmText || hasSuccessfulJvmMetric))) {
             issues.add("日志/异常结论缺少成功日志 evidence");
             score -= 15;
         }
@@ -159,10 +216,13 @@ public class DiagnosisReportService {
 
         List<String> missingEvidence = findMissingEvidence(safeReport, refs.usableEvidenceById(),
                 refs.knownCitedIds(), refs.toolEvidence());
-        String confidence = confidence(refs.unknownIds(), refs.invalidIds(), missingEvidence, refs.knownCitedIds());
-        String status = validationStatus(refs.unknownIds(), refs.invalidIds(), missingEvidence);
+        boolean citedMockEvidence = hasCitedMockEvidence(refs.knownCitedIds(), refs.usableEvidenceById());
+        String confidence = confidence(refs.unknownIds(), refs.invalidIds(), missingEvidence,
+                refs.knownCitedIds(), citedMockEvidence);
+        String status = validationStatus(refs.unknownIds(), refs.invalidIds(), missingEvidence, citedMockEvidence);
 
-        return safeReport
+        String normalizedReport = normalizeConfidenceSection(safeReport, confidence);
+        return normalizedReport
                 + "\n\n---\n\n"
                 + "## 证据校验\n"
                 + "- 校验状态: " + status + "\n"
@@ -173,6 +233,14 @@ public class DiagnosisReportService {
                 + "- 缺失证据: " + (missingEvidence.isEmpty() ? "无" : String.join("; ", missingEvidence)) + "\n"
                 + "- 可用证据: " + availableEvidenceSummary(refs.usableEvidence()) + "\n"
                 + "- 约束说明: 以上校验仅基于已持久化的工具 evidence；未被 evidence 支撑的结论应按证据不足处理。\n";
+    }
+
+    private String normalizeConfidenceSection(String report, String confidence) {
+        Matcher matcher = CONFIDENCE_SECTION_PATTERN.matcher(report);
+        if (!matcher.find()) {
+            return report;
+        }
+        return matcher.replaceFirst(Matcher.quoteReplacement(matcher.group(1) + "\n" + confidence + "\n"));
     }
 
     private EvidenceReferenceContext evidenceReferenceContext(String report, List<DiagnosisEvidence> evidence) {
@@ -202,6 +270,12 @@ public class DiagnosisReportService {
         if (!toolEvidence.isEmpty() && knownCitedIds.isEmpty()) {
             missing.add("报告没有引用任何工具 evidence id");
         }
+        if (evidenceById.isEmpty()) {
+            missing.add("没有成功工具 evidence");
+        }
+        if (hasCitedMockEvidence(knownCitedIds, evidenceById)) {
+            missing.add("报告引用了 Mock 数据，缺少真实运行数据");
+        }
         if (containsResourceClaim(report) && !hasCitedSuccessfulTool(knownCitedIds, evidenceById, "queryMetricTrend")) {
             missing.add("资源类结论缺少成功的 queryMetricTrend 趋势 evidence");
         }
@@ -209,11 +283,14 @@ public class DiagnosisReportService {
         boolean containsJvmClaim = containsJvmEvidenceClaim(report);
         boolean hasSuccessfulJvmText = hasCitedEvidenceText(knownCitedIds, evidenceById,
                 "GC", "Full GC", "gc_", "OutOfMemory", "OutOfMemoryError", "OOM");
-        if (containsLogClaim(report) && !hasSuccessfulLogs && !(containsJvmClaim && hasSuccessfulJvmText)) {
-            missing.add("日志/异常结论缺少成功的 queryLogs evidence");
-        }
-        if (containsJvmClaim && !hasSuccessfulLogs && !hasSuccessfulJvmText) {
+        boolean hasSuccessfulJvmMetric = hasCitedSuccessfulMetric(knownCitedIds, evidenceById,
+                "jvm_gc_collection_seconds_count");
+        if (containsJvmClaim && !hasSuccessfulLogs && !hasSuccessfulJvmText && !hasSuccessfulJvmMetric) {
             missing.add("GC/Full GC 结论缺少对应日志或 JVM 指标 evidence");
+        }
+        if (containsLogClaim(report) && !hasSuccessfulLogs
+                && !(containsJvmClaim && (hasSuccessfulJvmText || hasSuccessfulJvmMetric))) {
+            missing.add("日志/异常结论缺少成功的 queryLogs evidence");
         }
         return missing;
     }
@@ -241,7 +318,35 @@ public class DiagnosisReportService {
                 .map(evidenceById::get)
                 .anyMatch(evidence -> evidence != null
                         && evidence.isSuccess()
-                        && toolName.equals(evidence.getToolName()));
+                && toolName.equals(evidence.getToolName()));
+    }
+
+    private boolean hasCitedSuccessfulMetric(Set<String> citedIds,
+                                             Map<String, DiagnosisEvidence> evidenceById,
+                                             String metricName) {
+        return citedIds.stream()
+                .map(evidenceById::get)
+                .anyMatch(evidence -> evidence != null
+                        && evidence.isSuccess()
+                        && "queryMetricTrend".equals(evidence.getToolName())
+                && value(evidence.getQueryParams()).contains(metricName));
+    }
+
+    private boolean hasCitedMockEvidence(Set<String> citedIds,
+                                         Map<String, DiagnosisEvidence> evidenceById) {
+        return citedIds.stream()
+                .map(evidenceById::get)
+                .anyMatch(this::isMockEvidence);
+    }
+
+    private boolean isMockEvidence(DiagnosisEvidence evidence) {
+        if (evidence == null) {
+            return false;
+        }
+        String raw = value(evidence.getRawFragment())
+                .replaceAll("\\s+", "")
+                .toUpperCase(Locale.ROOT);
+        return raw.contains("\"DATAMODE\":\"MOCK\"");
     }
 
     private boolean hasCitedEvidenceText(Set<String> citedIds,
@@ -286,8 +391,12 @@ public class DiagnosisReportService {
     private String confidence(List<String> unknownIds,
                               List<String> invalidIds,
                               List<String> missingEvidence,
-                              Set<String> knownCitedIds) {
+                              Set<String> knownCitedIds,
+                              boolean citedMockEvidence) {
         if (!unknownIds.isEmpty() || !invalidIds.isEmpty()) {
+            return "低";
+        }
+        if (citedMockEvidence) {
             return "低";
         }
         if (missingEvidence.isEmpty() && !knownCitedIds.isEmpty()) {
@@ -296,11 +405,14 @@ public class DiagnosisReportService {
         return "中";
     }
 
-    private String validationStatus(List<String> unknownIds, List<String> invalidIds, List<String> missingEvidence) {
+    private String validationStatus(List<String> unknownIds,
+                                    List<String> invalidIds,
+                                    List<String> missingEvidence,
+                                    boolean citedMockEvidence) {
         if (!unknownIds.isEmpty() || !invalidIds.isEmpty()) {
             return "失败";
         }
-        if (!missingEvidence.isEmpty()) {
+        if (!missingEvidence.isEmpty() || citedMockEvidence) {
             return "需补证";
         }
         return "通过";
@@ -344,7 +456,7 @@ public class DiagnosisReportService {
                         + "("
                         + value(evidence.getToolName())
                         + ","
-                        + (evidence.isSuccess() ? "success" : "failed")
+                        + evidenceStatus(evidence)
                         + (notBlank(evidence.getErrorCode()) ? "," + evidence.getErrorCode() : "")
                         + ")")
                 .toList()
@@ -370,8 +482,30 @@ public class DiagnosisReportService {
 
     private List<DiagnosisEvidence> failedToolEvidence(List<DiagnosisEvidence> evidence) {
         return toolEvidence(evidence).stream()
-                .filter(item -> !item.isSuccess() || "CIRCUIT_OPEN".equals(item.getErrorCode()))
+                .filter(item -> !isPolicySkippedEvidence(item)
+                        && (!item.isSuccess() || "CIRCUIT_OPEN".equals(item.getErrorCode())))
                 .toList();
+    }
+
+    private List<DiagnosisEvidence> skippedToolEvidence(List<DiagnosisEvidence> evidence) {
+        return toolEvidence(evidence).stream()
+                .filter(this::isPolicySkippedEvidence)
+                .toList();
+    }
+
+    private boolean isPolicySkippedEvidence(DiagnosisEvidence evidence) {
+        return evidence != null
+                && !evidence.isSuccess()
+                && evidence.getAttemptCount() == 0
+                && (TOOL_DUPLICATE_SKIPPED.equals(evidence.getErrorCode())
+                || TOOL_BUDGET_EXCEEDED.equals(evidence.getErrorCode()));
+    }
+
+    private String evidenceStatus(DiagnosisEvidence evidence) {
+        if (isPolicySkippedEvidence(evidence)) {
+            return "skipped";
+        }
+        return evidence.isSuccess() ? "success" : "failed";
     }
 
     private String reportRules() {
@@ -379,8 +513,9 @@ public class DiagnosisReportService {
                 ## 报告证据约束
                 - 最终报告中的每个根因、症状和处理建议必须引用上方成功工具 Evidence ID，格式为 [evidence: ev-xxxx]。
                 - 资源类结论（CPU、内存、错误率、P99、重启）必须引用 queryMetricTrend 证据。
-                - 日志、异常、GC/Full GC、OOM 结论必须引用 queryLogs 或明确包含该信号的 JVM/日志证据。
+                - 日志、异常、OOM 结论必须引用 queryLogs；GC/Full GC 结论可引用 queryLogs 或 jvm_gc_collection_seconds_count 趋势 evidence。
                 - 禁止使用未出现在成功证据表中的 evidence id；失败或熔断 evidence 只能说明证据缺失，不能支撑事实结论。
+                - TOOL_DUPLICATE_SKIPPED 和 TOOL_BUDGET_EXCEEDED 是策略拦截，不是外部工具失败；不要重复调用同一方向，直接记录证据缺口并结束该方向。
                 - 最终报告需要包含“置信度”和“缺失证据”判断。
                 """.trim();
     }

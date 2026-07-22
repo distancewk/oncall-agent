@@ -244,6 +244,7 @@ public class QueryLogsTools {
             // 构建成功响应
             QueryLogsOutput output = new QueryLogsOutput();
             output.setSuccess(!logEntries.isEmpty());
+            output.setDataMode(mockEnabled ? "MOCK" : "REAL");
             output.setRegion(region);
             output.setLogTopic(logTopic);
             output.setQuery(safeQuery.isBlank() ? "DEFAULT_QUERY" : safeQuery);
@@ -763,6 +764,8 @@ public class QueryLogsTools {
             output.setMessage(message);
             output.setError(error);
             output.setErrorCode(errorCode);
+            output.setNextAction("DEPENDENCY_ERROR".equals(errorCode)
+                    ? "REPORT_MISSING_EVIDENCE" : "STOP_TOOL_DIRECTION");
             return objectMapper.writerWithDefaultPrettyPrinter().writeValueAsString(output);
         } catch (Exception e) {
             return String.format("{\"success\":false,\"message\":\"%s\",\"error\":\"%s\",\"errorCode\":\"%s\"}",
@@ -844,6 +847,12 @@ public class QueryLogsTools {
 
         @JsonProperty("errorCode")
         private String errorCode;
+
+        @JsonProperty("dataMode")
+        private String dataMode;
+
+        @JsonProperty("nextAction")
+        private String nextAction;
     }
     
     /**

@@ -33,7 +33,7 @@ class DiagnosisEvidenceRecorderTest {
 
     @Test
     void recordToolCall_shouldPersistProgressEvidenceAndReturnEvidenceId() throws Exception {
-        IncidentService incidentService = mock(IncidentService.class);
+        IncidentService incidentService = mockIncidentService();
         DiagnosisEvidenceRecorder recorder = new DiagnosisEvidenceRecorder(incidentService, objectMapper);
 
         String result = recorder.withRun("inc-1", "run-1", () -> recorder.recordToolCall(
@@ -65,7 +65,7 @@ class DiagnosisEvidenceRecorderTest {
 
     @Test
     void recordToolCall_withoutActiveRunShouldJustCallSupplier() {
-        IncidentService incidentService = mock(IncidentService.class);
+        IncidentService incidentService = mockIncidentService();
         DiagnosisEvidenceRecorder recorder = new DiagnosisEvidenceRecorder(incidentService, objectMapper);
 
         String result = recorder.recordToolCall("queryLogs", "{}", "recent", () -> "plain text");
@@ -74,8 +74,21 @@ class DiagnosisEvidenceRecorderTest {
     }
 
     @Test
+    void recordToolCall_shouldTreatBlankResultAsFailedEvidence() throws Exception {
+        IncidentService incidentService = mockIncidentService();
+        DiagnosisEvidenceRecorder recorder = new DiagnosisEvidenceRecorder(incidentService, objectMapper);
+
+        recorder.withRun("inc-1", "run-1", () -> recorder.recordToolCall(
+                "queryLogs", "{}", "recent", () -> ""));
+
+        ArgumentCaptor<DiagnosisEvidence> evidenceCaptor = ArgumentCaptor.forClass(DiagnosisEvidence.class);
+        verify(incidentService).addToolEvidence(eq("inc-1"), eq("run-1"), evidenceCaptor.capture());
+        assertFalse(evidenceCaptor.getValue().isSuccess());
+    }
+
+    @Test
     void recordToolCall_shouldCaptureErrorCodeFromFailedJsonResult() throws Exception {
-        IncidentService incidentService = mock(IncidentService.class);
+        IncidentService incidentService = mockIncidentService();
         DiagnosisEvidenceRecorder recorder = new DiagnosisEvidenceRecorder(incidentService, objectMapper);
 
         recorder.withRun("inc-1", "run-1", () -> recorder.recordToolCall(
@@ -95,7 +108,7 @@ class DiagnosisEvidenceRecorderTest {
 
     @Test
     void wrapToolCallbacks_shouldRecordExternalToolWhenDefinitionIsMissing() throws Exception {
-        IncidentService incidentService = mock(IncidentService.class);
+        IncidentService incidentService = mockIncidentService();
         DiagnosisEvidenceRecorder recorder = new DiagnosisEvidenceRecorder(incidentService, objectMapper);
         ToolCallback missingDefinition = new ToolCallback() {
             @Override
@@ -129,7 +142,7 @@ class DiagnosisEvidenceRecorderTest {
 
     @Test
     void recordToolCall_shouldPersistAttemptCountAndDuration() throws Exception {
-        IncidentService incidentService = mock(IncidentService.class);
+        IncidentService incidentService = mockIncidentService();
         ToolCallAttemptContext attemptContext = new ToolCallAttemptContext();
         DiagnosisEvidenceRecorder recorder = new DiagnosisEvidenceRecorder(
                 incidentService, objectMapper, new org.example.config.AppIncidentProperties(), attemptContext);
@@ -160,7 +173,7 @@ class DiagnosisEvidenceRecorderTest {
 
     @Test
     void recordToolCall_shouldCaptureErrorCodeFromDependencyUnavailableException() {
-        IncidentService incidentService = mock(IncidentService.class);
+        IncidentService incidentService = mockIncidentService();
         DiagnosisEvidenceRecorder recorder = new DiagnosisEvidenceRecorder(incidentService, objectMapper);
 
         DependencyUnavailableException thrown = assertThrows(DependencyUnavailableException.class,
@@ -185,7 +198,7 @@ class DiagnosisEvidenceRecorderTest {
 
     @Test
     void recordToolCall_shouldSkipDuplicateToolCallWithoutInvokingSupplier() throws Exception {
-        IncidentService incidentService = mock(IncidentService.class);
+        IncidentService incidentService = mockIncidentService();
         when(incidentService.getDiagnosisRuns("inc-1")).thenReturn(OptionalRun.with(evidence(
                 "queryLogs", "{\"query\":\"level:ERROR\",\"logTopic\":\"application-logs\"}")));
         DiagnosisEvidenceRecorder recorder = new DiagnosisEvidenceRecorder(incidentService, objectMapper);
@@ -205,6 +218,8 @@ class DiagnosisEvidenceRecorderTest {
         JsonNode json = objectMapper.readTree(result);
         assertFalse(json.path("success").asBoolean());
         assertEquals("TOOL_DUPLICATE_SKIPPED", json.path("errorCode").asText());
+        assertTrue(json.path("stop").asBoolean());
+        assertEquals("STOP_TOOL_DIRECTION", json.path("nextAction").asText());
         assertTrue(json.path("message").asText().contains("重复工具调用"));
         verify(incidentService, never()).markRunWaitingTool(any(), any(), any(), any());
 
@@ -216,7 +231,7 @@ class DiagnosisEvidenceRecorderTest {
 
     @Test
     void recordToolCall_shouldSkipSemanticallyDuplicateMetricTrendCalls() throws Exception {
-        IncidentService incidentService = mock(IncidentService.class);
+        IncidentService incidentService = mockIncidentService();
         when(incidentService.getDiagnosisRuns("inc-1")).thenReturn(OptionalRun.with(evidence(
                 "queryMetricTrend",
                 "{\"metric\":\"cpu_usage\",\"service\":\"payment-service\",\"instance\":\"pod-1\","
@@ -243,7 +258,7 @@ class DiagnosisEvidenceRecorderTest {
 
     @Test
     void recordToolCall_shouldEnforceQueryLogsBudget() throws Exception {
-        IncidentService incidentService = mock(IncidentService.class);
+        IncidentService incidentService = mockIncidentService();
         when(incidentService.getDiagnosisRuns("inc-1")).thenReturn(OptionalRun.with(
                 evidence("queryLogs", "{\"query\":\"cpu\"}"),
                 evidence("queryLogs", "{\"query\":\"error\"}"),
@@ -268,13 +283,15 @@ class DiagnosisEvidenceRecorderTest {
         JsonNode json = objectMapper.readTree(result);
         assertFalse(json.path("success").asBoolean());
         assertEquals("TOOL_BUDGET_EXCEEDED", json.path("errorCode").asText());
+        assertTrue(json.path("stop").asBoolean());
+        assertEquals("STOP_DIAGNOSTIC_TOOLS", json.path("nextAction").asText());
         assertTrue(json.path("message").asText().contains("queryLogs 调用次数已达上限"));
         verify(incidentService, never()).markRunWaitingTool(any(), any(), any(), any());
     }
 
     @Test
     void recordToolCall_shouldIgnorePolicySkippedEvidenceWhenCountingBudgets() throws Exception {
-        IncidentService incidentService = mock(IncidentService.class);
+        IncidentService incidentService = mockIncidentService();
         when(incidentService.getDiagnosisRuns("inc-1")).thenReturn(OptionalRun.with(
                 evidence("queryLogs", "{\"query\":\"cpu\"}"),
                 evidence("queryLogs", "{\"query\":\"error\"}"),
@@ -303,7 +320,7 @@ class DiagnosisEvidenceRecorderTest {
 
     @Test
     void recordToolCall_shouldCountRealToolEvidenceWithPolicyLikeErrorCode() throws Exception {
-        IncidentService incidentService = mock(IncidentService.class);
+        IncidentService incidentService = mockIncidentService();
         DiagnosisEvidence realFailedToolEvidence = evidence("queryLogs", "{\"query\":\"cpu\"}");
         realFailedToolEvidence.setSuccess(false);
         realFailedToolEvidence.setErrorCode("TOOL_BUDGET_EXCEEDED");
@@ -331,7 +348,7 @@ class DiagnosisEvidenceRecorderTest {
 
     @Test
     void recordToolCall_shouldEnforceQueryInternalDocsBudget() throws Exception {
-        IncidentService incidentService = mock(IncidentService.class);
+        IncidentService incidentService = mockIncidentService();
         when(incidentService.getDiagnosisRuns("inc-1")).thenReturn(OptionalRun.with(
                 evidence("queryInternalDocs", "{\"query\":\"cpu\"}")
         ));
@@ -359,7 +376,7 @@ class DiagnosisEvidenceRecorderTest {
 
     @Test
     void recordToolCall_shouldEnforceTavilyBudgetByToolNameContainingTavily() throws Exception {
-        IncidentService incidentService = mock(IncidentService.class);
+        IncidentService incidentService = mockIncidentService();
         when(incidentService.getDiagnosisRuns("inc-1")).thenReturn(OptionalRun.with(
                 evidence("tavily_search", "{\"query\":\"error code\"}")
         ));
@@ -387,7 +404,7 @@ class DiagnosisEvidenceRecorderTest {
 
     @Test
     void recordToolCall_shouldEnforceDbhubBudgetByToolNameAliases() throws Exception {
-        IncidentService incidentService = mock(IncidentService.class);
+        IncidentService incidentService = mockIncidentService();
         when(incidentService.getDiagnosisRuns("inc-1")).thenReturn(OptionalRun.with(
                 evidence("execute_sql", "{\"sql\":\"select 1\"}"),
                 evidence("list_tables", "{}")
@@ -416,7 +433,7 @@ class DiagnosisEvidenceRecorderTest {
 
     @Test
     void recordToolCall_shouldEnforceGlobalToolBudget() throws Exception {
-        IncidentService incidentService = mock(IncidentService.class);
+        IncidentService incidentService = mockIncidentService();
         when(incidentService.getDiagnosisRuns("inc-1")).thenReturn(OptionalRun.with(
                 evidence("queryMetricTrend", "{\"metric\":\"cpu_usage\"}"),
                 evidence("queryLogs", "{\"query\":\"cpu\"}")
@@ -481,5 +498,14 @@ class DiagnosisEvidenceRecorderTest {
             run.getEvidence().addAll(List.of(evidence));
             return java.util.Optional.of(List.of(run));
         }
+    }
+
+    private static IncidentService mockIncidentService() {
+        IncidentService incidentService = mock(IncidentService.class);
+        DiagnosisRunRecord run = new DiagnosisRunRecord();
+        run.setRunId("run-1");
+        when(incidentService.getDiagnosisRun("inc-1", "run-1"))
+                .thenReturn(java.util.Optional.of(run));
+        return incidentService;
     }
 }

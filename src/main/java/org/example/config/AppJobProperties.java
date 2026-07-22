@@ -28,6 +28,8 @@ public class AppJobProperties {
     private int diagnosisPrefetchConcurrency = 4;
     @Positive(message = "indexMaxAttempts must be greater than 0")
     private int indexMaxAttempts = 3;
+    @Positive(message = "archiveMaxAttempts must be greater than 0")
+    private int archiveMaxAttempts = 3;
 
     public boolean isEnabled() {
         return enabled;
@@ -99,6 +101,14 @@ public class AppJobProperties {
 
     public void setIndexMaxAttempts(int indexMaxAttempts) {
         this.indexMaxAttempts = indexMaxAttempts;
+    }
+
+    public int getArchiveMaxAttempts() {
+        return archiveMaxAttempts;
+    }
+
+    public void setArchiveMaxAttempts(int archiveMaxAttempts) {
+        this.archiveMaxAttempts = archiveMaxAttempts;
     }
 
     @AssertTrue(message = "heartbeatIntervalMillis must be less than half of leaseDurationMillis")

@@ -22,6 +22,7 @@ class SuperBizAgentApp {
         };
         this.dependencies = [];
         this.dependencyLoadError = '';
+        this.lastPanelTrigger = null;
 
         this.initializeElements();
         this.initTheme();
@@ -225,6 +226,15 @@ class SuperBizAgentApp {
                     this.closeModeDropdown();
                 }
             });
+            item.addEventListener('keydown', (event) => {
+                if (event.key !== 'Enter' && event.key !== ' ') return;
+                event.preventDefault();
+                const mode = item.getAttribute('data-mode');
+                if (mode) {
+                    this.selectMode(mode);
+                    this.closeModeDropdown();
+                }
+            });
         });
 
         // 点击外部关闭下拉菜单
@@ -324,6 +334,17 @@ class SuperBizAgentApp {
                 if (!e.target.closest('#knowledgePanel') && !e.target.closest('#knowledgePanelBtn')) {
                     this.hideKnowledgePanel();
                 }
+            }
+        });
+
+        document.addEventListener('keydown', (e) => {
+            if (e.key !== 'Escape') return;
+            if (this.alertDetailPanel && this.alertDetailPanel.classList.contains('open')) {
+                this.hideAlertPanel('detail');
+            } else if (this.alertHistoryPanel && this.alertHistoryPanel.classList.contains('open')) {
+                this.hideAlertPanel('history');
+            } else if (this.knowledgePanel && this.knowledgePanel.classList.contains('open')) {
+                this.hideKnowledgePanel();
             }
         });
     }
@@ -434,7 +455,10 @@ class SuperBizAgentApp {
     toggleToolsMenu() {
         if (this.toolsMenu && this.toolsBtn) {
             const wrapper = this.toolsBtn.closest('.tools-btn-wrapper');
-            if (wrapper) wrapper.classList.toggle('active');
+            if (wrapper) {
+                const active = wrapper.classList.toggle('active');
+                this.toolsBtn.setAttribute('aria-expanded', String(active));
+            }
         }
     }
 
@@ -442,6 +466,7 @@ class SuperBizAgentApp {
         if (this.toolsMenu && this.toolsBtn) {
             const wrapper = this.toolsBtn.closest('.tools-btn-wrapper');
             if (wrapper) wrapper.classList.remove('active');
+            this.toolsBtn.setAttribute('aria-expanded', 'false');
         }
     }
 
@@ -692,7 +717,10 @@ class SuperBizAgentApp {
     toggleModeDropdown() {
         if (this.modeSelectorBtn && this.modeDropdown) {
             const wrapper = this.modeSelectorBtn.closest('.mode-selector-wrapper');
-            if (wrapper) wrapper.classList.toggle('active');
+            if (wrapper) {
+                const active = wrapper.classList.toggle('active');
+                this.modeSelectorBtn.setAttribute('aria-expanded', String(active));
+            }
         }
     }
 
@@ -700,6 +728,7 @@ class SuperBizAgentApp {
         if (this.modeSelectorBtn && this.modeDropdown) {
             const wrapper = this.modeSelectorBtn.closest('.mode-selector-wrapper');
             if (wrapper) wrapper.classList.remove('active');
+            this.modeSelectorBtn.setAttribute('aria-expanded', 'false');
         }
     }
 
@@ -723,6 +752,7 @@ class SuperBizAgentApp {
         document.querySelectorAll('.dropdown-item').forEach(item => {
             const mode = item.getAttribute('data-mode');
             item.classList.toggle('active', mode === this.currentMode);
+            item.setAttribute('aria-selected', String(mode === this.currentMode));
         });
 
         if (this.sendButton) this.sendButton.disabled = this.isStreaming;
@@ -1172,21 +1202,37 @@ class SuperBizAgentApp {
         if (this.knowledgePanel) {
             this.knowledgePanel.style.display = 'none';
             this.knowledgePanel.classList.remove('open');
+            this.knowledgePanel.setAttribute('aria-hidden', 'true');
+        }
+        if (this.lastPanelTrigger
+            && this.lastPanelTrigger.isConnected !== false
+            && typeof this.lastPanelTrigger.focus === 'function') {
+            this.lastPanelTrigger.focus();
+            this.lastPanelTrigger = null;
         }
     }
 
     async showKnowledgePanel() {
         if (!this.knowledgePanel || !this.knowledgePanelContent) return;
 
+        if (!this.knowledgePanel.classList.contains('open')) {
+            this.lastPanelTrigger = document.activeElement;
+        }
         this.knowledgePanel.style.display = 'flex';
         this.knowledgePanel.classList.add('open');
+        this.knowledgePanel.setAttribute('aria-hidden', 'false');
+        this.setPanelBusy(this.knowledgePanelContent, true);
         this.knowledgePanelContent.innerHTML = this.renderKnowledgePanelShell();
         this.bindKnowledgePanelEvents();
 
-        await Promise.all([
-            this.loadDependencies(),
-            this.loadKnowledgeIndexTasks()
-        ]);
+        try {
+            await Promise.all([
+                this.loadDependencies(),
+                this.loadKnowledgeIndexTasks()
+            ]);
+        } finally {
+            this.setPanelBusy(this.knowledgePanelContent, false);
+        }
     }
 
     renderKnowledgePanelShell() {
@@ -1715,29 +1761,69 @@ class SuperBizAgentApp {
         if (panel) {
             panel.style.display = 'none';
             panel.classList.remove('open');
+            if (typeof panel.setAttribute === 'function') {
+                panel.setAttribute('aria-hidden', 'true');
+            }
         }
+        if (this.lastPanelTrigger
+            && this.lastPanelTrigger.isConnected !== false
+            && typeof this.lastPanelTrigger.focus === 'function') {
+            this.lastPanelTrigger.focus();
+            this.lastPanelTrigger = null;
+        }
+    }
+
+    setPanelBusy(content, busy) {
+        if (content && typeof content.setAttribute === 'function') {
+            content.setAttribute('aria-busy', String(Boolean(busy)));
+        }
+    }
+
+    renderAlertPanelSkeleton(kind = 'card') {
+        const itemClass = kind === 'detail' ? 'alert-panel-skeleton-detail' : 'alert-panel-skeleton-card';
+        return `
+            <div class="alert-panel-skeleton ${itemClass}" aria-hidden="true">
+                <span class="skeleton skeleton-text"></span>
+                <span class="skeleton skeleton-text"></span>
+                <span class="skeleton skeleton-text"></span>
+            </div>
+            <div class="alert-panel-skeleton ${itemClass}" aria-hidden="true">
+                <span class="skeleton skeleton-text"></span>
+                <span class="skeleton skeleton-text"></span>
+                <span class="skeleton skeleton-text"></span>
+            </div>
+        `;
     }
 
     async showAlertHistory() {
         if (!this.alertHistoryPanel || !this.alertHistoryContent) return;
 
+        if (!this.alertHistoryPanel.classList.contains('open')) {
+            this.lastPanelTrigger = document.activeElement;
+        }
         this.alertHistoryPanel.style.display = 'flex';
         this.alertHistoryPanel.classList.add('open');
+        if (typeof this.alertHistoryPanel.setAttribute === 'function') {
+            this.alertHistoryPanel.setAttribute('aria-hidden', 'false');
+        }
+        this.setPanelBusy(this.alertHistoryContent, true);
         this.alertHistoryContent.innerHTML = this.renderAlertHistoryFilters()
-            + '<div class="alert-panel-loading">加载中...</div>';
+            + this.renderAlertPanelSkeleton('card');
         this.bindAlertHistoryFilterEvents();
         this.alertHistoryContent.scrollTop = 0;
 
         try {
-            const response = await fetch(`${this.apiBaseUrl}/incidents${this.buildIncidentHistoryQuery()}`);
+            const response = await this.apiFetch(`${this.apiBaseUrl}/incidents${this.buildIncidentHistoryQuery()}`);
             if (!response.ok) throw new Error(`HTTP错误: ${response.status}`);
 
             const data = await response.json();
             this.renderAlertHistory(data.data || []);
+            this.setPanelBusy(this.alertHistoryContent, false);
         } catch (error) {
             console.error('获取事故历史失败:', error);
             this.alertHistoryContent.innerHTML =
-                '<div class="alert-panel-error">获取事故历史失败: ' + this.escapeHtml(error.message) + '</div>';
+                '<div class="alert-panel-error" role="alert">获取事故历史失败: ' + this.escapeHtml(error.message) + '</div>';
+            this.setPanelBusy(this.alertHistoryContent, false);
         }
     }
 
@@ -1780,7 +1866,7 @@ class SuperBizAgentApp {
                         ${incident.latestRunCaseArchived ? '<span class="alert-card-archived">已入库</span>' : ''}
                     </div>
                     <div class="alert-card-footer">
-                        <span class="${incident.latestRunStatus === 'COMPLETED' ? 'alert-has-report' : 'alert-no-report'}">
+                        <span class="${this.isCompletedDiagnosisStatus(incident.latestRunStatus) ? 'alert-has-report' : 'alert-no-report'}">
                             ${incident.alertCount || 0} 次告警
                         </span>
                         <button class="alert-view-btn" data-incident-id="${this.escapeHtml(incident.id)}">查看详情</button>
@@ -1791,6 +1877,7 @@ class SuperBizAgentApp {
 
         this.alertHistoryContent.innerHTML = this.renderAlertHistoryFilters()
             + '<div class="alert-card-list">' + html + '</div>';
+        this.setPanelBusy(this.alertHistoryContent, false);
         this.bindAlertHistoryFilterEvents();
 
         this.alertHistoryContent.querySelectorAll('.alert-view-btn').forEach(btn => {
@@ -1831,6 +1918,7 @@ class SuperBizAgentApp {
                         <option value="RUNNING" ${filters.latestRunStatus === 'RUNNING' ? 'selected' : ''}>诊断中</option>
                         <option value="WAITING_TOOL" ${filters.latestRunStatus === 'WAITING_TOOL' ? 'selected' : ''}>等待工具</option>
                         <option value="COMPLETED" ${filters.latestRunStatus === 'COMPLETED' ? 'selected' : ''}>已完成</option>
+                        <option value="COMPLETED_WITH_GAPS" ${filters.latestRunStatus === 'COMPLETED_WITH_GAPS' ? 'selected' : ''}>已完成（有缺口）</option>
                         <option value="FAILED" ${filters.latestRunStatus === 'FAILED' ? 'selected' : ''}>失败</option>
                         <option value="CANCELLED" ${filters.latestRunStatus === 'CANCELLED' ? 'selected' : ''}>已取消</option>
                     </select>
@@ -1926,16 +2014,23 @@ class SuperBizAgentApp {
 
         if (!silent) {
             this.incidentDetailRenderSignature = null;
+            if (!this.alertDetailPanel.classList.contains('open')) {
+                this.lastPanelTrigger = document.activeElement;
+            }
             this.alertDetailPanel.style.display = 'flex';
             this.alertDetailPanel.classList.add('open');
-            this.alertDetailContent.innerHTML = '<div class="alert-panel-loading">加载中...</div>';
+            if (typeof this.alertDetailPanel.setAttribute === 'function') {
+                this.alertDetailPanel.setAttribute('aria-hidden', 'false');
+            }
+            this.setPanelBusy(this.alertDetailContent, true);
+            this.alertDetailContent.innerHTML = this.renderAlertPanelSkeleton('detail');
             this.alertDetailContent.scrollTop = 0;
         } else if (!this.alertDetailPanel.classList.contains('open')) {
             return;
         }
 
         try {
-            const detailResponse = await fetch(`${this.apiBaseUrl}/incidents/${incidentId}`);
+            const detailResponse = await this.apiFetch(`${this.apiBaseUrl}/incidents/${incidentId}`);
             if (!detailResponse.ok) throw new Error(`获取事故详情失败: ${detailResponse.status}`);
             const responseData = await detailResponse.json();
             const detailData = responseData.data;
@@ -1974,36 +2069,46 @@ class SuperBizAgentApp {
             let reportHtml = '<div class="alert-panel-empty">暂无诊断任务</div>';
             let runHtml = '<div class="alert-panel-empty">暂无诊断记录</div>';
             let evidenceHtml = '<div class="alert-panel-empty">暂无工具证据</div>';
+            let latestRunHasFinalReport = false;
 
             if (latestRun) {
                 const runTime = latestRun.completedAt || latestRun.startedAt || latestRun.createdAt;
                 const evidence = latestRun.evidence || [];
                 const toolEvidence = evidence.filter(item => this.isToolEvidence(item));
+                const evidenceStats = this.calculateDiagnosisEvidenceStats(toolEvidence);
                 runHtml = `
                     <div class="alert-detail-info">
                         <div><strong>Run ID:</strong> ${this.escapeHtml(latestRun.runId)}</div>
                         <div><strong>状态:</strong> ${this.escapeHtml(this.runStatusText(latestRun.status))}</div>
                         <div><strong>更新时间:</strong> ${runTime ? new Date(runTime).toLocaleString('zh-CN') : '未知'}</div>
                         <div><strong>质量评分:</strong> ${this.escapeHtml(this.qualityLabel(latestRun))}</div>
+                        <div><strong>数据来源:</strong> ${this.escapeHtml(this.runDataModeLabel(toolEvidence))}</div>
                         <div><strong>人工确认:</strong> ${this.escapeHtml(this.humanReviewStatusText(latestRun.humanReviewStatus))}</div>
                         ${latestRun.humanReviewComment ? `<div><strong>确认备注:</strong> ${this.escapeHtml(latestRun.humanReviewComment)}</div>` : ''}
                         ${latestRun.caseArchiveMessage ? `<div><strong>案例入库:</strong> ${this.escapeHtml(latestRun.caseArchiveMessage)}</div>` : ''}
                         ${latestRun.currentStep ? `<div><strong>当前步骤:</strong> ${this.escapeHtml(latestRun.currentStep)}</div>` : ''}
                         ${latestRun.currentTool ? `<div><strong>当前工具:</strong> ${this.escapeHtml(latestRun.currentTool)}</div>` : ''}
                         ${latestRun.progressMessage ? `<div><strong>进度:</strong> ${this.escapeHtml(latestRun.progressMessage)}</div>` : ''}
-                        <div><strong>工具证据数量:</strong> ${toolEvidence.length} 条</div>
+                        <div><strong>证据记录数量:</strong> ${toolEvidence.length} 条</div>
+                        <div><strong>实际工具调用:</strong> ${evidenceStats.successCount + evidenceStats.failedCount} 次</div>
+                        <div><strong>实际失败:</strong> ${evidenceStats.failedCount} 次</div>
+                        <div><strong>策略跳过:</strong> ${evidenceStats.skippedCount} 次</div>
                         ${latestRun.errorMessage ? `<div><strong>失败原因:</strong> ${this.escapeHtml(latestRun.errorMessage)}</div>` : ''}
                     </div>
                 `;
 
                 evidenceHtml = this.renderDiagnosisEvidenceList(toolEvidence);
 
-                if (latestRun.status === 'COMPLETED' && latestRun.report) {
+                latestRunHasFinalReport = this.isCompletedDiagnosisStatus(latestRun.status)
+                    && this.isFinalDiagnosisReport(latestRun.report);
+                if (latestRunHasFinalReport) {
                     reportHtml = this.renderMarkdown(latestRun.report);
+                } else if (this.isCompletedDiagnosisStatus(latestRun.status) && latestRun.report) {
+                    reportHtml = this.renderDiagnosisInvalidReport();
                 } else if (latestRun.status === 'FAILED') {
                     reportHtml = '<div class="alert-panel-error">' + this.escapeHtml(latestRun.errorMessage || '诊断失败') + '</div>';
                 } else {
-                    reportHtml = '<div class="alert-panel-empty">诊断任务正在执行，请稍后刷新详情</div>';
+                    reportHtml = this.renderDiagnosisPendingReport(latestRun.status);
                 }
 
                 if (['QUEUED', 'RUNNING', 'WAITING_TOOL'].includes(latestRun.status)) {
@@ -2013,12 +2118,13 @@ class SuperBizAgentApp {
 
             const summaryHtml = this.renderIncidentWorkbenchSummary(this.deriveIncidentWorkbenchSummary(detailData));
             const timelineHtml = this.renderDiagnosisTimeline(this.deriveDiagnosisTimeline(detailData, latestRun));
+            const diagnosisActive = latestRun && ['QUEUED', 'RUNNING', 'WAITING_TOOL'].includes(latestRun.status);
             const actionButtonsHtml = `
-                <button class="alert-aiops-btn" data-incident-id="${this.escapeHtml(incidentId)}">重新执行 AI Ops 诊断</button>
-                ${latestRun && ['QUEUED', 'RUNNING', 'WAITING_TOOL'].includes(latestRun.status) ? `<button class="alert-cancel-run-btn" data-incident-id="${this.escapeHtml(incidentId)}" data-run-id="${this.escapeHtml(latestRun.runId)}">取消诊断</button>` : ''}
-                ${latestRun && latestRun.status === 'COMPLETED' && latestRun.humanReviewStatus !== 'CONFIRMED' ? `<button class="alert-confirm-run-btn" data-incident-id="${this.escapeHtml(incidentId)}" data-run-id="${this.escapeHtml(latestRun.runId)}">确认并入库</button>` : ''}
-                ${latestRun && latestRun.status === 'COMPLETED' && latestRun.humanReviewStatus !== 'REJECTED' ? `<button class="alert-reject-run-btn" data-incident-id="${this.escapeHtml(incidentId)}" data-run-id="${this.escapeHtml(latestRun.runId)}">驳回诊断</button>` : ''}
-                ${latestRun && latestRun.status === 'COMPLETED' && !latestRun.caseArchived ? `<button class="alert-archive-case-btn" data-incident-id="${this.escapeHtml(incidentId)}">手动写入历史案例</button>` : ''}
+                <button class="alert-aiops-btn" data-incident-id="${this.escapeHtml(incidentId)}" ${diagnosisActive ? 'disabled' : ''}>${diagnosisActive ? '诊断进行中' : '重新执行 AI Ops 诊断'}</button>
+                ${diagnosisActive ? `<button class="alert-cancel-run-btn" data-incident-id="${this.escapeHtml(incidentId)}" data-run-id="${this.escapeHtml(latestRun.runId)}">取消诊断</button>` : ''}
+                ${latestRun && latestRunHasFinalReport && latestRun.humanReviewStatus !== 'CONFIRMED' ? `<button class="alert-confirm-run-btn" data-incident-id="${this.escapeHtml(incidentId)}" data-run-id="${this.escapeHtml(latestRun.runId)}">确认并入库</button>` : ''}
+                ${latestRun && latestRunHasFinalReport && latestRun.humanReviewStatus !== 'REJECTED' ? `<button class="alert-reject-run-btn" data-incident-id="${this.escapeHtml(incidentId)}" data-run-id="${this.escapeHtml(latestRun.runId)}">驳回诊断</button>` : ''}
+                ${latestRun && latestRunHasFinalReport && !latestRun.caseArchived ? `<button class="alert-archive-case-btn" data-incident-id="${this.escapeHtml(incidentId)}">手动写入历史案例</button>` : ''}
             `;
 
             this.alertDetailContent.innerHTML = `
@@ -2063,6 +2169,7 @@ class SuperBizAgentApp {
                     </div>
                 </div>
             `;
+            this.setPanelBusy(this.alertDetailContent, false);
 
             const aiOpsBtn = this.alertDetailContent.querySelector('.alert-aiops-btn');
             if (aiOpsBtn) {
@@ -2119,7 +2226,8 @@ class SuperBizAgentApp {
                 return;
             }
             this.alertDetailContent.innerHTML =
-                '<div class="alert-panel-error">获取事故详情失败: ' + this.escapeHtml(error.message) + '</div>';
+                '<div class="alert-panel-error" role="alert">获取事故详情失败: ' + this.escapeHtml(error.message) + '</div>';
+            this.setPanelBusy(this.alertDetailContent, false);
         }
     }
 
@@ -2149,7 +2257,7 @@ class SuperBizAgentApp {
 
     async triggerIncidentDiagnosis(incidentId) {
         try {
-            const response = await this.apiFetch(`${this.apiBaseUrl}/incidents/${incidentId}/diagnose`, {
+            const response = await this.apiFetch(this.incidentDiagnosisUrl(incidentId, true), {
                 method: 'POST'
             });
             if (!response.ok) throw new Error(`HTTP错误: ${response.status}`);
@@ -2164,6 +2272,11 @@ class SuperBizAgentApp {
             console.error('提交诊断任务失败:', error);
             this.showNotification('提交诊断任务失败: ' + error.message, 'error');
         }
+    }
+
+    incidentDiagnosisUrl(incidentId, force = false) {
+        const encodedIncidentId = encodeURIComponent(incidentId || '');
+        return `${this.apiBaseUrl}/incidents/${encodedIncidentId}/diagnose${force ? '?force=true' : ''}`;
     }
 
     async archiveIncidentCase(incidentId) {
@@ -2289,7 +2402,9 @@ class SuperBizAgentApp {
             latestRunStatus: latestRun ? (latestRun.status || '') : '',
             humanReviewStatus: latestRun ? (latestRun.humanReviewStatus || '') : '',
             evidenceCount: toolEvidence.length,
+            executedEvidenceCount: evidenceStats.successCount + evidenceStats.failedCount,
             failedEvidenceCount: evidenceStats.failedCount,
+            skippedEvidenceCount: evidenceStats.skippedCount,
             retriedEvidenceCount: evidenceStats.retriedCount,
             totalDurationMs: evidenceStats.totalDurationMs
         };
@@ -2326,13 +2441,14 @@ class SuperBizAgentApp {
                 ? run.evidence.filter(item => this.isToolEvidence(item))
                 : [];
             toolEvidence.forEach(item => {
-                if (!this.isDiagnosisEvidenceSuccess(item)) {
+                if (this.isDiagnosisEvidenceFailure(item) || this.isDiagnosisEvidenceSkipped(item)) {
                     const breakerOpen = this.isCircuitOpenEvidence(item);
                     const toolName = item.toolName || item.title || item.type || '工具';
+                    const skipped = this.isDiagnosisEvidenceSkipped(item);
                     addEvent(
-                        breakerOpen ? 'tool-breaker-open' : 'tool-failed',
+                        breakerOpen ? 'tool-breaker-open' : (skipped ? 'tool-skipped' : 'tool-failed'),
                         this.firstTimelineTimestamp(item.createdAt, item.timestamp, item.updatedAt),
-                        breakerOpen ? `${toolName} 熔断打开` : `${toolName} 调用失败`,
+                        breakerOpen ? `${toolName} 熔断打开` : (skipped ? `${toolName} 调用已跳过` : `${toolName} 调用失败`),
                         {
                             evidenceId: item.id || '',
                             toolName,
@@ -2347,7 +2463,7 @@ class SuperBizAgentApp {
                     runId: run.runId || '',
                     errorMessage: run.errorMessage || ''
                 });
-            } else if (run.status === 'COMPLETED') {
+            } else if (this.isCompletedDiagnosisStatus(run.status)) {
                 addEvent('run-completed', this.firstTimelineTimestamp(run.completedAt, run.updatedAt), '诊断任务完成', { runId: run.runId || '' });
             }
         }
@@ -2359,28 +2475,44 @@ class SuperBizAgentApp {
 
     renderIncidentWorkbenchSummary(summary) {
         const data = summary || {};
-        const tiles = [
+        const primaryTiles = [
             { label: '事故级别', value: data.severity || 'unknown', className: 'severity' },
             { label: '事故状态', value: data.incidentStatus || '未知', className: 'incident-status' },
             { label: '累计告警', value: `${Number(data.alertCount) || 0} 次`, className: 'alert-count' },
-            { label: '诊断状态', value: data.latestRunStatus || '暂无诊断', className: 'run-status' },
+            { label: '诊断状态', value: data.latestRunStatus || '暂无诊断', className: 'run-status' }
+        ];
+        const secondaryTiles = [
             { label: '人工确认', value: data.humanReviewStatus || '未确认', className: 'review-status' },
-            { label: '工具证据', value: `${Number(data.evidenceCount) || 0} 条`, className: 'evidence-count' },
-            { label: '失败证据', value: `${Number(data.failedEvidenceCount) || 0} 条`, className: 'failed-evidence-count' },
+            { label: '证据记录', value: `${Number(data.evidenceCount) || 0} 条`, className: 'evidence-count' },
+            { label: '实际调用', value: `${Number(data.executedEvidenceCount) || 0} 次`, className: 'executed-evidence-count' },
+            { label: '实际失败', value: `${Number(data.failedEvidenceCount) || 0} 次`, className: 'failed-evidence-count' },
+            { label: '策略跳过', value: `${Number(data.skippedEvidenceCount) || 0} 次`, className: 'skipped-evidence-count' },
             { label: '重试证据', value: `${Number(data.retriedEvidenceCount) || 0} 条`, className: 'retried-evidence-count' },
             { label: '证据耗时', value: this.formatEvidenceDuration(data.totalDurationMs), className: 'duration' }
         ];
 
         return `
             <div class="incident-workbench-summary" aria-label="事故诊断摘要">
-                ${tiles.map(tile => `
-                    <div class="incident-workbench-summary-tile ${tile.className}">
-                        <div class="incident-workbench-summary-label">${this.escapeHtml(tile.label)}</div>
-                        <div class="incident-workbench-summary-value">${this.escapeHtml(tile.value)}</div>
+                <div class="incident-workbench-summary-primary">
+                    ${this.renderIncidentSummaryTiles(primaryTiles)}
+                </div>
+                <details class="incident-workbench-summary-more">
+                    <summary>查看更多诊断指标</summary>
+                    <div class="incident-workbench-summary-secondary">
+                        ${this.renderIncidentSummaryTiles(secondaryTiles)}
                     </div>
-                `).join('')}
+                </details>
             </div>
         `;
+    }
+
+    renderIncidentSummaryTiles(tiles) {
+        return (Array.isArray(tiles) ? tiles : []).map(tile => `
+            <div class="incident-workbench-summary-tile ${tile.className}">
+                <div class="incident-workbench-summary-label">${this.escapeHtml(tile.label)}</div>
+                <div class="incident-workbench-summary-value">${this.escapeHtml(tile.value)}</div>
+            </div>
+        `).join('');
     }
 
     renderDiagnosisTimeline(events) {
@@ -2486,11 +2618,13 @@ class SuperBizAgentApp {
                 .map(text => this.escapeHtml(this.compactText(text, 48)))
                 .join(' / ');
             const itemsHtml = group.items.map(item => this.renderDiagnosisEvidenceItem(item)).join('');
+            const riskGroup = group.items.some(item => this.isDiagnosisEvidenceFailure(item));
             return `
-                <details class="diagnosis-evidence-group">
+                <details class="diagnosis-evidence-group${riskGroup ? ' risk-group' : ''}"${riskGroup ? ' open' : ''}>
                     <summary class="diagnosis-evidence-group-summary">
                         <span class="diagnosis-evidence-group-title">${this.escapeHtml(group.label)}</span>
                         <span class="diagnosis-evidence-group-count">${group.items.length} 条</span>
+                        ${riskGroup ? '<span class="diagnosis-evidence-group-risk">含异常</span>' : ''}
                         ${preview ? `<span class="diagnosis-evidence-group-preview">${preview}</span>` : ''}
                     </summary>
                     <div class="diagnosis-evidence-group-body">
@@ -2516,7 +2650,10 @@ class SuperBizAgentApp {
             <div class="diagnosis-evidence-stats" aria-label="证据统计">
                 <span class="diagnosis-evidence-stat">证据统计</span>
                 <span class="diagnosis-evidence-stat success">成功 ${stats.successCount}</span>
-                <span class="diagnosis-evidence-stat failed">失败 ${stats.failedCount}</span>
+                <span class="diagnosis-evidence-stat failed">实际失败 ${stats.failedCount}</span>
+                <span class="diagnosis-evidence-stat skipped">策略跳过 ${stats.skippedCount}</span>
+                <span class="diagnosis-evidence-stat skipped">重复 ${stats.duplicateSkippedCount}</span>
+                <span class="diagnosis-evidence-stat skipped">预算 ${stats.budgetSkippedCount}</span>
                 <span class="diagnosis-evidence-stat retry">重试 ${stats.retriedCount}</span>
                 <span class="diagnosis-evidence-stat">总耗时 ${this.formatEvidenceDuration(stats.totalDurationMs)}</span>
             </div>
@@ -2528,6 +2665,14 @@ class SuperBizAgentApp {
         return items.reduce((stats, item) => {
             if (this.isDiagnosisEvidenceSuccess(item)) {
                 stats.successCount += 1;
+            } else if (this.isDiagnosisEvidenceSkipped(item)) {
+                stats.skippedCount += 1;
+                if (item.errorCode === 'TOOL_DUPLICATE_SKIPPED') {
+                    stats.duplicateSkippedCount += 1;
+                }
+                if (item.errorCode === 'TOOL_BUDGET_EXCEEDED') {
+                    stats.budgetSkippedCount += 1;
+                }
             } else {
                 stats.failedCount += 1;
             }
@@ -2539,6 +2684,9 @@ class SuperBizAgentApp {
         }, {
             successCount: 0,
             failedCount: 0,
+            skippedCount: 0,
+            duplicateSkippedCount: 0,
+            budgetSkippedCount: 0,
             retriedCount: 0,
             totalDurationMs: 0
         });
@@ -2579,7 +2727,7 @@ class SuperBizAgentApp {
     evidenceImportanceScore(item) {
         if (!item) return 0;
         const summary = `${item.summary || ''} ${item.content || ''}`;
-        let score = item.success === false ? 100 : 0;
+        let score = this.isDiagnosisEvidenceFailure(item) ? 100 : 0;
         if (item.toolName === 'queryMetricTrend') {
             const payload = this.extractMetricTrendPayload(item);
             score += payload && payload.summary && payload.summary.anomalous === true ? 90 : 65;
@@ -2598,15 +2746,19 @@ class SuperBizAgentApp {
 
     renderDiagnosisEvidenceHighlight(item) {
         const breakerOpen = item.errorCode === 'CIRCUIT_OPEN';
-        const ok = item.success !== false && !breakerOpen;
+        const skipped = this.isDiagnosisEvidenceSkipped(item);
+        const ok = this.isDiagnosisEvidenceSuccess(item);
         const summary = item.summary || item.content || '无摘要';
         const groupLabel = this.getDiagnosisEvidenceGroupLabel(item);
+        const statusText = ok ? '成功' : (skipped ? '已跳过' : this.evidenceFailureLabel(item));
+        const statusClass = ok ? '' : (skipped ? 'skipped' : 'failed');
         return `
-            <div class="diagnosis-evidence-highlight ${ok ? '' : 'failed'} ${breakerOpen ? 'breaker-open' : ''}">
+            <div class="diagnosis-evidence-highlight ${statusClass} ${breakerOpen ? 'breaker-open' : ''}">
                 <div class="diagnosis-evidence-highlight-head">
                     <span>${this.escapeHtml(groupLabel)}</span>
                     <span>${this.escapeHtml(item.id || '-')}</span>
                 </div>
+                <div class="diagnosis-evidence-highlight-status">${this.escapeHtml(statusText)}</div>
                 <div class="diagnosis-evidence-highlight-summary">${this.escapeHtml(this.compactText(summary, 120))}</div>
             </div>
         `;
@@ -2628,8 +2780,9 @@ class SuperBizAgentApp {
     renderDiagnosisEvidenceItem(item) {
         const breakerOpen = this.isCircuitOpenEvidence(item);
         const ok = this.isDiagnosisEvidenceSuccess(item);
-        const statusText = ok ? '成功' : this.evidenceFailureLabel(item);
-        const statusClass = breakerOpen ? 'failed breaker-open' : (ok ? 'success' : 'failed');
+        const skipped = this.isDiagnosisEvidenceSkipped(item);
+        const statusText = ok ? '成功' : (skipped ? '已跳过' : this.evidenceFailureLabel(item));
+        const statusClass = breakerOpen ? 'failed breaker-open' : (ok ? 'success' : (skipped ? 'skipped' : 'failed'));
         const title = item.toolName || item.title || item.type || 'evidence';
         const summary = item.summary || item.content || '无摘要';
         const metaHtml = this.renderDiagnosisEvidenceMeta(item);
@@ -2673,6 +2826,10 @@ class SuperBizAgentApp {
         if (item && item.retryable === true) {
             chips.push('可重试');
         }
+        const dataMode = this.extractEvidenceDataMode(item);
+        if (dataMode) {
+            chips.push(dataMode === 'MOCK' ? '数据: Mock' : '数据: 真实');
+        }
         if (chips.length === 0) {
             return '';
         }
@@ -2684,7 +2841,7 @@ class SuperBizAgentApp {
     }
 
     renderDiagnosisEvidenceFailureDetail(item) {
-        if (this.isDiagnosisEvidenceSuccess(item)) {
+        if (this.isDiagnosisEvidenceSuccess(item) || this.isDiagnosisEvidenceSkipped(item)) {
             return '';
         }
         const label = this.evidenceFailureLabel(item);
@@ -2698,6 +2855,17 @@ class SuperBizAgentApp {
 
     isDiagnosisEvidenceSuccess(item) {
         return !!item && item.success !== false && !this.isCircuitOpenEvidence(item);
+    }
+
+    isDiagnosisEvidenceSkipped(item) {
+        const attemptCount = item && item.attemptCount;
+        return !!item && item.success === false
+            && (attemptCount === undefined || attemptCount === null || Number(attemptCount) === 0)
+            && ['TOOL_DUPLICATE_SKIPPED', 'TOOL_BUDGET_EXCEEDED'].includes(item.errorCode);
+    }
+
+    isDiagnosisEvidenceFailure(item) {
+        return !!item && !this.isDiagnosisEvidenceSuccess(item) && !this.isDiagnosisEvidenceSkipped(item);
     }
 
     isCircuitOpenEvidence(item) {
@@ -2756,7 +2924,7 @@ class SuperBizAgentApp {
                     }))
                     .filter(point => Number.isFinite(point.value))
                 : [];
-            if (points.length < 2) {
+            if (points.length < 1) {
                 return null;
             }
             return {
@@ -2783,14 +2951,20 @@ class SuperBizAgentApp {
         const padBottom = 26;
         const chartWidth = width - padX * 2;
         const chartHeight = height - padTop - padBottom;
+        const chartPoints = this.sampleMetricPoints(payload.points, 120);
         const values = payload.points.map(point => point.value);
         const min = Math.min(...values);
         const max = Math.max(...values);
-        const range = max - min || 1;
+        const threshold = this.metricAnomalyThreshold(payload.metric);
+        const domainMin = Number.isFinite(threshold) ? Math.min(min, threshold) : min;
+        const domainMax = Number.isFinite(threshold) ? Math.max(max, threshold) : max;
+        const range = domainMax - domainMin || 1;
         const baseline = padTop + chartHeight;
-        const path = payload.points.map((point, index) => {
-            const x = padX + (index / (payload.points.length - 1)) * chartWidth;
-            const y = padTop + ((max - point.value) / range) * chartHeight;
+        const xForIndex = index => padX + (index / Math.max(1, chartPoints.length - 1)) * chartWidth;
+        const yForValue = value => padTop + ((domainMax - value) / range) * chartHeight;
+        const path = chartPoints.map((point, index) => {
+            const x = xForIndex(index);
+            const y = yForValue(point.value);
             return `${index === 0 ? 'M' : 'L'} ${x.toFixed(2)} ${y.toFixed(2)}`;
         }).join(' ');
         const firstX = padX;
@@ -2800,34 +2974,110 @@ class SuperBizAgentApp {
         const avg = payload.summary.avg ?? (values.reduce((sum, value) => sum + value, 0) / values.length);
         const direction = payload.summary.direction || 'stable';
         const anomalous = payload.summary.anomalous === true;
+        const unit = this.metricUnit(payload.metric);
+        const yTicks = [domainMax, domainMin + range / 2, domainMin];
+        const pointLabels = chartPoints.map((point, index) => {
+            const timestamp = this.formatMetricTimestamp(point.timestamp);
+            return `${timestamp}，${this.formatMetricValue(point.value)}${unit || ''}`;
+        });
+        const pointHtml = chartPoints.map((point, index) => {
+            const x = xForIndex(index);
+            const y = yForValue(point.value);
+            const label = pointLabels[index];
+            return `
+                <circle cx="${x.toFixed(2)}" cy="${y.toFixed(2)}" r="${index === chartPoints.length - 1 ? '4' : '2.5'}"
+                    class="trend-chart-point${index === chartPoints.length - 1 ? ' latest' : ''}"
+                    tabindex="0" role="img" aria-label="${this.escapeHtml(label)}">
+                    <title>${this.escapeHtml(label)}</title>
+                </circle>
+            `;
+        }).join('');
+        const yTickHtml = yTicks.map(value => `
+            <line x1="${padX}" y1="${yForValue(value).toFixed(2)}" x2="${lastX}" y2="${yForValue(value).toFixed(2)}" class="trend-chart-grid"></line>
+            <text x="${padX - 4}" y="${(yForValue(value) + 3).toFixed(2)}" class="trend-chart-axis-label">${this.escapeHtml(this.formatMetricValue(value) + unit)}</text>
+        `).join('');
+        const thresholdHtml = Number.isFinite(threshold) ? `
+            <line x1="${padX}" y1="${yForValue(threshold).toFixed(2)}" x2="${lastX}" y2="${yForValue(threshold).toFixed(2)}" class="trend-chart-threshold"></line>
+            <text x="${lastX}" y="${(yForValue(threshold) - 4).toFixed(2)}" class="trend-chart-threshold-label">阈值 ${this.escapeHtml(this.formatMetricValue(threshold) + unit)}</text>
+        ` : '';
+        const description = `${payload.metric} ${payload.window || ''}，最新 ${this.formatMetricValue(latest)}${unit || ''}，平均 ${this.formatMetricValue(avg)}${unit || ''}，${this.metricDirectionText(direction)}${anomalous ? '，检测到异常' : ''}`;
 
         return `
             <div class="metric-trend-chart">
                 <div class="metric-trend-header">
                     <div>
                         <div class="metric-trend-title">${this.escapeHtml(payload.metric)}</div>
-                        <div class="metric-trend-subtitle">${this.escapeHtml(payload.window)} · ${payload.points.length} points</div>
+                        <div class="metric-trend-subtitle">${this.escapeHtml(payload.window)} · ${payload.points.length} 个采样点${unit ? ` · 单位 ${this.escapeHtml(unit)}` : ''}</div>
                     </div>
                     <span class="metric-trend-badge ${anomalous ? 'anomalous' : 'normal'}">
                         ${anomalous ? '异常' : '正常'}
                     </span>
                 </div>
                 <svg class="trend-chart-svg" viewBox="0 0 ${width} ${height}" role="img" aria-label="${this.escapeHtml(payload.metric)} 趋势图">
-                    <line x1="${padX}" y1="${padTop}" x2="${lastX}" y2="${padTop}" class="trend-chart-grid"></line>
-                    <line x1="${padX}" y1="${baseline}" x2="${lastX}" y2="${baseline}" class="trend-chart-grid"></line>
+                    <title>${this.escapeHtml(payload.metric)} 趋势图</title>
+                    <desc>${this.escapeHtml(description)}</desc>
+                    ${yTickHtml}
+                    ${thresholdHtml}
                     <path d="${areaPath}" class="trend-chart-area"></path>
                     <path d="${path}" class="trend-chart-line"></path>
-                    <circle cx="${lastX.toFixed(2)}" cy="${(padTop + ((max - values[values.length - 1]) / range) * chartHeight).toFixed(2)}" r="3.5" class="trend-chart-point"></circle>
-                    <text x="${padX}" y="${height - 7}" class="trend-chart-label">min ${this.formatMetricValue(min)}</text>
-                    <text x="${lastX}" y="${height - 7}" class="trend-chart-label trend-chart-label-end">latest ${this.formatMetricValue(latest)}</text>
+                    ${pointHtml}
+                    <text x="${padX}" y="${height - 7}" class="trend-chart-label">${this.escapeHtml(this.formatMetricTimestamp(chartPoints[0].timestamp))}</text>
+                    <text x="${lastX}" y="${height - 7}" class="trend-chart-label trend-chart-label-end">${this.escapeHtml(this.formatMetricTimestamp(chartPoints[chartPoints.length - 1].timestamp))}</text>
                 </svg>
                 <div class="metric-trend-stats">
-                    <span>max ${this.formatMetricValue(max)}</span>
-                    <span>avg ${this.formatMetricValue(avg)}</span>
+                    <span>min ${this.formatMetricValue(min)}${this.escapeHtml(unit)}</span>
+                    <span>max ${this.formatMetricValue(max)}${this.escapeHtml(unit)}</span>
+                    <span>avg ${this.formatMetricValue(avg)}${this.escapeHtml(unit)}</span>
+                    <span>latest ${this.formatMetricValue(latest)}${this.escapeHtml(unit)}</span>
                     <span>${this.escapeHtml(this.metricDirectionText(direction))}</span>
                 </div>
+                <div class="sr-only">${this.escapeHtml(description)}。${pointLabels.map(label => this.escapeHtml(label)).join('；')}</div>
             </div>
         `;
+    }
+
+    metricUnit(metric) {
+        return {
+            cpu_usage: '%',
+            memory_usage: '%',
+            error_rate: '%',
+            p99_latency: 's',
+            restart_count: '次',
+            jvm_gc_collection_seconds_count: '次/s'
+        }[metric] || '';
+    }
+
+    sampleMetricPoints(points, maxPoints = 120) {
+        const items = Array.isArray(points) ? points : [];
+        if (items.length <= maxPoints) {
+            return items;
+        }
+        return Array.from({ length: maxPoints }, (_, index) => {
+            const sourceIndex = Math.round(index * (items.length - 1) / (maxPoints - 1));
+            return items[sourceIndex];
+        });
+    }
+
+    metricAnomalyThreshold(metric) {
+        return {
+            cpu_usage: 80,
+            memory_usage: 85,
+            error_rate: 1,
+            p99_latency: 3,
+            restart_count: 0,
+            jvm_gc_collection_seconds_count: 1
+        }[metric];
+    }
+
+    formatMetricTimestamp(timestamp) {
+        if (timestamp === null || timestamp === undefined || timestamp === '') {
+            return '未知时间';
+        }
+        const date = new Date(timestamp);
+        if (Number.isNaN(date.getTime())) {
+            return String(timestamp);
+        }
+        return date.toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' });
     }
 
     formatMetricValue(value) {
@@ -2920,10 +3170,35 @@ class SuperBizAgentApp {
             RUNNING: '诊断中',
             WAITING_TOOL: '等待工具返回',
             COMPLETED: '已完成',
+            COMPLETED_WITH_GAPS: '已完成（有证据缺口）',
             FAILED: '失败',
             CANCELLED: '已取消'
         };
         return names[status] || status || '未知';
+    }
+
+    isCompletedDiagnosisStatus(status) {
+        return status === 'COMPLETED' || status === 'COMPLETED_WITH_GAPS';
+    }
+
+    runDataModeLabel(toolEvidence) {
+        const modes = new Set((Array.isArray(toolEvidence) ? toolEvidence : [])
+            .map(item => this.extractEvidenceDataMode(item))
+            .filter(Boolean));
+        if (modes.has('MOCK')) {
+            return modes.has('REAL') ? '混合（含 Mock）' : 'Mock 模式';
+        }
+        return modes.has('REAL') ? '真实数据' : '未标注';
+    }
+
+    extractEvidenceDataMode(item) {
+        if (!item || !item.rawFragment) return '';
+        try {
+            const payload = JSON.parse(item.rawFragment);
+            return String(payload.dataMode || '').toUpperCase();
+        } catch (error) {
+            return '';
+        }
     }
 
     humanReviewStatusText(status) {
@@ -2933,6 +3208,39 @@ class SuperBizAgentApp {
             REJECTED: '已驳回'
         };
         return names[status] || '未确认';
+    }
+
+    renderDiagnosisPendingReport(status) {
+        const messages = {
+            QUEUED: '诊断任务已入队，等待后台任务开始',
+            RUNNING: '诊断任务正在执行，请稍后刷新详情',
+            WAITING_TOOL: '诊断正在等待工具返回，请稍后刷新详情'
+        };
+        return `<div class="alert-panel-empty">${this.escapeHtml(messages[status] || '诊断任务处理中，请稍后刷新详情')}</div>`;
+    }
+
+    renderDiagnosisInvalidReport() {
+        return `
+            <div class="alert-panel-error">
+                发现诊断中间计划，未生成最终告警分析报告。请重新执行 AI Ops 诊断。
+            </div>
+        `;
+    }
+
+    isIntermediateDiagnosisReport(report) {
+        return typeof report === 'string'
+            && /["']decision["']\s*:\s*["'](?:PLAN|EXECUTE)["']/i.test(report);
+    }
+
+    isFinalDiagnosisReport(report) {
+        return typeof report === 'string'
+            && report.trim().startsWith('# 告警分析报告')
+            && !/["']decision["']\s*:\s*["'](?:PLAN|EXECUTE|FINISH)["']/i.test(report)
+            && report.includes('告警根因分析')
+            && report.includes('处理方案执行')
+            && report.includes('结论')
+            && report.includes('置信度')
+            && report.includes('缺失证据');
     }
 
     qualityLabel(run) {

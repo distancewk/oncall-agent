@@ -194,6 +194,7 @@ class IncidentServiceTest {
 
         DiagnosisRunRecord first = service.createDiagnosisRunAndEnqueue(
                 incident.getId(), "相同告警上下文");
+        service.completeRun(incident.getId(), first.getRunId(), validReport());
         DiagnosisRunRecord second = service.createDiagnosisRunAndEnqueue(
                 incident.getId(), "相同告警上下文");
 
@@ -203,6 +204,29 @@ class IncidentServiceTest {
         assertTrue(secondEvidenceId.startsWith("ev-" + second.getRunId() + "-"));
         assertFalse(firstEvidenceId.equals(secondEvidenceId));
         assertEquals(2, service.getDiagnosisRuns(incident.getId()).orElseThrow().size());
+    }
+
+    @Test
+    void createDiagnosisRunAndEnqueue_shouldReturnExistingActiveRunWithoutCreatingDuplicateJob() throws Exception {
+        AppIncidentProperties properties = incidentProperties();
+        DataSource dataSource = dataSource(properties);
+        IncidentSchemaMigrator migrator = new IncidentSchemaMigrator(dataSource);
+        IncidentStore store = new IncidentStore(properties, new ObjectMapper(), dataSource, migrator);
+        BackgroundJobRepository jobRepository = new BackgroundJobRepository(dataSource, migrator);
+        IncidentService service = new IncidentService(
+                store, new ObjectMapper(), null, properties,
+                jobRepository, null, new AppJobProperties());
+        IncidentRecord incident = service.recordAlert(
+                alertPayload("fp-active-run", "HighCPUUsage", "payment-service"));
+
+        DiagnosisRunRecord first = service.createDiagnosisRunAndEnqueue(
+                incident.getId(), "第一次诊断");
+        DiagnosisRunRecord second = service.createDiagnosisRunAndEnqueue(
+                incident.getId(), "重复提交");
+
+        assertEquals(first.getRunId(), second.getRunId());
+        assertEquals(1, service.getDiagnosisRuns(incident.getId()).orElseThrow().size());
+        assertEquals(1, rowCount(dataSource, "background_jobs"));
     }
 
     @Test
@@ -406,6 +430,36 @@ class IncidentServiceTest {
     }
 
     @Test
+    void markStaleRunsFailed_shouldIgnoreRunWithActiveDiagnosisJobLease() {
+        AppIncidentProperties properties = incidentProperties();
+        properties.setStaleRunTimeoutMillis(500L);
+        DataSource dataSource = dataSource(properties);
+        IncidentSchemaMigrator migrator = new IncidentSchemaMigrator(dataSource);
+        IncidentStore store = new IncidentStore(properties, new ObjectMapper(), dataSource, migrator);
+        BackgroundJobRepository jobRepository = new BackgroundJobRepository(dataSource, migrator);
+        IncidentService service = new IncidentService(
+                store, new ObjectMapper(), null, properties,
+                jobRepository, null, new AppJobProperties());
+        IncidentRecord incident = service.recordAlert(
+                alertPayload("fp-stale-active-job", "HighCPUUsage", "payment-service"));
+        DiagnosisRunRecord run = service.createDiagnosisRunAndEnqueue(
+                incident.getId(), "CPU 告警上下文");
+        service.markRunRunning(incident.getId(), run.getRunId());
+
+        long claimTime = System.currentTimeMillis();
+        jobRepository.claimNext("worker-stale-test", claimTime, 60_000L).orElseThrow();
+
+        assertTrue(service.markStaleRunsFailed(claimTime + 501L).isEmpty());
+        assertEquals("RUNNING", service.getDiagnosisRun(incident.getId(), run.getRunId())
+                .orElseThrow().getStatus());
+
+        List<DiagnosisRunRecord> failedAfterLeaseExpiry =
+                service.markStaleRunsFailed(claimTime + 60_001L);
+        assertEquals(1, failedAfterLeaseExpiry.size());
+        assertEquals("FAILED", failedAfterLeaseExpiry.get(0).getStatus());
+    }
+
+    @Test
     void markStaleRunsFailed_shouldNotOverwriteRunCompletedAfterSnapshot() {
         AppIncidentProperties properties = incidentProperties();
         properties.setStaleRunTimeoutMillis(500L);
@@ -420,8 +474,8 @@ class IncidentServiceTest {
         AtomicInteger listCalls = new AtomicInteger();
         IncidentStore racingStore = new IncidentStore(properties, new ObjectMapper(), sharedDataSource) {
             @Override
-            public List<IncidentStore.StaleRunCandidate> findStaleRunCandidates(long cutoffMillis) {
-                List<IncidentStore.StaleRunCandidate> snapshot = super.findStaleRunCandidates(cutoffMillis);
+            public List<IncidentStore.StaleRunCandidate> findStaleRunCandidates(long cutoffMillis, long nowMillis) {
+                List<IncidentStore.StaleRunCandidate> snapshot = super.findStaleRunCandidates(cutoffMillis, nowMillis);
                 if (listCalls.getAndIncrement() == 0) {
                     completingService.get().completeRun(incident.getId(), stale.getRunId(), "# 已完成报告");
                 }
@@ -619,7 +673,7 @@ class IncidentServiceTest {
         DiagnosisRunRecord completed = service.completeRun(
                 incident.getId(),
                 queued.getRunId(),
-                "# 告警分析报告\n\nCPU 持续上升 [evidence: ev-cpu-guard]");
+                validReport() + "\nCPU 持续上升 [evidence: ev-cpu-guard]");
 
         assertTrue(completed.getReport().contains("## 证据校验"));
         assertTrue(completed.getReport().contains("置信度: 高"));
@@ -637,7 +691,7 @@ class IncidentServiceTest {
         DiagnosisRunRecord completed = service.completeRun(
                 incident.getId(),
                 original.getRunId(),
-                "# 告警分析报告\n\nCPU 持续高水位");
+                validReport());
 
         DiagnosisRunRecord reused = service.createReusedDiagnosisRunIfAvailable(
                 incident.getId(), "重复告警上下文").orElseThrow();
@@ -659,6 +713,22 @@ class IncidentServiceTest {
     }
 
     @Test
+    void createReusedDiagnosisRunIfAvailable_shouldPreserveCompletedWithGapsStatus() {
+        IncidentService service = newIncidentService(new DiagnosisReportService());
+        IncidentRecord incident = service.recordAlert(alertPayload("fp-gap-reuse", "HighCPUUsage", "payment-service"));
+        DiagnosisRunRecord original = service.createDiagnosisRun(incident.getId(), "原始告警上下文");
+
+        DiagnosisRunRecord completed = service.completeRun(
+                incident.getId(), original.getRunId(), validReport());
+
+        assertEquals("COMPLETED_WITH_GAPS", completed.getStatus());
+        DiagnosisRunRecord reused = service.createReusedDiagnosisRunIfAvailable(
+                incident.getId(), "重复告警上下文").orElseThrow();
+
+        assertEquals("COMPLETED_WITH_GAPS", reused.getStatus());
+    }
+
+    @Test
     void createReusedDiagnosisRunIfAvailable_shouldReturnEmptyWhenNoCompletedReportExists() {
         IncidentService service = newIncidentService();
         IncidentRecord incident = service.recordAlert(alertPayload("fp-cpu-no-reuse", "HighCPUUsage", "payment-service"));
@@ -677,6 +747,17 @@ class IncidentServiceTest {
         service.completeRun(incident.getId(), original.getRunId(), "# 告警分析报告");
 
         assertFalse(service.createReusedDiagnosisRunIfAvailable(incident.getId(), "重复告警上下文").isPresent());
+    }
+
+    @Test
+    void createReusedDiagnosisRunIfAvailable_shouldRejectMalformedCompletedReport() {
+        IncidentService service = newIncidentService();
+        IncidentRecord incident = service.recordAlert(alertPayload("fp-invalid-reuse", "HighCPUUsage", "payment-service"));
+        DiagnosisRunRecord original = service.createDiagnosisRun(incident.getId(), "原始告警上下文");
+        service.completeRun(incident.getId(), original.getRunId(), "{\"decision\":\"PLAN\",\"step\":\"补证据\"}");
+
+        assertFalse(service.createReusedDiagnosisRunIfAvailable(
+                incident.getId(), "重复告警上下文").isPresent());
     }
 
     @Test
@@ -729,6 +810,23 @@ class IncidentServiceTest {
     }
 
     @Test
+    void markRunCaseArchived_shouldNotRegressSuccessfulArchiveToPending() {
+        IncidentService service = newIncidentService();
+        IncidentRecord incident = service.recordAlert(alertPayload("fp-archive-2", "HighCPUUsage", "payment-service"));
+        DiagnosisRunRecord source = service.createDiagnosisRun(incident.getId(), "CPU 告警上下文");
+        DiagnosisRunRecord completed = service.completeRun(incident.getId(), source.getRunId(), "# 告警分析报告");
+        service.markRunCaseArchived(incident.getId(), completed.getRunId(), true,
+                "doc-success", "历史案例已写入知识库");
+
+        DiagnosisRunRecord unchanged = service.markRunCaseArchived(
+                incident.getId(), completed.getRunId(), false, null, "已确认，历史案例入库已排队");
+
+        assertTrue(unchanged.isCaseArchived());
+        assertEquals("doc-success", unchanged.getCaseDocumentId());
+        assertEquals("历史案例已写入知识库", unchanged.getCaseArchiveMessage());
+    }
+
+    @Test
     void listIncidents_shouldFilterByStatusSeverityRunStatusKeywordAndReviewStatus() {
         IncidentService service = newIncidentService();
         IncidentRecord cpuIncident = service.recordAlert(alertPayload("fp-filter-cpu", "HighCPUUsage", "payment-service"));
@@ -776,6 +874,23 @@ class IncidentServiceTest {
 
     private IncidentService newIncidentService() {
         return newIncidentService(null);
+    }
+
+    private String validReport() {
+        return """
+                # 告警分析报告
+                ## 活跃告警清单
+                ## 告警根因分析1
+                证据不足。
+                ## 处理方案执行1
+                建议观察。
+                ## 结论
+                当前无法完成进一步确认。
+                ### 置信度
+                低
+                ### 缺失证据
+                - 进一步采样
+                """;
     }
 
     private IncidentService newIncidentService(DiagnosisReportService reportService) {

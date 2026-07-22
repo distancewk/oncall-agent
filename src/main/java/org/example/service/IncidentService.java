@@ -193,7 +193,11 @@ public class IncidentService {
             throw new IllegalStateException("创建诊断后台任务失败: " + run.getRunId(), e);
         }
         return incidentStore.inTransaction(connection -> {
-            incidentStore.persistNewDiagnosisRun(connection, incidentId, run, now);
+            IncidentStore.DiagnosisRunCreationResult creation =
+                    incidentStore.persistNewDiagnosisRunIfNoActive(connection, incidentId, run, now);
+            if (!creation.created()) {
+                return creation.run();
+            }
             backgroundJobRepository.enqueue(
                     connection,
                     "DIAGNOSIS",
@@ -222,7 +226,7 @@ public class IncidentService {
         DiagnosisRunRecord run = new DiagnosisRunRecord();
         run.setRunId("run-" + UUID.randomUUID().toString().substring(0, 12));
         run.setIncidentId(incidentId);
-        run.setStatus("COMPLETED");
+        run.setStatus(source.getStatus());
         run.setCreatedAt(now);
         run.setStartedAt(now);
         run.setCompletedAt(now);
@@ -241,13 +245,20 @@ public class IncidentService {
         run.setReuseConfidence(1.0d);
         run.setReuseValidatedAt(now);
         run.setProgressMessage(reason);
+        run.setQualityScore(source.getQualityScore());
+        run.setQualityGrade(source.getQualityGrade());
+        run.setQualitySummary(source.getQualitySummary());
+        run.setQualityIssues(source.getQualityIssues());
         run.getEvidence().add(DiagnosisEvidence.of("alert_context", "注入给 AI 的告警上下文", alertContext, now));
         run.getEvidence().add(DiagnosisEvidence.of("diagnosis_reuse", "复用历史诊断报告",
                 buildReuseEvidenceContent(incident, source, sourceRunId, reason), now));
 
-        incident.getDiagnosisRuns().add(run);
-        incident.setUpdatedAt(now);
-        incidentStore.save(incident);
+        if (!DiagnosisReportService.isFinalReportCandidate(source.getReport())) {
+            return Optional.empty();
+        }
+        if (!incidentStore.persistReusedDiagnosisRunIfNoActive(incidentId, run, now)) {
+            return Optional.empty();
+        }
         return Optional.of(run);
     }
 
@@ -363,11 +374,13 @@ public class IncidentService {
         if (!isActiveRun(run)) {
             return run;
         }
+        if (diagnosisReportService != null && !DiagnosisReportService.isFinalReportCandidate(report)) {
+            throw new IllegalArgumentException("诊断报告未满足最终报告格式，拒绝标记为完成");
+        }
         long now = System.currentTimeMillis();
         if (run.getStartedAt() == 0L) {
             run.setStartedAt(now);
         }
-        run.setStatus("COMPLETED");
         run.setCompletedAt(now);
         String guardedReport = diagnosisReportService == null
                 ? report
@@ -380,6 +393,9 @@ public class IncidentService {
             run.setQualityGrade(quality.grade());
             run.setQualitySummary(quality.summary());
             run.setQualityIssues(quality.issues());
+            run.setStatus(quality.score() < 60 ? "COMPLETED_WITH_GAPS" : "COMPLETED");
+        } else {
+            run.setStatus("COMPLETED");
         }
         run.setErrorMessage(null);
         run.setCurrentTool(null);
@@ -457,15 +473,7 @@ public class IncidentService {
                                                   boolean archived,
                                                   String documentId,
                                                   String message) {
-        IncidentRecord incident = requireIncident(incidentId);
-        DiagnosisRunRecord run = requireRun(incident, runId);
-        long now = System.currentTimeMillis();
-        run.setCaseArchived(archived);
-        run.setCaseDocumentId(documentId);
-        run.setCaseArchiveMessage(message);
-        incident.setUpdatedAt(now);
-        incidentStore.save(incident);
-        return run;
+        return incidentStore.updateRunCaseArchive(incidentId, runId, archived, documentId, message);
     }
 
     public List<DiagnosisRunRecord> markStaleRunsFailed(long nowMillis) {
@@ -475,7 +483,7 @@ public class IncidentService {
         }
         List<DiagnosisRunRecord> failedRuns = new ArrayList<>();
         for (IncidentStore.StaleRunCandidate candidate : incidentStore.findStaleRunCandidates(
-                nowMillis - timeoutMillis)) {
+                nowMillis - timeoutMillis, nowMillis)) {
             String message = "诊断任务超时，已自动标记失败";
             DiagnosisEvidence evidence =
                     DiagnosisEvidence.of("diagnosis_timeout", "诊断超时原因", message, nowMillis);
@@ -500,7 +508,7 @@ public class IncidentService {
                                                   String comment) {
         IncidentRecord incident = requireIncident(incidentId);
         DiagnosisRunRecord run = requireRun(incident, runId);
-        if (!"COMPLETED".equals(run.getStatus())) {
+        if (!isCompletedRun(run)) {
             throw new IllegalStateException("只有已完成诊断才能进行人工确认: " + runId);
         }
         long now = System.currentTimeMillis();
@@ -591,8 +599,9 @@ public class IncidentService {
         List<DiagnosisRunRecord> runs = incident.getDiagnosisRuns();
         for (int i = runs.size() - 1; i >= 0; i--) {
             DiagnosisRunRecord run = runs.get(i);
-            if ("COMPLETED".equals(run.getStatus())
+            if (isCompletedRun(run)
                     && notBlank(run.getReport())
+                    && DiagnosisReportService.isFinalReportCandidate(run.getReport())
                     && isWithinReuseWindow(run, now)) {
                 return Optional.of(run);
             }
@@ -604,6 +613,10 @@ public class IncidentService {
         return "QUEUED".equals(run.getStatus())
                 || "RUNNING".equals(run.getStatus())
                 || "WAITING_TOOL".equals(run.getStatus());
+    }
+
+    private boolean isCompletedRun(DiagnosisRunRecord run) {
+        return "COMPLETED".equals(run.getStatus()) || "COMPLETED_WITH_GAPS".equals(run.getStatus());
     }
 
     private boolean isStaleRun(DiagnosisRunRecord run, long nowMillis, long timeoutMillis) {

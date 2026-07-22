@@ -3,8 +3,8 @@ package org.example.service;
 import io.milvus.client.MilvusServiceClient;
 import io.milvus.grpc.MutationResult;
 import io.milvus.param.R;
-import io.milvus.param.dml.DeleteParam;
 import io.milvus.param.dml.InsertParam;
+import io.milvus.param.dml.UpsertParam;
 import org.example.dto.AlertPayload;
 import org.example.dto.DiagnosisEvidence;
 import org.example.dto.DiagnosisRunRecord;
@@ -46,6 +46,7 @@ class IncidentCaseServiceTest {
                 ### 处理建议
                 重启服务并分析 heap dump。
                 """);
+        run.setHumanReviewStatus("CONFIRMED");
         incident.getDiagnosisRuns().add(run);
         when(incidentService.getIncident("incident-1")).thenReturn(Optional.of(incident));
         when(embeddingService.generateEmbedding(any())).thenReturn(List.of(0.1f, 0.2f));
@@ -54,8 +55,7 @@ class IncidentCaseServiceTest {
         @SuppressWarnings("unchecked")
         R<MutationResult> mutationResponse = mock(R.class);
         when(mutationResponse.getStatus()).thenReturn(0);
-        when(milvusClient.delete(any(DeleteParam.class))).thenReturn(mutationResponse);
-        when(milvusClient.insert(any(InsertParam.class))).thenReturn(mutationResponse);
+        when(milvusClient.upsert(any(UpsertParam.class))).thenReturn(mutationResponse);
 
         IncidentCaseService service = new IncidentCaseService(
                 incidentService, milvusClient, embeddingService, vectorSearchService, new MilvusInsertHelper());
@@ -65,13 +65,13 @@ class IncidentCaseServiceTest {
         assertTrue(result.isSuccess());
         assertEquals("incident-1", result.getIncidentId());
 
-        ArgumentCaptor<InsertParam> insertCaptor = ArgumentCaptor.forClass(InsertParam.class);
-        verify(milvusClient).insert(insertCaptor.capture());
-        InsertParam insertParam = insertCaptor.getValue();
+        ArgumentCaptor<UpsertParam> upsertCaptor = ArgumentCaptor.forClass(UpsertParam.class);
+        verify(milvusClient).upsert(upsertCaptor.capture());
+        UpsertParam upsertParam = upsertCaptor.getValue();
 
-        assertEquals(1, insertParam.getRowCount());
-        String content = fieldValues(insertParam, "content").get(0).toString();
-        String metadata = fieldValues(insertParam, "metadata").get(0).toString();
+        assertEquals(1, upsertParam.getFields().get(0).getValues().size());
+        String content = fieldValues(upsertParam.getFields(), "content").get(0).toString();
+        String metadata = fieldValues(upsertParam.getFields(), "metadata").get(0).toString();
         assertTrue(content.contains("JVM GC 风暴导致 CPU 升高"));
         assertTrue(content.contains("重启服务并分析 heap dump"));
         assertTrue(metadata.contains("\"doc_type\":\"incident_case\""));
@@ -108,8 +108,7 @@ class IncidentCaseServiceTest {
         @SuppressWarnings("unchecked")
         R<MutationResult> mutationResponse = mock(R.class);
         when(mutationResponse.getStatus()).thenReturn(0);
-        when(milvusClient.delete(any(DeleteParam.class))).thenReturn(mutationResponse);
-        when(milvusClient.insert(any(InsertParam.class))).thenReturn(mutationResponse);
+        when(milvusClient.upsert(any(UpsertParam.class))).thenReturn(mutationResponse);
 
         IncidentCaseService service = new IncidentCaseService(
                 incidentService, milvusClient, embeddingService, vectorSearchService, new MilvusInsertHelper());
@@ -118,9 +117,9 @@ class IncidentCaseServiceTest {
 
         assertTrue(result.isSuccess());
         assertEquals("incident-4", result.getIncidentId());
-        ArgumentCaptor<InsertParam> insertCaptor = ArgumentCaptor.forClass(InsertParam.class);
-        verify(milvusClient).insert(insertCaptor.capture());
-        String metadata = fieldValues(insertCaptor.getValue(), "metadata").get(0).toString();
+        ArgumentCaptor<UpsertParam> upsertCaptor = ArgumentCaptor.forClass(UpsertParam.class);
+        verify(milvusClient).upsert(upsertCaptor.capture());
+        String metadata = fieldValues(upsertCaptor.getValue().getFields(), "metadata").get(0).toString();
         assertTrue(metadata.contains("\"run_id\":\"run-confirmed\""));
         assertTrue(metadata.contains("\"human_review_status\":\"CONFIRMED\""));
     }
@@ -247,7 +246,11 @@ class IncidentCaseServiceTest {
     }
 
     private List<?> fieldValues(InsertParam insertParam, String fieldName) {
-        return insertParam.getFields().stream()
+        return fieldValues(insertParam.getFields(), fieldName);
+    }
+
+    private List<?> fieldValues(List<InsertParam.Field> fields, String fieldName) {
+        return fields.stream()
                 .filter(field -> fieldName.equals(field.getName()))
                 .findFirst()
                 .orElseThrow()

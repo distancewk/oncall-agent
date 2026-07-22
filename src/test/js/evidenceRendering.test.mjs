@@ -38,6 +38,7 @@ function loadAppPrototype() {
     fetchImpl() {
       throw new Error('fetchImpl not configured');
     },
+    Headers,
     setTimeout() {}
   };
   vm.createContext(sandbox);
@@ -184,8 +185,23 @@ test('deriveIncidentWorkbenchSummary counts evidence states', () => {
   assert.equal(summary.humanReviewStatus, 'PENDING');
   assert.equal(summary.evidenceCount, 3);
   assert.equal(summary.failedEvidenceCount, 1);
+  assert.equal(summary.skippedEvidenceCount, 0);
   assert.equal(summary.retriedEvidenceCount, 1);
   assert.equal(summary.totalDurationMs, 400);
+});
+
+test('incident detail distinguishes queued and waiting-tool diagnosis states', () => {
+  const app = createAppForTest();
+  assert.match(app.renderDiagnosisPendingReport('QUEUED'), /诊断任务已入队，等待后台任务开始/);
+  assert.match(app.renderDiagnosisPendingReport('WAITING_TOOL'), /诊断正在等待工具返回，请稍后刷新详情/);
+  assert.match(app.renderDiagnosisPendingReport('RUNNING'), /诊断任务正在执行，请稍后刷新详情/);
+});
+
+test('intermediate diagnosis output is not treated as a final report', () => {
+  const app = createAppForTest();
+  assert.equal(app.isIntermediateDiagnosisReport('{"decision":"PLAN","step":"queryLogs"}'), true);
+  assert.equal(app.isIntermediateDiagnosisReport('# 告警分析报告\n\n## 结论'), false);
+  assert.match(app.renderDiagnosisInvalidReport(), /未生成最终告警分析报告/);
 });
 
 test('deriveDiagnosisTimeline creates ordered incident and evidence events', () => {
@@ -287,7 +303,149 @@ test('renderIncidentWorkbenchSummary returns status tiles', () => {
   assert.match(html, /incident-workbench-summary/);
   assert.match(html, /critical/);
   assert.match(html, /RUNNING/);
-  assert.match(html, /失败证据/);
+  assert.match(html, /实际失败/);
+  assert.match(html, /incident-workbench-summary-more/);
+});
+
+test('calculateDiagnosisEvidenceStats separates policy skips from real failures', () => {
+  const app = createAppForTest();
+  const stats = app.calculateDiagnosisEvidenceStats([
+    { type: 'tool_call', success: true },
+    { type: 'tool_call', success: false, errorCode: 'DEPENDENCY_ERROR', attemptCount: 1 },
+    { type: 'tool_call', success: false, errorCode: 'TOOL_DUPLICATE_SKIPPED', attemptCount: 0 },
+    { type: 'tool_call', success: false, errorCode: 'TOOL_BUDGET_EXCEEDED' },
+    { type: 'tool_call', success: false, errorCode: 'TOOL_BUDGET_EXCEEDED', attemptCount: 0 }
+  ]);
+
+  assert.equal(stats.successCount, 1);
+  assert.equal(stats.failedCount, 1);
+  assert.equal(stats.skippedCount, 3);
+  assert.equal(stats.duplicateSkippedCount, 1);
+  assert.equal(stats.budgetSkippedCount, 2);
+});
+
+test('renderMetricTrendChart exposes scale, threshold and accessible points', () => {
+  const app = createAppForTest();
+  const html = app.renderMetricTrendChart({
+    toolName: 'queryMetricTrend',
+    timeRange: '15m',
+    rawFragment: JSON.stringify({
+      metric: 'cpu_usage',
+      window: '15m',
+      points: [
+        { timestamp: '2026-07-17T09:00:00Z', value: 55 },
+        { timestamp: '2026-07-17T09:05:00Z', value: 88 },
+        { timestamp: '2026-07-17T09:10:00Z', value: 94 }
+      ],
+      summary: { latest: 94, avg: 79, direction: 'increasing', anomalous: true }
+    })
+  });
+
+  assert.match(html, /trend-chart-axis-label/);
+  assert.match(html, /trend-chart-threshold/);
+  assert.match(html, /阈值 80\.0%/);
+  assert.match(html, /<title>cpu_usage 趋势图<\/title>/);
+  assert.match(html, /\d{2}:00/);
+  assert.match(html, /最新 94\.0%/);
+});
+
+test('renderMetricTrendChart renders JVM GC unit and threshold', () => {
+  const app = createAppForTest();
+  const html = app.renderMetricTrendChart({
+    toolName: 'queryMetricTrend',
+    timeRange: '15m',
+    rawFragment: JSON.stringify({
+      metric: 'jvm_gc_collection_seconds_count',
+      window: '15m',
+      points: [
+        { timestamp: '2026-07-17T09:00:00Z', value: 0.4 },
+        { timestamp: '2026-07-17T09:05:00Z', value: 1.2 }
+      ],
+      summary: { latest: 1.2, avg: 0.8, direction: 'increasing', anomalous: true }
+    })
+  });
+
+  assert.match(html, /阈值 1\.00次\/s/);
+  assert.match(html, /最新 1\.20次\/s/);
+});
+
+test('renderMetricTrendChart keeps finite coordinates for a single sample', () => {
+  const app = createAppForTest();
+  const html = app.renderMetricTrendChart({
+    toolName: 'queryMetricTrend',
+    timeRange: '15m',
+    rawFragment: JSON.stringify({
+      metric: 'cpu_usage',
+      window: '15m',
+      points: [{ timestamp: '2026-07-17T09:00:00Z', value: 55 }],
+      summary: { latest: 55, avg: 55, direction: 'stable', anomalous: false }
+    })
+  });
+
+  assert.doesNotMatch(html, /NaN/);
+  assert.match(html, /最新 55\.0%/);
+});
+
+test('renderDiagnosisEvidenceList opens risky groups and labels status', () => {
+  const app = createAppForTest();
+  const html = app.renderDiagnosisEvidenceList([
+    {
+      id: 'ev-failed',
+      type: 'tool_call',
+      toolName: 'queryLogs',
+      success: false,
+      errorCode: 'DEPENDENCY_ERROR',
+      summary: '日志依赖异常'
+    },
+    {
+      id: 'ev-ok',
+      type: 'tool_call',
+      toolName: 'queryInternalDocs',
+      success: true,
+      summary: '命中文档'
+    }
+  ]);
+
+  assert.match(html, /diagnosis-evidence-group risk-group" open/);
+  assert.match(html, /含异常/);
+  assert.match(html, /DEPENDENCY_ERROR/);
+});
+
+test('policy-skipped evidence is neutral and does not mark its group risky', () => {
+  const app = createAppForTest();
+  const html = app.renderDiagnosisEvidenceList([
+    {
+      id: 'ev-skipped',
+      type: 'tool_call',
+      toolName: 'queryLogs',
+      success: false,
+      errorCode: 'TOOL_DUPLICATE_SKIPPED',
+      attemptCount: 0,
+      summary: '重复调用已跳过'
+    }
+  ]);
+
+  assert.match(html, /diagnosis-evidence-status skipped/);
+  assert.match(html, /已跳过/);
+  assert.doesNotMatch(html, /diagnosis-evidence-group risk-group/);
+});
+
+test('policy-like error with attempts remains a real failure', () => {
+  const app = createAppForTest();
+  const html = app.renderDiagnosisEvidenceList([
+    {
+      id: 'ev-real-failure',
+      type: 'tool_call',
+      toolName: 'queryLogs',
+      success: false,
+      errorCode: 'TOOL_BUDGET_EXCEEDED',
+      attemptCount: 1,
+      summary: '工具实际执行后失败'
+    }
+  ]);
+
+  assert.match(html, /diagnosis-evidence-status failed/);
+  assert.doesNotMatch(html, /已跳过/);
 });
 
 test('renderAlertHistoryFilters groups controls into two rows', () => {

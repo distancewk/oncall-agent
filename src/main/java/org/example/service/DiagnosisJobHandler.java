@@ -88,26 +88,26 @@ public class DiagnosisJobHandler implements BackgroundJobHandler {
         IncidentRecord incident = incidentService.getIncident(incidentId)
                 .orElseThrow(() -> new IllegalArgumentException("Incident 不存在: " + incidentId));
         DiagnosisRunRecord run = findRun(incidentId, runId);
-        incidentService.markRunRunning(incidentId, runId);
-
-        if (cancelled(job)) {
-            return;
-        }
-        String baseContext = context;
-        CompletableFuture<String> similarCases = CompletableFuture.supplyAsync(
-                () -> prefetchSimilarCases(incident, run, baseContext), diagnosisPrefetchExecutor);
-        CompletableFuture<String> metricTrends = CompletableFuture.supplyAsync(
-                () -> prefetchMetricTrends(incident, run, baseContext), diagnosisPrefetchExecutor);
-        context = mergePrefetchContexts(baseContext, similarCases, metricTrends);
-        if (!context.equals(baseContext)) {
-            incidentService.updateRunAlertContext(incident.getId(), run.getRunId(), context);
-        }
-        if (cancelled(job)) {
-            return;
-        }
-
-        ToolCallback[] callbacks = tools == null ? new ToolCallback[0] : tools.getToolCallbacks();
         try {
+            incidentService.markRunRunning(incidentId, runId);
+
+            if (cancelled(job)) {
+                return;
+            }
+            String baseContext = context;
+            CompletableFuture<String> similarCases = CompletableFuture.supplyAsync(
+                    () -> prefetchSimilarCases(incident, run, baseContext), diagnosisPrefetchExecutor);
+            CompletableFuture<String> metricTrends = CompletableFuture.supplyAsync(
+                    () -> prefetchMetricTrends(incident, run, baseContext), diagnosisPrefetchExecutor);
+            context = mergePrefetchContexts(baseContext, similarCases, metricTrends);
+            if (!context.equals(baseContext)) {
+                incidentService.updateRunAlertContext(incident.getId(), run.getRunId(), context);
+            }
+            if (cancelled(job)) {
+                return;
+            }
+
+            ToolCallback[] callbacks = tools == null ? new ToolCallback[0] : tools.getToolCallbacks();
             Optional<OverAllState> state = aiOpsService.executeAiOpsAnalysis(
                     chatModel, callbacks, context, incidentId, runId);
             if (cancelled(job)) {
@@ -118,15 +118,17 @@ public class DiagnosisJobHandler implements BackgroundJobHandler {
             }
             Optional<String> report = aiOpsService.extractFinalReport(state.get());
             if (report.isEmpty()) {
-                throw new IllegalStateException("多 Agent 流程完成，但未能提取最终报告");
+                throw new IllegalStateException("诊断未完成：Agent 返回了中间计划或空结果，未生成最终告警分析报告");
             }
             incidentService.completeRun(incidentId, runId, report.get());
             storeAlertReport(alertId, report.get());
+            storeIncidentPendingAlertReports(incidentId, report.get());
         } catch (Exception e) {
             if (job.getAttemptCount() >= job.getMaxAttempts() && !cancelled(job)) {
                 String message = "告警分析异常: " + e.getMessage();
                 incidentService.failRun(incidentId, runId, message);
                 storeAlertReport(alertId, message);
+                storeIncidentPendingAlertReports(incidentId, message);
             }
             throw e;
         }
@@ -202,6 +204,12 @@ public class DiagnosisJobHandler implements BackgroundJobHandler {
     private void storeAlertReport(String alertId, String report) {
         if (alertService != null && alertId != null && !alertId.isBlank()) {
             alertService.storeReport(alertId, report);
+        }
+    }
+
+    private void storeIncidentPendingAlertReports(String incidentId, String report) {
+        if (alertService != null) {
+            alertService.storeMissingReportsForIncident(incidentId, report);
         }
     }
 }
