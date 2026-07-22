@@ -6,6 +6,8 @@ import org.example.dto.DiagnosisEvidence;
 import org.example.dto.IncidentRecord;
 import org.example.dto.IncidentSummary;
 import org.example.service.AiOpsService;
+import org.example.config.AppJobProperties;
+import org.example.service.BackgroundJobRepository;
 import org.example.service.IncidentCaseService;
 import org.example.service.IncidentService;
 import org.example.service.MetricTrendPrefetchService;
@@ -46,6 +48,12 @@ class IncidentControllerTest {
 
     @MockBean
     private IncidentCaseService incidentCaseService;
+
+    @MockBean
+    private BackgroundJobRepository backgroundJobRepository;
+
+    @MockBean
+    private AppJobProperties appJobProperties;
 
     @MockBean
     private MetricTrendPrefetchService metricTrendPrefetchService;
@@ -158,6 +166,29 @@ class IncidentControllerTest {
     }
 
     @Test
+    void diagnoseIncident_shouldSkipReuseWhenForceIsRequested() throws Exception {
+        IncidentRecord incident = new IncidentRecord();
+        incident.setId("incident-1");
+        incident.setTitle("HighCPUUsage payment-service");
+        when(incidentService.getIncident("incident-1")).thenReturn(Optional.of(incident));
+        when(incidentService.buildAlertContext(incident)).thenReturn("告警上下文");
+
+        DiagnosisRunRecord run = new DiagnosisRunRecord();
+        run.setRunId("run-new");
+        run.setIncidentId("incident-1");
+        run.setStatus("QUEUED");
+        when(incidentService.createDiagnosisRunAndEnqueue("incident-1", "告警上下文")).thenReturn(run);
+
+        mockMvc.perform(post("/api/incidents/incident-1/diagnose").param("force", "true"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.data.runId").value("run-new"))
+                .andExpect(jsonPath("$.data.status").value("QUEUED"));
+
+        verify(incidentService, never()).createReusedDiagnosisRunIfAvailable("incident-1", "告警上下文");
+        verify(incidentService).createDiagnosisRunAndEnqueue("incident-1", "告警上下文");
+    }
+
+    @Test
     void listRuns_shouldReturnDiagnosisRunsForIncident() throws Exception {
         DiagnosisRunRecord run = new DiagnosisRunRecord();
         run.setRunId("run-1");
@@ -218,29 +249,22 @@ class IncidentControllerTest {
         confirmed.setHumanReviewStatus("CONFIRMED");
         when(incidentService.confirmRun("incident-1", "run-1", "根因准确")).thenReturn(confirmed);
 
-        IncidentCaseService.ArchiveResult archiveResult = new IncidentCaseService.ArchiveResult();
-        archiveResult.setSuccess(true);
-        archiveResult.setIncidentId("incident-1");
-        archiveResult.setDocumentId("doc-1");
-        archiveResult.setMessage("历史案例已写入知识库");
-        when(incidentCaseService.archiveCase("incident-1", "run-1")).thenReturn(archiveResult);
-
         DiagnosisRunRecord archived = new DiagnosisRunRecord();
         archived.setRunId("run-1");
         archived.setIncidentId("incident-1");
         archived.setStatus("COMPLETED");
         archived.setHumanReviewStatus("CONFIRMED");
-        archived.setCaseArchived(true);
-        archived.setCaseDocumentId("doc-1");
+        archived.setCaseArchived(false);
+        archived.setCaseArchiveMessage("已确认，历史案例入库已排队");
         when(incidentService.markRunCaseArchived(
-                "incident-1", "run-1", true, "doc-1", "历史案例已写入知识库")).thenReturn(archived);
+                "incident-1", "run-1", false, null, "已确认，历史案例入库已排队")).thenReturn(archived);
 
         mockMvc.perform(post("/api/incidents/incident-1/runs/run-1/confirm")
                         .param("comment", "根因准确"))
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.data.humanReviewStatus").value("CONFIRMED"))
-                .andExpect(jsonPath("$.data.caseArchived").value(true))
-                .andExpect(jsonPath("$.data.caseDocumentId").value("doc-1"));
+                .andExpect(jsonPath("$.data.caseArchived").value(false))
+                .andExpect(jsonPath("$.data.caseArchiveMessage").value("已确认，历史案例入库已排队"));
     }
 
     @Test

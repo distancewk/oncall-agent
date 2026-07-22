@@ -1,11 +1,15 @@
 package org.example.controller;
 
+import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import org.example.config.AppJobProperties;
 import org.example.dto.ApiResponse;
 import org.example.dto.DiagnosisRunRecord;
 import org.example.dto.IncidentRecord;
 import org.example.dto.IncidentSummary;
 import org.example.service.IncidentCaseService;
 import org.example.service.IncidentService;
+import org.example.service.BackgroundJobRepository;
 import org.example.service.VectorSearchService;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -32,6 +36,15 @@ public class IncidentController {
 
     @Autowired
     private IncidentCaseService incidentCaseService;
+
+    @Autowired
+    private BackgroundJobRepository backgroundJobRepository;
+
+    @Autowired
+    private AppJobProperties jobProperties;
+
+    @Autowired
+    private ObjectMapper objectMapper;
 
     @GetMapping
     public ResponseEntity<ApiResponse<List<IncidentSummary>>> listIncidents(
@@ -90,16 +103,12 @@ public class IncidentController {
         try {
             incidentService.confirmRun(incidentId, runId, comment);
             try {
-                IncidentCaseService.ArchiveResult archiveResult = incidentCaseService.archiveCase(incidentId, runId);
-                DiagnosisRunRecord archived = incidentService.markRunCaseArchived(
-                        incidentId,
-                        runId,
-                        archiveResult.isSuccess(),
-                        archiveResult.getDocumentId(),
-                        archiveResult.getMessage());
-                return ResponseEntity.ok(ApiResponse.success(archived));
+                enqueueCaseArchive(incidentId, runId);
+                DiagnosisRunRecord queued = incidentService.markRunCaseArchived(
+                        incidentId, runId, false, null, "已确认，历史案例入库已排队");
+                return ResponseEntity.ok(ApiResponse.success(queued));
             } catch (Exception archiveError) {
-                logger.warn("人工确认后写入历史案例失败, incidentId: {}, runId: {}",
+                logger.warn("人工确认后创建历史案例后台任务失败, incidentId: {}, runId: {}",
                         incidentId, runId, archiveError);
                 DiagnosisRunRecord updated = incidentService.markRunCaseArchived(
                         incidentId,
@@ -131,18 +140,26 @@ public class IncidentController {
     }
 
     @PostMapping("/{incidentId}/diagnose")
-    public ResponseEntity<ApiResponse<DiagnosisRunRecord>> diagnoseIncident(@PathVariable String incidentId) {
+    public ResponseEntity<ApiResponse<DiagnosisRunRecord>> diagnoseIncident(
+            @PathVariable String incidentId,
+            @RequestParam(defaultValue = "false") boolean force) {
         Optional<IncidentRecord> incidentOptional = incidentService.getIncident(incidentId);
         if (incidentOptional.isEmpty()) {
             return ResponseEntity.status(404).body(ApiResponse.error(404, "Incident 不存在"));
         }
 
         String alertContext = incidentService.buildAlertContext(incidentOptional.get());
-        Optional<DiagnosisRunRecord> reusedRun = incidentService.createReusedDiagnosisRunIfAvailable(incidentId, alertContext);
+        Optional<DiagnosisRunRecord> reusedRun = force
+                ? Optional.empty()
+                : incidentService.createReusedDiagnosisRunIfAvailable(incidentId, alertContext);
         if (reusedRun.isPresent()) {
             logger.info("复用历史诊断报告, incidentId: {}, runId: {}, sourceRunId: {}",
                     incidentId, reusedRun.get().getRunId(), reusedRun.get().getReusedFromRunId());
             return ResponseEntity.ok(ApiResponse.success(reusedRun.get()));
+        }
+
+        if (force) {
+            logger.info("强制重新执行诊断，跳过历史报告复用, incidentId: {}", incidentId);
         }
 
         DiagnosisRunRecord run = incidentService.createDiagnosisRunAndEnqueue(incidentId, alertContext);
@@ -151,7 +168,30 @@ public class IncidentController {
 
     @PostMapping("/{incidentId}/archive-case")
     public ResponseEntity<ApiResponse<IncidentCaseService.ArchiveResult>> archiveCase(@PathVariable String incidentId) {
-        return ResponseEntity.ok(ApiResponse.success(incidentCaseService.archiveCase(incidentId)));
+        IncidentCaseService.ArchiveResult result = incidentCaseService.archiveCase(incidentId);
+        if (result.isSuccess()) {
+            incidentService.getIncident(incidentId)
+                    .flatMap(incident -> incident.getDiagnosisRuns().stream()
+                            .filter(run -> "CONFIRMED".equals(run.getHumanReviewStatus())
+                                    && ("COMPLETED".equals(run.getStatus())
+                                    || "COMPLETED_WITH_GAPS".equals(run.getStatus())))
+                            .reduce((first, second) -> second))
+                    .ifPresent(run -> incidentService.markRunCaseArchived(
+                            incidentId, run.getRunId(), true, result.getDocumentId(), result.getMessage()));
+        }
+        return ResponseEntity.ok(ApiResponse.success(result));
+    }
+
+    private void enqueueCaseArchive(String incidentId, String runId) {
+        try {
+            String payload = objectMapper.writeValueAsString(java.util.Map.of(
+                    "incidentId", incidentId, "runId", runId));
+            backgroundJobRepository.enqueue(
+                    "ARCHIVE_CASE", runId, payload, jobProperties.getArchiveMaxAttempts(),
+                    System.currentTimeMillis());
+        } catch (JsonProcessingException e) {
+            throw new IllegalStateException("创建历史案例后台任务失败: " + runId, e);
+        }
     }
 
     @GetMapping("/{incidentId}/similar-cases")

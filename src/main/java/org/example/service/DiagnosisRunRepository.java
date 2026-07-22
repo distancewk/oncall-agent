@@ -9,6 +9,7 @@ import javax.sql.DataSource;
 import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
+import java.sql.SQLException;
 import java.sql.Types;
 import java.util.ArrayList;
 import java.util.HashMap;
@@ -114,6 +115,27 @@ public class DiagnosisRunRepository {
         }
     }
 
+    public Optional<DiagnosisRunRecord> findActiveByIncidentId(Connection connection,
+                                                                String incidentId) throws Exception {
+        try (PreparedStatement statement = connection.prepareStatement("""
+                select * from diagnosis_runs
+                where incident_id = ?
+                  and status in ('QUEUED', 'RUNNING', 'WAITING_TOOL')
+                order by created_at desc, run_id desc
+                limit 1
+                """)) {
+            statement.setString(1, incidentId);
+            try (ResultSet resultSet = statement.executeQuery()) {
+                if (!resultSet.next()) {
+                    return Optional.empty();
+                }
+                DiagnosisRunRecord run = map(resultSet);
+                run.setEvidence(evidenceRepository.findByRunId(connection, run.getRunId()));
+                return Optional.of(run);
+            }
+        }
+    }
+
     public Map<String, List<DiagnosisRunRecord>> findByIncidentIds(Connection connection,
                                                                      List<String> incidentIds)
             throws Exception {
@@ -181,6 +203,31 @@ public class DiagnosisRunRepository {
             }
         }
         return updated > 0;
+    }
+
+    public boolean updateCaseArchive(Connection connection,
+                                     String incidentId,
+                                     String runId,
+                                     boolean archived,
+                                     String documentId,
+                                     String message) throws SQLException {
+        String stateGuard = archived ? "" : " and case_archived = false";
+        String sql = """
+                update diagnosis_runs
+                set case_archived = ?,
+                    case_document_id = ?,
+                    case_archive_message = ?,
+                    version = version + 1
+                where incident_id = ? and run_id = ?
+                """ + stateGuard;
+        try (PreparedStatement statement = connection.prepareStatement(sql)) {
+            statement.setBoolean(1, archived);
+            statement.setString(2, documentId);
+            statement.setString(3, message);
+            statement.setString(4, incidentId);
+            statement.setString(5, runId);
+            return statement.executeUpdate() > 0;
+        }
     }
 
     public Optional<DiagnosisRunRecord> findById(Connection connection,

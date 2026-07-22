@@ -104,6 +104,7 @@ app:
     diagnosis-max-attempts: ${APP_JOB_DIAGNOSIS_MAX_ATTEMPTS:2}
     diagnosis-prefetch-concurrency: ${APP_JOB_DIAGNOSIS_PREFETCH_CONCURRENCY:4}
     index-max-attempts: ${APP_JOB_INDEX_MAX_ATTEMPTS:3}
+    archive-max-attempts: ${APP_JOB_ARCHIVE_MAX_ATTEMPTS:3}
   chat:
     direct-model-routing-enabled: ${APP_DIRECT_MODEL_ROUTING_ENABLED:true}
   resilience:
@@ -176,10 +177,13 @@ app:
     diagnosis-reuse-window-millis: ${APP_DIAGNOSIS_REUSE_WINDOW_MILLIS:3600000}
     tool-call-deduplication-enabled: ${APP_TOOL_CALL_DEDUPLICATION_ENABLED:true}
     query-logs-max-calls-per-run: ${APP_QUERY_LOGS_MAX_CALLS_PER_RUN:3}
+    query-logs-max-attempts-per-run: ${APP_QUERY_LOGS_MAX_ATTEMPTS_PER_RUN:5}
     query-internal-docs-max-calls-per-run: ${APP_QUERY_INTERNAL_DOCS_MAX_CALLS_PER_RUN:3}
     tavily-max-calls-per-run: ${APP_TAVILY_MAX_CALLS_PER_RUN:2}
     dbhub-max-calls-per-run: ${APP_DBHUB_MAX_CALLS_PER_RUN:2}
     max-tool-calls-per-run: ${APP_MAX_TOOL_CALLS_PER_RUN:12}
+    max-tool-attempts-per-run: ${APP_MAX_TOOL_ATTEMPTS_PER_RUN:16}
+    max-supervisor-rounds: ${APP_MAX_SUPERVISOR_ROUNDS:8}
     stale-run-timeout-millis: ${APP_STALE_RUN_TIMEOUT_MILLIS:600000}
     stale-run-sweep-delay-millis: ${APP_STALE_RUN_SWEEP_DELAY_MILLIS:60000}
   memory:

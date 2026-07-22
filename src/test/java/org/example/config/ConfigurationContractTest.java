@@ -52,8 +52,10 @@ class ConfigurationContractTest {
         assertTrue(yaml.contains("lease-duration-millis: ${APP_JOB_LEASE_DURATION_MILLIS:60000}"));
         assertTrue(yaml.contains("heartbeat-interval-millis: ${APP_JOB_HEARTBEAT_INTERVAL_MILLIS:15000}"));
         assertTrue(yaml.contains("worker-concurrency: ${APP_JOB_WORKER_CONCURRENCY:4}"));
+        assertTrue(yaml.contains("archive-max-attempts: ${APP_JOB_ARCHIVE_MAX_ATTEMPTS:3}"));
         assertTrue(yaml.contains(
                 "query-internal-docs-max-calls-per-run: ${APP_QUERY_INTERNAL_DOCS_MAX_CALLS_PER_RUN:3}"));
+        assertTrue(yaml.contains("max-supervisor-rounds: ${APP_MAX_SUPERVISOR_ROUNDS:8}"));
         assertTrue(yaml.contains("tavily-max-calls-per-run: ${APP_TAVILY_MAX_CALLS_PER_RUN:2}"));
         assertTrue(yaml.contains("dbhub-max-calls-per-run: ${APP_DBHUB_MAX_CALLS_PER_RUN:2}"));
     }
@@ -67,6 +69,7 @@ class ConfigurationContractTest {
         assertEquals(4, properties.getWorkerConcurrency());
         assertEquals(2, properties.getDiagnosisMaxAttempts());
         assertEquals(3, properties.getIndexMaxAttempts());
+        assertEquals(3, properties.getArchiveMaxAttempts());
     }
 
     @Test

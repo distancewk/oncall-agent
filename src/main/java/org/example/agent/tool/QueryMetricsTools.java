@@ -34,8 +34,6 @@ import java.util.*;
 public class QueryMetricsTools {
 
     private static final Logger logger = LoggerFactory.getLogger(QueryMetricsTools.class);
-    private static final Set<String> SUPPORTED_TREND_METRICS = Set.of(
-            "cpu_usage", "memory_usage", "error_rate", "p99_latency", "restart_count");
     private static final Set<String> SUPPORTED_TREND_WINDOWS = Set.of("15m", "1h", "6h");
     
     /** 工具名常量，用于动态构建提示词 */
@@ -90,11 +88,12 @@ public class QueryMetricsTools {
      * 支持 CPU、内存、错误率、P99 延迟和重启次数，用于诊断时补齐时间序列证据。
      */
     @Tool(description = "Query Prometheus metric trend over a time window. " +
-            "Supported metrics: cpu_usage, memory_usage, error_rate, p99_latency, restart_count. " +
+            "Supported metrics: cpu_usage, memory_usage, error_rate, p99_latency, restart_count, " +
+            "jvm_gc_collection_seconds_count. " +
             "Use this before diagnosing CPU, memory, latency, error-rate, or restart alerts. " +
             "Returns points, PromQL query, min/max/avg/latest, direction, anomaly flag, and message.")
     public String queryMetricTrend(
-            @ToolParam(description = "Metric name. Supported: cpu_usage, memory_usage, error_rate, p99_latency, restart_count")
+            @ToolParam(description = "Metric name. Supported: cpu_usage, memory_usage, error_rate, p99_latency, restart_count, jvm_gc_collection_seconds_count")
             String metric,
             @ToolParam(description = "Service name, for example payment-service. Optional but recommended")
             String service,
@@ -167,6 +166,7 @@ public class QueryMetricsTools {
             // 构建成功响应
             PrometheusAlertsOutput output = new PrometheusAlertsOutput();
             output.setSuccess(true);
+            output.setDataMode(mockEnabled ? "MOCK" : "REAL");
             output.setAlerts(simplifiedAlerts);
             output.setMessage(String.format("成功检索到 %d 个活动告警", simplifiedAlerts.size()));
             
@@ -190,9 +190,10 @@ public class QueryMetricsTools {
         logger.info("开始查询指标趋势, metric: {}, service: {}, instance: {}, window: {}, step: {}, Mock模式: {}",
                 metric, service, instance, window, step, mockEnabled);
 
-        if (!SUPPORTED_TREND_METRICS.contains(metric)) {
+        if (!MetricCatalog.isSupported(metric)) {
             return buildMetricTrendErrorResponse(metric, window, null,
-                    "不支持的指标: " + metric + "。支持的指标: " + String.join(", ", SUPPORTED_TREND_METRICS));
+                    "不支持的指标: " + metric + "。支持的指标: " + MetricCatalog.supportedNamesText(),
+                    "不支持的指标: " + metric, "UNSUPPORTED_METRIC");
         }
 
         String query = buildMetricTrendQuery(metric, service, instance);
@@ -204,6 +205,7 @@ public class QueryMetricsTools {
 
             MetricTrendOutput output = new MetricTrendOutput();
             output.setSuccess(true);
+            output.setDataMode(mockEnabled ? "MOCK" : "REAL");
             output.setMetric(metric);
             output.setWindow(window);
             output.setStep(step);
@@ -407,6 +409,8 @@ public class QueryMetricsTools {
                     + appSelector + "[5m])) by (le))";
             case "restart_count" -> "sum(increase(kube_pod_container_status_restarts_total"
                     + buildSelector("pod", firstNonBlank(instance, service), null, null, Collections.emptyMap()) + "[5m]))";
+            case "jvm_gc_collection_seconds_count" -> "sum(rate(jvm_gc_collection_seconds_count"
+                    + appSelector + "[5m]))";
             default -> metric;
         };
     }
@@ -443,6 +447,9 @@ public class QueryMetricsTools {
                 case "error_rate" -> ratio < 0.75 ? 0.2 + ratio * 0.8 : 2.0 + (ratio - 0.75) * 40.0;
                 case "p99_latency" -> 0.8 + ratio * ratio * 3.6;
                 case "restart_count" -> ratio < 0.55 ? 0.0 : Math.floor((ratio - 0.55) * 8.0);
+                case "jvm_gc_collection_seconds_count" -> ratio < 0.65
+                        ? 0.2 + ratio * 0.4
+                        : 1.0 + (ratio - 0.65) * 8.0;
                 default -> 0.0;
             };
             points.add(new MetricPoint(start.plus(interval.multipliedBy(i)).toString(), round(value)));
@@ -504,6 +511,7 @@ public class QueryMetricsTools {
             case "error_rate" -> latest >= 1 || max >= 5;
             case "p99_latency" -> latest >= 3 || max >= 3;
             case "restart_count" -> latest > 0 || max > 0;
+            case "jvm_gc_collection_seconds_count" -> latest >= 1 || max >= 1;
             default -> false;
         };
     }
@@ -553,7 +561,7 @@ public class QueryMetricsTools {
     }
 
     private String normalizeMetric(String metric) {
-        return metric == null ? "" : metric.trim().toLowerCase(Locale.ROOT);
+        return MetricCatalog.normalize(metric);
     }
 
     private String normalizeWindow(String window) {
@@ -615,15 +623,12 @@ public class QueryMetricsTools {
         }
     }
 
-    private String buildMetricTrendErrorResponse(String metric, String window, String query, String error) {
-        return buildMetricTrendErrorResponse(metric, window, query, error, error, null);
-    }
-
     private String buildMetricTrendErrorResponse(String metric, String window, String query,
                                                 String message, String error, String errorCode) {
         try {
             MetricTrendOutput output = new MetricTrendOutput();
             output.setSuccess(false);
+            output.setDataMode(mockEnabled ? "MOCK" : "REAL");
             output.setMetric(metric);
             output.setWindow(window);
             output.setQuery(query);
@@ -632,6 +637,8 @@ public class QueryMetricsTools {
             output.setMessage(message == null || message.isBlank() ? "查询指标趋势失败" : message);
             output.setError(error);
             output.setErrorCode(errorCode);
+            output.setNextAction("UNSUPPORTED_METRIC".equals(errorCode)
+                    ? "STOP_TOOL_DIRECTION" : "REPORT_MISSING_EVIDENCE");
             return objectMapper.writerWithDefaultPrettyPrinter().writeValueAsString(output);
         } catch (Exception e) {
             return String.format("{\"success\":false,\"metric\":\"%s\",\"window\":\"%s\",\"message\":\"%s\",\"error\":\"%s\",\"errorCode\":\"%s\"}",
@@ -688,6 +695,9 @@ public class QueryMetricsTools {
             output.setMessage(message);
             output.setError(error);
             output.setErrorCode(errorCode);
+            output.setDataMode(mockEnabled ? "MOCK" : "REAL");
+            output.setNextAction("DEPENDENCY_ERROR".equals(errorCode)
+                    ? "REPORT_MISSING_EVIDENCE" : "STOP_TOOL_DIRECTION");
             return objectMapper.writerWithDefaultPrettyPrinter().writeValueAsString(output);
         } catch (Exception e) {
             return String.format("{\"success\":false,\"message\":\"%s\",\"error\":\"%s\",\"errorCode\":\"%s\"}",
@@ -765,6 +775,13 @@ public class QueryMetricsTools {
 
         @JsonProperty("errorCode")
         private String errorCode;
+
+        @JsonProperty("dataMode")
+        private String dataMode;
+
+        @JsonProperty("nextAction")
+        private String nextAction;
+
     }
 
     @Data
@@ -798,6 +815,12 @@ public class QueryMetricsTools {
 
         @JsonProperty("errorCode")
         private String errorCode;
+
+        @JsonProperty("dataMode")
+        private String dataMode;
+
+        @JsonProperty("nextAction")
+        private String nextAction;
     }
 
     @Data

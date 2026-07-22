@@ -38,7 +38,11 @@ public class AgentToolSurfaceService {
     }
 
     public Object[] aiOpsPlannerMethodTools() {
-        return new Object[]{dateTimeTools, internalDocsTools};
+        // Planner only plans and replans from the incident context plus executor
+        // feedback. Giving it executable diagnostic tools creates a second caller for
+        // the same query and makes duplicate/budget policy checks depend on model
+        // routing. Executor remains the single owner of diagnostic tool execution.
+        return new Object[0];
     }
 
     public Object[] aiOpsExecutorMethodTools() {

@@ -48,7 +48,7 @@ class AiOpsServiceTest {
 
     @Test
     void extractFinalReport_shouldReturnReport_whenStateContainsPlannerPlan() {
-        String expectedReport = "# 告警分析报告\n\n测试报告内容";
+        String expectedReport = validReport();
         AssistantMessage message = new AssistantMessage(expectedReport);
         OverAllState state = new OverAllState(Map.of("planner_plan", message));
 
@@ -63,6 +63,80 @@ class AiOpsServiceTest {
 
         Optional<String> report = aiOpsService.extractFinalReport(state);
         assertTrue(report.isEmpty());
+    }
+
+    @Test
+    void extractFinalReport_shouldRejectPlannerPlanJson_evenWhenValidationTextFollows() {
+        String intermediate = """
+                {"decision":"PLAN","step":"补充 GC 日志证据","tool":"queryLogs"}
+
+                ## 证据校验
+                校验状态: 通过
+                """;
+        OverAllState state = new OverAllState(Map.of("planner_plan", new AssistantMessage(intermediate)));
+
+        Optional<String> report = aiOpsService.extractFinalReport(state);
+
+        assertTrue(report.isEmpty());
+    }
+
+    @Test
+    void extractFinalReport_shouldKeepMarkdownReportWithoutDecisionField() {
+        String expectedReport = validReport();
+        OverAllState state = new OverAllState(Map.of(
+                "planner_plan", new AssistantMessage(expectedReport)));
+
+        Optional<String> report = aiOpsService.extractFinalReport(state);
+
+        assertEquals(Optional.of(expectedReport), report);
+    }
+
+    @Test
+    void extractFinalReport_shouldPreferFinalReportOverIntermediatePlannerPlan() {
+        String expectedReport = validReport();
+        OverAllState state = new OverAllState(Map.of(
+                "planner_plan", new AssistantMessage("{\"decision\":\"PLAN\",\"step\":\"queryLogs\"}"),
+                "final_report", new AssistantMessage(expectedReport)));
+
+        Optional<String> report = aiOpsService.extractFinalReport(state);
+
+        assertEquals(Optional.of(expectedReport), report);
+    }
+
+    @Test
+    void extractFinalReport_shouldRejectPlainIntermediateTextAndToolLimitMessage() {
+        assertTrue(aiOpsService.extractFinalReport(new OverAllState(Map.of(
+                "planner_plan", new AssistantMessage("请先补充 GC 日志证据")))).isEmpty());
+        assertTrue(aiOpsService.extractFinalReport(new OverAllState(Map.of(
+                "planner_plan", new AssistantMessage("Tool call limit exceeded")))).isEmpty());
+        assertTrue(aiOpsService.extractFinalReport(new OverAllState(Map.of(
+                "planner_plan", new AssistantMessage("{\"decision\":\"FINISH\"}")))).isEmpty());
+    }
+
+    private String validReport() {
+        return """
+                # 告警分析报告
+
+                ## 活跃告警清单
+                | 告警名称 | 状态 |
+                |---|---|
+                | HighCPUUsage | 活跃 |
+
+                ## 告警根因分析1
+                CPU 指标异常，证据不足。
+
+                ## 处理方案执行1
+                建议继续观察。
+
+                ## 结论
+                当前无法完成进一步确认。
+
+                ### 置信度
+                低
+
+                ### 缺失证据
+                - GC 日志
+                """;
     }
 
     @Test
@@ -96,13 +170,11 @@ class AiOpsServiceTest {
     }
 
     @Test
-    void buildPlannerMethodToolsArray_shouldExcludeDiagnosisExecutionTools() {
+    void buildPlannerMethodToolsArray_shouldBeEmpty_soExecutorOwnsDiagnosticExecution() {
         Object[] methodTools = ReflectionTestUtils.invokeMethod(aiOpsService, "buildPlannerMethodToolsArray");
 
         assertNotNull(methodTools);
-        assertEquals(2, methodTools.length);
-        assertSame(dateTimeTools, methodTools[0]);
-        assertSame(internalDocsTools, methodTools[1]);
+        assertEquals(0, methodTools.length);
     }
 
     @Test
@@ -118,6 +190,31 @@ class AiOpsServiceTest {
     }
 
     @Test
+    void buildExecutorToolCallHooks_shouldLimitTotalAndQueryLogsAttempts() {
+        org.example.config.AppIncidentProperties properties = new org.example.config.AppIncidentProperties();
+        properties.setMaxToolAttemptsPerRun(16);
+        properties.setQueryLogsMaxAttemptsPerRun(5);
+        ReflectionTestUtils.setField(aiOpsService, "incidentProperties", properties);
+
+        Object[] hooks = ReflectionTestUtils.invokeMethod(aiOpsService, "buildExecutorToolCallHooks");
+
+        assertNotNull(hooks);
+        assertEquals(2, hooks.length);
+        assertTrue(hooks[0] instanceof com.alibaba.cloud.ai.graph.agent.hook.toolcalllimit.ToolCallLimitHook);
+        assertTrue(hooks[1] instanceof com.alibaba.cloud.ai.graph.agent.hook.toolcalllimit.ToolCallLimitHook);
+    }
+
+    @Test
+    void supervisorRecursionLimit_shouldScaleWithConfiguredRounds() {
+        org.example.config.AppIncidentProperties properties = new org.example.config.AppIncidentProperties();
+        properties.setMaxSupervisorRounds(8);
+        ReflectionTestUtils.setField(aiOpsService, "incidentProperties", properties);
+
+        assertEquals(36, ((Integer) ReflectionTestUtils.invokeMethod(
+                aiOpsService, "supervisorRecursionLimit")).intValue());
+    }
+
+    @Test
     void plannerPrompt_shouldRequireEvidenceBoundConfidenceAndMissingEvidence() {
         String plannerPrompt = ReflectionTestUtils.invokeMethod(aiOpsService, "buildPlannerPrompt");
 
@@ -126,6 +223,18 @@ class AiOpsServiceTest {
         assertTrue(plannerPrompt.contains("置信度"));
         assertTrue(plannerPrompt.contains("缺失证据"));
         assertTrue(plannerPrompt.contains("evidence id"));
+    }
+
+    @Test
+    void finalReportPrompt_shouldRequireMarkdownAndRejectFabricatedEvidence() {
+        String prompt = ReflectionTestUtils.invokeMethod(aiOpsService, "buildFinalReportPrompt");
+
+        assertNotNull(prompt);
+        assertTrue(prompt.contains("只能使用输入中已有的告警上下文"));
+        assertTrue(prompt.contains("# 告警分析报告"));
+        assertTrue(prompt.contains("### 置信度"));
+        assertTrue(prompt.contains("### 缺失证据"));
+        assertTrue(prompt.contains("不要输出 JSON"));
     }
 
     @Test
@@ -160,16 +269,27 @@ class AiOpsServiceTest {
         assertNotNull(plannerPrompt);
         assertNotNull(executorPrompt);
         assertTrue(plannerPrompt.contains("工具调用总次数默认最多 12 次"));
-        assertTrue(plannerPrompt.contains("queryLogs 默认最多调用 3 次"));
+        assertTrue(plannerPrompt.contains("queryLogs 实际调用最多 3 次、尝试最多 5 次"));
+        assertTrue(plannerPrompt.contains("模型工具调用尝试默认最多 16 次"));
         assertTrue(plannerPrompt.contains("同一 toolName + 同一参数或等价参数禁止重复调用"));
         assertTrue(executorPrompt.contains("TOOL_BUDGET_EXCEEDED"));
         assertTrue(executorPrompt.contains("TOOL_DUPLICATE_SKIPPED"));
+        assertTrue(executorPrompt.contains("queryLogs 实际调用最多 3 次、尝试最多 5 次"));
+    }
+
+    @Test
+    void plannerPrompt_shouldAssignAllToolExecutionToExecutor() {
+        String plannerPrompt = ReflectionTestUtils.invokeMethod(aiOpsService, "buildPlannerPrompt");
+
+        assertTrue(plannerPrompt.contains("Planner 只负责规划和再规划，严禁直接调用诊断工具"));
+        assertTrue(plannerPrompt.contains("所有工具调用必须交给 Executor"));
     }
 
     @Test
     void prompts_shouldConstrainTavilyAndDatabaseMcpTools() {
         String plannerPrompt = ReflectionTestUtils.invokeMethod(aiOpsService, "buildPlannerPrompt");
         String executorPrompt = ReflectionTestUtils.invokeMethod(aiOpsService, "buildExecutorPrompt");
+        String supervisorPrompt = ReflectionTestUtils.invokeMethod(aiOpsService, "buildSupervisorSystemPrompt");
 
         assertNotNull(plannerPrompt);
         assertNotNull(executorPrompt);
@@ -178,5 +298,8 @@ class AiOpsServiceTest {
         assertTrue(plannerPrompt.contains("只读"));
         assertTrue(executorPrompt.contains("禁止执行 INSERT"));
         assertTrue(executorPrompt.contains("UPDATE / DELETE / DROP / ALTER / TRUNCATE"));
+        assertTrue(supervisorPrompt.contains("# 告警分析报告"));
+        assertTrue(supervisorPrompt.contains("置信度"));
+        assertTrue(supervisorPrompt.contains("缺失证据"));
     }
 }

@@ -37,11 +37,10 @@ class AgentToolSurfaceServiceTest {
     }
 
     @Test
-    void plannerMethodTools_shouldExcludeExecutionTools() {
+    void plannerMethodTools_shouldBeEmpty_soExecutorOwnsDiagnosticExecution() {
         Object[] tools = service.aiOpsPlannerMethodTools();
 
-        assertThat(List.of(tools)).contains(dateTimeTools, internalDocsTools);
-        assertThat(List.of(tools)).doesNotContain(queryMetricsTools, queryLogsTools);
+        assertThat(tools).isEmpty();
     }
 
     @Test

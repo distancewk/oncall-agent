@@ -54,6 +54,11 @@ assert.equal(
 assert.equal(app.buildIncidentHistoryQuery({}), '');
 
 assert.equal(
+  app.incidentDiagnosisUrl('inc/1', true),
+  'http://localhost:9900/api/incidents/inc%2F1/diagnose?force=true'
+);
+
+assert.equal(
   app.incidentRunActionUrl('inc-1', 'run-1', 'confirm', '根因准确'),
   'http://localhost:9900/api/incidents/inc-1/runs/run-1/confirm?comment=%E6%A0%B9%E5%9B%A0%E5%87%86%E7%A1%AE'
 );

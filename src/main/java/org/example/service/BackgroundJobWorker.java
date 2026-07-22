@@ -47,7 +47,12 @@ public class BackgroundJobWorker {
 
     @Scheduled(fixedDelayString = "${app.jobs.poll-delay-millis:1000}")
     public void poll() {
-        pollOnce(System.currentTimeMillis());
+        try {
+            pollOnce(System.currentTimeMillis());
+        } catch (RuntimeException e) {
+            // Scheduled tasks must not surface repository failures as an uninformative UI stall.
+            LOGGER.error("后台任务轮询失败，下一轮将自动重试", e);
+        }
     }
 
     public void pollOnce(long now) {

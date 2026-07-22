@@ -173,6 +173,21 @@ public class IncidentAlertRepository {
         }
     }
 
+    public void updateMissingReportsByIncidentId(String incidentId, String report) {
+        try (Connection connection = dataSource.getConnection();
+             PreparedStatement statement = connection.prepareStatement("""
+                     update incident_alerts
+                     set report = ?
+                     where incident_id = ? and report is null and alert_id is not null
+                     """)) {
+            statement.setString(1, report);
+            statement.setString(2, incidentId);
+            statement.executeUpdate();
+        } catch (Exception e) {
+            throw new IllegalStateException("保存 Incident 告警报告失败: " + incidentId, e);
+        }
+    }
+
     public String findReport(String alertId) {
         StoredAlertRow row = findStoredAlert(alertId);
         return row == null ? null : row.report();

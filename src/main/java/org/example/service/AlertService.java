@@ -76,6 +76,15 @@ public class AlertService {
                 report == null ? 0 : report.length());
     }
 
+    public void storeMissingReportsForIncident(String incidentId, String report) {
+        if (incidentId == null || incidentId.isBlank()) {
+            return;
+        }
+        repository.updateMissingReportsByIncidentId(incidentId, report);
+        LOGGER.info("Incident 下待关联告警报告已更新, incidentId: {}, report length: {}", incidentId,
+                report == null ? 0 : report.length());
+    }
+
     public String getReport(String alertId) {
         return repository.findReport(alertId);
     }

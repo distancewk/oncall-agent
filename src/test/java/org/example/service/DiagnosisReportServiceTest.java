@@ -4,6 +4,8 @@ import org.example.dto.DiagnosisEvidence;
 import org.example.dto.DiagnosisRunRecord;
 import org.junit.jupiter.api.Test;
 
+import java.util.List;
+
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -73,6 +75,141 @@ class DiagnosisReportServiceTest {
         assertTrue(table.contains("| ev-retried | tool_call | queryMetricTrend | 1h | success | 3 | 1250 | true |"));
         assertTrue(table.contains("| Evidence ID | 工具 | 状态 | 错误码 | 尝试次数 | 耗时(ms) | 可重试 | 摘要 |"));
         assertTrue(table.contains("| ev-open | queryLogs | failed | CIRCUIT_OPEN | 0 | 0 | true |"));
+    }
+
+    @Test
+    void buildEvidenceTable_shouldSeparatePolicySkipsFromRealFailures() {
+        DiagnosisRunRecord run = new DiagnosisRunRecord();
+        DiagnosisEvidence skipped = DiagnosisEvidence.toolCall(
+                "queryLogs", "{\"query\":\"same\"}", "15m", "重复工具调用已跳过",
+                "{\"success\":false}", false, "重复工具调用已跳过", 1L);
+        skipped.setId("ev-skipped");
+        skipped.setErrorCode("TOOL_DUPLICATE_SKIPPED");
+        skipped.setAttemptCount(0);
+        run.getEvidence().add(skipped);
+
+        String table = service.buildEvidenceTable(run);
+
+        assertTrue(table.contains("工具策略拦截说明"));
+        assertTrue(table.contains("| ev-skipped | queryLogs | skipped | TOOL_DUPLICATE_SKIPPED |"));
+        assertFalse(table.contains("失败工具证据说明"));
+    }
+
+    @Test
+    void evaluateQuality_shouldNotPenalizePolicySkippedEvidenceAsRealFailure() {
+        DiagnosisEvidence trend = DiagnosisEvidence.toolCall(
+                "queryMetricTrend", "{\"metric\":\"cpu_usage\"}", "15m",
+                "cpu_usage 最近 15m 持续上升", "{\"success\":true}", true, null, 1L);
+        trend.setId("ev-trend");
+        DiagnosisEvidence skipped = DiagnosisEvidence.toolCall(
+                "queryLogs", "{\"query\":\"same\"}", "15m", "预算超限，跳过",
+                "{\"success\":false}", false, "预算超限", 1L);
+        skipped.setId("ev-skipped");
+        skipped.setErrorCode("TOOL_BUDGET_EXCEEDED");
+        skipped.setAttemptCount(0);
+
+        DiagnosisReportService.QualityAssessment quality = service.evaluateQuality(
+                "CPU 使用率持续上升 [evidence: ev-trend]。", java.util.List.of(trend, skipped));
+
+        assertEquals("HIGH", quality.grade());
+        assertTrue(quality.issues().isEmpty());
+    }
+
+    @Test
+    void evaluateQuality_shouldForceGapWhenSuccessfulEvidenceIsNotCited() {
+        DiagnosisEvidence trend = DiagnosisEvidence.toolCall(
+                "queryMetricTrend", "{\"metric\":\"cpu_usage\"}", "15m",
+                "CPU 趋势", "{\"success\":true}", true, null, 1L);
+        trend.setId("ev-uncited");
+
+        DiagnosisReportService.QualityAssessment quality = service.evaluateQuality("""
+                # 告警分析报告
+                ## 活跃告警清单
+                ## 告警根因分析
+                当前证据不足，暂不确认根因。
+                ## 处理方案执行
+                等待人工复核。
+                ## 结论
+                暂不下结论。
+                ### 置信度
+                低
+                ### 缺失证据
+                - 真实运行数据
+                """, List.of(trend));
+
+        assertEquals("LOW", quality.grade());
+        assertTrue(quality.score() < 60);
+        assertTrue(quality.issues().contains("报告没有引用工具 evidence id"));
+    }
+
+    @Test
+    void evaluateQuality_shouldForceGapWhenNoSuccessfulEvidenceExists() {
+        DiagnosisReportService.QualityAssessment quality = service.evaluateQuality("""
+                # 告警分析报告
+                ## 活跃告警清单
+                ## 告警根因分析
+                证据不足。
+                ## 处理方案执行
+                等待真实数据。
+                ## 结论
+                无法确认根因。
+                ### 置信度
+                低
+                ### 缺失证据
+                - 真实指标和日志
+                """, List.of());
+
+        assertEquals("LOW", quality.grade());
+        assertTrue(quality.score() < 60);
+        assertTrue(quality.issues().contains("没有成功工具 evidence"));
+    }
+
+    @Test
+    void evaluateQuality_shouldForceGapWhenCitedEvidenceIsMock() {
+        DiagnosisEvidence mockTrend = DiagnosisEvidence.toolCall(
+                "queryMetricTrend", "{\"metric\":\"cpu_usage\"}", "15m",
+                "CPU 趋势", "{\"success\":true,\"dataMode\":\"MOCK\"}",
+                true, null, 1L);
+        mockTrend.setId("ev-mock-trend");
+
+        DiagnosisReportService.QualityAssessment quality = service.evaluateQuality("""
+                # 告警分析报告
+                ## 活跃告警清单
+                ## 告警根因分析
+                CPU 持续升高 [evidence: ev-mock-trend]
+                ## 处理方案执行
+                继续观察 [evidence: ev-mock-trend]
+                ## 结论
+                需要真实数据复核。
+                ### 置信度
+                低
+                ### 缺失证据
+                - 真实 CPU 趋势
+                """, List.of(mockTrend));
+
+        assertEquals("LOW", quality.grade());
+        assertTrue(quality.issues().contains("报告引用了 Mock 数据，不能视为真实诊断证据"));
+    }
+
+    @Test
+    void guardReport_shouldDowngradeValidationForCitedMockEvidence() {
+        DiagnosisEvidence mockTrend = DiagnosisEvidence.toolCall(
+                "queryMetricTrend", "{\"metric\":\"cpu_usage\"}", "15m",
+                "CPU 趋势", "{\"success\":true,\"dataMode\":\"MOCK\"}",
+                true, null, 1L);
+        mockTrend.setId("ev-mock-validation");
+
+        String guarded = service.constrainReport("""
+                # 告警分析报告
+                ### 根因结论
+                CPU 使用率持续升高 [evidence: ev-mock-validation]
+                ### 置信度
+                高
+                """, List.of(mockTrend));
+
+        assertTrue(guarded.contains("校验状态: 需补证"));
+        assertTrue(guarded.contains("置信度: 低"));
+        assertFalse(guarded.contains("### 置信度\n高"));
     }
 
     @Test
@@ -363,6 +500,36 @@ class DiagnosisReportServiceTest {
         assertEquals("HIGH", quality.grade());
         assertTrue(quality.score() >= 85);
         assertTrue(quality.issues().isEmpty());
+    }
+
+    @Test
+    void evaluateQuality_shouldAcceptJvmGcMetricAsJvmEvidence() {
+        DiagnosisEvidence evidence = DiagnosisEvidence.toolCall(
+                "queryMetricTrend",
+                "{\"metric\":\"jvm_gc_collection_seconds_count\"}",
+                "15m",
+                "jvm_gc_collection_seconds_count 最近 15m 持续上升",
+                "{\"success\":true,\"dataMode\":\"REAL\"}",
+                true,
+                null,
+                System.currentTimeMillis());
+        evidence.setId("ev-jvm-gc");
+
+        DiagnosisReportService.QualityAssessment quality = service.evaluateQuality("""
+                # 告警分析报告
+                ## 活跃告警清单
+                ## 告警根因分析
+                Full GC 频率持续上升 [evidence: ev-jvm-gc]
+                ## 处理方案执行
+                检查 JVM 内存配置 [evidence: ev-jvm-gc]
+                ## 结论
+                ### 置信度
+                中
+                ### 缺失证据
+                无
+                """, List.of(evidence));
+
+        assertFalse(quality.issues().contains("GC/Full GC 结论缺少对应日志或 JVM 指标 evidence"));
     }
 
     @Test

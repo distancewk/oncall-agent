@@ -32,6 +32,9 @@ jobs:
       - name: Check frontend JavaScript syntax
         run: node --check src/main/resources/static/app.js
 
+      - name: Run frontend behavior tests
+        run: node --test src/test/js/evidenceRendering.test.mjs src/test/js/incidentFrontendActions.test.mjs
+
       - name: Validate Docker Compose configuration
         env:
           DASHSCOPE_API_KEY: ci-placeholder
@@ -63,4 +66,36 @@ jobs:
         env:
           # Tests use mocks/Testcontainers; never expose a production API key to CI.
           DASHSCOPE_API_KEY: ci-placeholder
-        run: mvn -B -ntp -Ppostgres-it verify
+        run: |
+          docker info
+          mvn -B -ntp -Ppostgres-it verify
+
+      - name: Ensure PostgreSQL integration tests executed
+        run: |
+          report=target/failsafe-reports/TEST-org.example.integration.PostgresqlDurableWorkflowIT.xml
+          test -f "$report"
+          ! rg -q 'skipped="[1-9][0-9]*"' "$report"
+
+      - name: Upload Maven reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: maven-test-and-quality-reports
+          path: |
+            target/surefire-reports/**
+            target/failsafe-reports/**
+            target/site/**
+            target/spotbugsXml.xml
+          if-no-files-found: ignore
+
+  container:
+    name: Container image build
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Build application image
+        run: docker build --tag super-biz-agent:ci .
