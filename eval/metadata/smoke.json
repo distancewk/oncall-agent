@@ -1,0 +1,16 @@
+{
+  "schemaVersion": "3",
+  "dataset": {
+    "id": "superbizagent-smoke",
+    "version": "0.1.0",
+    "split": "smoke",
+    "owner": "platform"
+  },
+  "run": {
+    "adapterVersion": "fixture-v1",
+    "modelVersion": "not-run",
+    "promptVersion": "not-run",
+    "knowledgeBaseVersion": "not-run",
+    "randomSeed": 0
+  }
+}

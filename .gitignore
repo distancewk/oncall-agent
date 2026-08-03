@@ -50,7 +50,12 @@ data/
 
 ### Temp Scripts ###
 *.sh
+!start-local.sh
 *.py
+!tools/diagnosis_eval.py
+!eval/**/*.json
+!eval/**/*.jsonl
+!eval/**/*.md
 
 ### docker
 /volumes
@@ -59,3 +64,11 @@ data/
 .superpowers/
 docs/
 /OPTIMIZATION_PLAN.md
+
+### Local agent memory & secrets (never publish) ###
+.workbuddy/
+.env
+
+### Excluded from slim publish per user request ###
+AGENTS.md
+TESTING.md

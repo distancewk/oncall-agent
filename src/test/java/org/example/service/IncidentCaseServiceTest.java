@@ -75,6 +75,7 @@ class IncidentCaseServiceTest {
         assertTrue(content.contains("JVM GC 风暴导致 CPU 升高"));
         assertTrue(content.contains("重启服务并分析 heap dump"));
         assertTrue(metadata.contains("\"doc_type\":\"incident_case\""));
+        assertTrue(metadata.contains("\"tenant_id\":\"default\""));
         assertTrue(metadata.contains("\"incident_id\":\"incident-1\""));
         assertTrue(metadata.contains("\"alertname\":\"HighCPUUsage\""));
         assertTrue(metadata.contains("\"service\":\"payment-service\""));

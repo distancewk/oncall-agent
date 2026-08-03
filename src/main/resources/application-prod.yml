@@ -1,7 +1,26 @@
+server:
+  servlet:
+    session:
+      cookie:
+        http-only: true
+        secure: true
+        same-site: lax
+
 app:
+  dependency-probes:
+    enabled: ${APP_DEPENDENCY_PROBES_ENABLED:true}
+  observability:
+    model-usage-enabled: true
+  lifecycle:
+    enabled: true
+    security-audit-retention-days: ${APP_LIFECYCLE_SECURITY_AUDIT_RETENTION_DAYS:365}
   security:
     enabled: true
     cookie-secure: true
+    machine-token-enabled: true
+    machine-token-require-redis: true
+    default-tenant-id: ${APP_SECURITY_DEFAULT_TENANT_ID:default}
+    webhook-replay-require-redis: true
   alerts:
     simulate-enabled: false
   incidents:

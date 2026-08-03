@@ -101,6 +101,22 @@ class ChatHistoryStoreTest {
     }
 
     @Test
+    void sameSessionId_shouldRemainIsolatedAcrossTenants() {
+        try (TenantContext.Scope ignored = TenantContext.open("tenant-a")) {
+            store.appendMessagePair("shared-session", 100L, "tenant-a question", "tenant-a answer");
+        }
+        try (TenantContext.Scope ignored = TenantContext.open("tenant-b")) {
+            store.appendMessagePair("shared-session", 100L, "tenant-b question", "tenant-b answer");
+            assertEquals("tenant-b question",
+                    store.load("shared-session").orElseThrow().getMessageHistory().get(0).get("content"));
+        }
+        try (TenantContext.Scope ignored = TenantContext.open("tenant-a")) {
+            assertEquals("tenant-a question",
+                    store.load("shared-session").orElseThrow().getMessageHistory().get(0).get("content"));
+        }
+    }
+
+    @Test
     void listSessions_shouldReturnSummariesSortedByUpdateTimeDesc() {
         store.save(record("older", 100L, 200L, "old question"));
         store.save(record("newer", 100L, 300L, "new question"));

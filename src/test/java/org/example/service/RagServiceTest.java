@@ -126,4 +126,20 @@ class RagServiceTest {
             }
         });
     }
+
+    @Test
+    void promptContext_shouldExposeStableSourceIdAndCitationContract() {
+        VectorSearchService.SearchResult searchResult = new VectorSearchService.SearchResult();
+        searchResult.setId("doc-1");
+        searchResult.setContent("发布步骤");
+
+        String context = ReflectionTestUtils.invokeMethod(
+                ragService, "buildContext", List.of(searchResult));
+        String prompt = ReflectionTestUtils.invokeMethod(
+                ragService, "buildPrompt", "如何发布？", context);
+
+        assertTrue(context.contains("来源: doc-1"));
+        assertTrue(prompt.contains("[来源: <id>]"));
+        assertTrue(prompt.contains("不能编造 id"));
+    }
 }

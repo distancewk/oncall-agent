@@ -10,12 +10,14 @@ import org.example.dto.DiagnosisRunRecord;
 import org.example.exception.DependencyUnavailableException;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.slf4j.MDC;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.ai.chat.model.ToolContext;
 import org.springframework.ai.tool.ToolCallback;
 import org.springframework.ai.tool.definition.ToolDefinition;
 import org.springframework.ai.tool.metadata.ToolMetadata;
 import org.springframework.stereotype.Service;
+import org.springframework.lang.Nullable;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -40,33 +42,45 @@ public class DiagnosisEvidenceRecorder {
     private static final String QUERY_METRIC_TREND_TOOL = "queryMetricTrend";
     private static final String ERROR_DUPLICATE = "TOOL_DUPLICATE_SKIPPED";
     private static final String ERROR_BUDGET = "TOOL_BUDGET_EXCEEDED";
+    private static final String ERROR_RUNBOOK_ORDER = "RUNBOOK_STEP_ORDER";
 
     private final IncidentService incidentService;
     private final ObjectMapper objectMapper;
     private final AppIncidentProperties incidentProperties;
     private final ToolCallAttemptContext attemptContext;
+    private final ObservabilityMetrics observabilityMetrics;
+    private final DiagnosisRunbookPolicy runbookPolicy = new DiagnosisRunbookPolicy();
     private final ThreadLocal<ActiveRun> activeRun = new ThreadLocal<>();
     private final ConcurrentMap<String, RunLock> runLocks = new ConcurrentHashMap<>();
 
     public DiagnosisEvidenceRecorder(IncidentService incidentService, ObjectMapper objectMapper) {
-        this(incidentService, objectMapper, new AppIncidentProperties(), new ToolCallAttemptContext());
+        this(incidentService, objectMapper, new AppIncidentProperties(), new ToolCallAttemptContext(), null);
     }
 
     public DiagnosisEvidenceRecorder(IncidentService incidentService,
                                      ObjectMapper objectMapper,
                                      AppIncidentProperties incidentProperties) {
-        this(incidentService, objectMapper, incidentProperties, new ToolCallAttemptContext());
+        this(incidentService, objectMapper, incidentProperties, new ToolCallAttemptContext(), null);
+    }
+
+    public DiagnosisEvidenceRecorder(IncidentService incidentService,
+                                     ObjectMapper objectMapper,
+                                     AppIncidentProperties incidentProperties,
+                                     ToolCallAttemptContext attemptContext) {
+        this(incidentService, objectMapper, incidentProperties, attemptContext, null);
     }
 
     @Autowired
     public DiagnosisEvidenceRecorder(IncidentService incidentService,
                                      ObjectMapper objectMapper,
                                      AppIncidentProperties incidentProperties,
-                                     ToolCallAttemptContext attemptContext) {
+                                     ToolCallAttemptContext attemptContext,
+                                     @Nullable ObservabilityMetrics observabilityMetrics) {
         this.incidentService = incidentService;
         this.objectMapper = objectMapper;
         this.incidentProperties = incidentProperties == null ? new AppIncidentProperties() : incidentProperties;
         this.attemptContext = attemptContext == null ? new ToolCallAttemptContext() : attemptContext;
+        this.observabilityMetrics = observabilityMetrics;
     }
 
     public <T> T withRun(String incidentId, String runId, RunSupplier<T> supplier) throws Exception {
@@ -80,9 +94,15 @@ public class DiagnosisEvidenceRecorder {
             activeRun.set(new ActiveRun(incidentId, runId,
                     snapshot.get().getVersion(),
                     new ArrayList<>(snapshot.get().getEvidence()),
+                    snapshot.get().getAlertContext(),
                     false));
             try {
-                return supplier.get();
+                try (MDC.MDCCloseable ignoredIncidentId = MDC.putCloseable(
+                        "incident_id", safeMdcValue(incidentId));
+                     MDC.MDCCloseable ignoredRunId = MDC.putCloseable(
+                             "run_id", safeMdcValue(runId))) {
+                    return supplier.get();
+                }
             } finally {
                 if (previous == null) {
                     activeRun.remove();
@@ -95,6 +115,13 @@ public class DiagnosisEvidenceRecorder {
         }
     }
 
+    private String safeMdcValue(String value) {
+        if (value == null || value.isBlank()) {
+            return "unknown";
+        }
+        return value.replaceAll("[\\r\\n\\t]", "_");
+    }
+
     public String recordToolCall(String toolName, String queryParams, String timeRange, ToolCallSupplier supplier) {
         ActiveRun run = activeRun.get();
         if (run == null) {
@@ -105,12 +132,16 @@ public class DiagnosisEvidenceRecorder {
         String safeQueryParams = blankToDefault(queryParams, "{}");
         String safeTimeRange = blankToDefault(timeRange, "未指定");
 
-        Optional<String> policyError = toolPolicyError(run, safeToolName, safeQueryParams);
+        Optional<String> policyError = toolPolicyError(run, safeToolName, safeQueryParams, safeTimeRange);
         if (policyError.isPresent()) {
             String errorCode = policyError.get();
-            String message = ERROR_DUPLICATE.equals(errorCode)
-                    ? "重复工具调用已跳过: " + safeToolName
-                    : budgetMessage(safeToolName);
+            String message = switch (errorCode) {
+                case ERROR_DUPLICATE -> "重复工具调用已跳过: " + safeToolName;
+                case ERROR_RUNBOOK_ORDER -> runbookPolicy.validateToolCallOrder(
+                        run.alertContext(), currentEvidence(run), safeToolName, safeQueryParams, safeTimeRange)
+                        .orElse("Runbook 顺序门禁已阻止本次工具调用: " + safeToolName);
+                default -> budgetMessage(safeToolName);
+            };
             return recordSkippedToolCall(run, safeToolName, safeQueryParams, safeTimeRange, message, errorCode);
         }
 
@@ -135,6 +166,10 @@ public class DiagnosisEvidenceRecorder {
             runtimeFailure = new IllegalStateException(e);
             rawResult = "";
             errorMessage = e.getMessage();
+        }
+
+        if (observabilityMetrics != null) {
+            observabilityMetrics.recordToolCall(safeToolName, success ? "SUCCESS" : "ERROR");
         }
 
         long durationMs = elapsedMillis(startedAt);
@@ -164,8 +199,44 @@ public class DiagnosisEvidenceRecorder {
         return decorateResult(rawResult, evidence);
     }
 
-    private Optional<String> toolPolicyError(ActiveRun run, String toolName, String queryParams) {
+    public boolean hasActiveRun() {
+        return activeRun.get() != null;
+    }
+
+    /**
+     * Returns the latest evidence snapshot for the run currently being
+     * recorded. The snapshot is intentionally detached from the recorder's
+     * mutable state before it is passed into prompts or validators.
+     */
+    public List<DiagnosisEvidence> activeEvidenceSnapshot() {
+        ActiveRun run = activeRun.get();
+        if (run == null) {
+            return List.of();
+        }
+        return List.copyOf(currentEvidence(run));
+    }
+
+    public Set<String> activeUsableEvidenceIds() {
+        Set<String> ids = new java.util.LinkedHashSet<>();
+        for (DiagnosisEvidence evidence : activeEvidenceSnapshot()) {
+            if (evidence != null && evidence.isSuccess()
+                    && !isPolicySkippedEvidence(evidence)
+                    && evidence.getId() != null && !evidence.getId().isBlank()) {
+                ids.add(evidence.getId());
+            }
+        }
+        return Set.copyOf(ids);
+    }
+
+    private Optional<String> toolPolicyError(ActiveRun run,
+                                             String toolName,
+                                             String queryParams,
+                                             String timeRange) {
         List<DiagnosisEvidence> currentEvidence = currentEvidence(run);
+        if (runbookPolicy.validateToolCallOrder(
+                run.alertContext(), currentEvidence, toolName, queryParams, timeRange).isPresent()) {
+            return Optional.of(ERROR_RUNBOOK_ORDER);
+        }
         if (incidentProperties.isToolCallDeduplicationEnabled()) {
             String currentKey = toolCallKey(toolName, queryParams);
             boolean duplicate = currentEvidence.stream()
@@ -257,6 +328,9 @@ public class DiagnosisEvidenceRecorder {
         evidence.setAttemptCount(0);
         evidence.setDurationMs(0);
         evidence.setRetryable(false);
+        if (observabilityMetrics != null) {
+            observabilityMetrics.recordToolCall(toolName, "FALLBACK");
+        }
         if (!addEvidence(run, evidence)) {
             throw new IllegalStateException("策略拦截证据写入失败");
         }
@@ -656,6 +730,7 @@ public class DiagnosisEvidenceRecorder {
         private final String incidentId;
         private final String runId;
         private final List<DiagnosisEvidence> evidence;
+        private final String alertContext;
         private final boolean incremental;
         private long version;
 
@@ -663,17 +738,20 @@ public class DiagnosisEvidenceRecorder {
                           String runId,
                           long version,
                           List<DiagnosisEvidence> evidence,
+                          String alertContext,
                           boolean incremental) {
             this.incidentId = incidentId;
             this.runId = runId;
             this.version = version;
             this.evidence = evidence;
+            this.alertContext = alertContext;
             this.incremental = incremental;
         }
 
         private String incidentId() { return incidentId; }
         private String runId() { return runId; }
         private List<DiagnosisEvidence> evidence() { return evidence; }
+        private String alertContext() { return alertContext; }
         private boolean incremental() { return incremental; }
         private long version() { return version; }
         private void setVersion(long version) { this.version = version; }

@@ -7,6 +7,7 @@ import lombok.Setter;
 @Setter
 public class IndexTaskStatus {
 
+    private String tenantId = "default";
     private String taskId;
     private String fileName;
     private String filePath;

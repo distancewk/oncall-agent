@@ -8,6 +8,8 @@ import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 import org.springframework.ai.chat.messages.AssistantMessage;
 import org.springframework.test.util.ReflectionTestUtils;
+import com.alibaba.cloud.ai.dashscope.api.DashScopeResponseFormat;
+import com.alibaba.cloud.ai.dashscope.chat.DashScopeChatOptions;
 
 import java.util.Map;
 import java.util.Optional;
@@ -205,13 +207,13 @@ class AiOpsServiceTest {
     }
 
     @Test
-    void supervisorRecursionLimit_shouldScaleWithConfiguredRounds() {
+    void agentRecursionLimit_shouldScaleWithConfiguredRounds() {
         org.example.config.AppIncidentProperties properties = new org.example.config.AppIncidentProperties();
         properties.setMaxSupervisorRounds(8);
         ReflectionTestUtils.setField(aiOpsService, "incidentProperties", properties);
 
         assertEquals(36, ((Integer) ReflectionTestUtils.invokeMethod(
-                aiOpsService, "supervisorRecursionLimit")).intValue());
+                aiOpsService, "agentRecursionLimit")).intValue());
     }
 
     @Test
@@ -226,6 +228,29 @@ class AiOpsServiceTest {
     }
 
     @Test
+    void prompts_shouldDescribeStrictPlannerAndExecutorSchemas() {
+        String plannerPrompt = ReflectionTestUtils.invokeMethod(aiOpsService, "buildPlannerPrompt");
+        String executorPrompt = ReflectionTestUtils.invokeMethod(aiOpsService, "buildExecutorPrompt");
+
+        assertTrue(plannerPrompt.contains("parameters"));
+        assertTrue(plannerPrompt.contains("不得带前置说明、尾随文本或代码围栏"));
+        assertTrue(executorPrompt.contains("status"));
+        assertTrue(executorPrompt.contains("evidence"));
+        assertTrue(executorPrompt.contains("不得输出前置说明或 Markdown 代码围栏"));
+    }
+
+    @Test
+    void structuredJsonChatOptions_shouldUseProviderJsonObjectMode() {
+        DashScopeChatOptions options = ReflectionTestUtils.invokeMethod(
+                aiOpsService, "structuredJsonChatOptions");
+
+        assertNotNull(options);
+        assertNotNull(options.getResponseFormat());
+        assertEquals(DashScopeResponseFormat.Type.JSON_OBJECT,
+                options.getResponseFormat().getType());
+    }
+
+    @Test
     void finalReportPrompt_shouldRequireMarkdownAndRejectFabricatedEvidence() {
         String prompt = ReflectionTestUtils.invokeMethod(aiOpsService, "buildFinalReportPrompt");
 
@@ -235,6 +260,17 @@ class AiOpsServiceTest {
         assertTrue(prompt.contains("### 置信度"));
         assertTrue(prompt.contains("### 缺失证据"));
         assertTrue(prompt.contains("不要输出 JSON"));
+    }
+
+    @Test
+    void finalizationPrompt_shouldLoadVersionedTemplateAndFormatRuntimeContext() {
+        String prompt = ReflectionTestUtils.invokeMethod(
+                aiOpsService, "buildFinalizationPrompt", new OverAllState(), "alert-context");
+
+        assertNotNull(prompt);
+        assertTrue(prompt.contains("alert-context"));
+        assertTrue(prompt.contains("## 当前已持久化证据表"));
+        assertFalse(prompt.contains("%s"));
     }
 
     @Test
@@ -289,7 +325,6 @@ class AiOpsServiceTest {
     void prompts_shouldConstrainTavilyAndDatabaseMcpTools() {
         String plannerPrompt = ReflectionTestUtils.invokeMethod(aiOpsService, "buildPlannerPrompt");
         String executorPrompt = ReflectionTestUtils.invokeMethod(aiOpsService, "buildExecutorPrompt");
-        String supervisorPrompt = ReflectionTestUtils.invokeMethod(aiOpsService, "buildSupervisorSystemPrompt");
 
         assertNotNull(plannerPrompt);
         assertNotNull(executorPrompt);
@@ -298,8 +333,5 @@ class AiOpsServiceTest {
         assertTrue(plannerPrompt.contains("只读"));
         assertTrue(executorPrompt.contains("禁止执行 INSERT"));
         assertTrue(executorPrompt.contains("UPDATE / DELETE / DROP / ALTER / TRUNCATE"));
-        assertTrue(supervisorPrompt.contains("# 告警分析报告"));
-        assertTrue(supervisorPrompt.contains("置信度"));
-        assertTrue(supervisorPrompt.contains("缺失证据"));
     }
 }

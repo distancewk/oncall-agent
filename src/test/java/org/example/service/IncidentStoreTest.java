@@ -2,6 +2,7 @@ package org.example.service;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.example.config.AppIncidentProperties;
+import org.example.dto.AlertPayload;
 import org.example.dto.IncidentRecord;
 import org.example.dto.DiagnosisEvidence;
 import org.example.dto.DiagnosisRunRecord;
@@ -15,6 +16,7 @@ import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.Statement;
+import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -147,6 +149,87 @@ class IncidentStoreTest {
                 assertEquals(2, resultSet.getInt("alert_count"));
             }
         }
+    }
+
+    @Test
+    void incidentStore_shouldIsolateIncidentReadsAndAggregationByTenant() throws Exception {
+        AppIncidentProperties properties = new AppIncidentProperties();
+        properties.setJdbcUrl("jdbc:h2:" + tempDir.resolve("tenant-isolation-db"));
+        properties.setJdbcUsername("");
+        properties.setJdbcPassword("");
+        properties.setPath(tempDir.resolve("legacy-json-tenant").toString());
+        IncidentStore store = new IncidentStore(properties, new ObjectMapper(), dataSource(properties));
+
+        IncidentRecord tenantA = new IncidentRecord();
+        tenantA.setId("inc-tenant-a");
+        tenantA.setTenantId("tenant-a");
+        tenantA.setAggregationKey("same-alert");
+        tenantA.setTitle("Tenant A");
+        tenantA.setCreatedAt(100L);
+        tenantA.setUpdatedAt(100L);
+        tenantA.setLastAlertAt(100L);
+        IncidentRecord tenantB = new IncidentRecord();
+        tenantB.setId("inc-tenant-b");
+        tenantB.setTenantId("tenant-b");
+        tenantB.setAggregationKey("same-alert");
+        tenantB.setTitle("Tenant B");
+        tenantB.setCreatedAt(100L);
+        tenantB.setUpdatedAt(100L);
+        tenantB.setLastAlertAt(100L);
+
+        try (TenantContext.Scope ignored = TenantContext.open("tenant-a")) {
+            store.save(tenantA);
+            assertEquals("tenant-a", store.load("inc-tenant-a").orElseThrow().getTenantId());
+        }
+        try (TenantContext.Scope ignored = TenantContext.open("tenant-b")) {
+            store.save(tenantB);
+            assertTrue(store.load("inc-tenant-a").isEmpty());
+            assertEquals("Tenant B", store.findByAggregationKey("same-alert").orElseThrow().getTitle());
+            assertEquals(1, store.list().size());
+        }
+        try (TenantContext.Scope ignored = TenantContext.open("tenant-a")) {
+            assertEquals("Tenant A", store.findByAggregationKey("same-alert").orElseThrow().getTitle());
+            assertEquals(1, store.list().size());
+        }
+    }
+
+    @Test
+    void incidentStore_shouldAllowSameAlertIdInDifferentTenants() throws Exception {
+        AppIncidentProperties properties = new AppIncidentProperties();
+        properties.setJdbcUrl("jdbc:h2:" + tempDir.resolve("tenant-alert-db"));
+        properties.setJdbcUsername("");
+        properties.setJdbcPassword("");
+        properties.setPath(tempDir.resolve("legacy-json-alert").toString());
+        IncidentStore store = new IncidentStore(properties, new ObjectMapper(), dataSource(properties));
+        AlertPayload.Alert alert = new AlertPayload.Alert();
+        alert.setFingerprint("same-fingerprint");
+        AlertPayload payload = new AlertPayload();
+        payload.setStatus("firing");
+        payload.setAlerts(List.of(alert));
+
+        IncidentRecord tenantA;
+        IncidentRecord tenantB;
+        try (TenantContext.Scope ignored = TenantContext.open("tenant-a")) {
+            IncidentRecord candidate = alertCandidate("inc-alert-a", "tenant-a");
+            tenantA = store.recordAlert(candidate, payload, 100L, "same-alert-id");
+        }
+        try (TenantContext.Scope ignored = TenantContext.open("tenant-b")) {
+            IncidentRecord candidate = alertCandidate("inc-alert-b", "tenant-b");
+            tenantB = store.recordAlert(candidate, payload, 100L, "same-alert-id");
+            assertEquals("tenant-b", tenantB.getTenantId());
+            assertEquals(1, store.list().size());
+        }
+        assertTrue(!tenantA.getId().equals(tenantB.getId()));
+    }
+
+    private IncidentRecord alertCandidate(String id, String tenantId) {
+        IncidentRecord candidate = new IncidentRecord();
+        candidate.setId(id);
+        candidate.setTenantId(tenantId);
+        candidate.setAggregationKey("fingerprint:same-fingerprint");
+        candidate.setTitle("same alert");
+        candidate.setCreatedAt(100L);
+        return candidate;
     }
 
     private DataSource dataSource(AppIncidentProperties properties) {

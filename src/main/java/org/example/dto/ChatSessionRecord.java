@@ -11,6 +11,7 @@ import java.util.Map;
 @Setter
 public class ChatSessionRecord {
 
+    private String tenantId = "default";
     private String sessionId;
     private long createTime;
     private long updateTime;

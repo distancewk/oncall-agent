@@ -1,0 +1,8 @@
+{
+  "thresholds": {
+    "scenarioCount": {"min": 3},
+    "unsupportedAssertionRate": {"max": 0},
+    "claimCoverage": {"min": 1},
+    "claimEvidencePrecision": {"min": 1}
+  }
+}

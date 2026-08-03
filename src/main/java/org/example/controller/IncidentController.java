@@ -9,12 +9,15 @@ import org.example.dto.IncidentRecord;
 import org.example.dto.IncidentSummary;
 import org.example.service.IncidentCaseService;
 import org.example.service.IncidentService;
+import org.example.service.TenantContext;
 import org.example.service.BackgroundJobRepository;
 import org.example.service.VectorSearchService;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.slf4j.MDC;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.http.ResponseEntity;
+import org.springframework.security.access.prepost.PreAuthorize;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
@@ -23,6 +26,8 @@ import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
 
 import java.util.List;
+import java.util.LinkedHashMap;
+import java.util.Map;
 import java.util.Optional;
 
 @RestController
@@ -83,6 +88,7 @@ public class IncidentController {
     }
 
     @PostMapping("/{incidentId}/runs/{runId}/cancel")
+    @PreAuthorize("hasAnyRole('OPERATOR', 'ADMIN')")
     public ResponseEntity<ApiResponse<DiagnosisRunRecord>> cancelRun(@PathVariable String incidentId,
                                                                      @PathVariable String runId,
                                                                      @RequestParam(required = false) String reason) {
@@ -97,6 +103,7 @@ public class IncidentController {
     }
 
     @PostMapping("/{incidentId}/runs/{runId}/confirm")
+    @PreAuthorize("hasAnyRole('OPERATOR', 'ADMIN')")
     public ResponseEntity<ApiResponse<DiagnosisRunRecord>> confirmRun(@PathVariable String incidentId,
                                                                       @PathVariable String runId,
                                                                       @RequestParam(required = false) String comment) {
@@ -126,6 +133,7 @@ public class IncidentController {
     }
 
     @PostMapping("/{incidentId}/runs/{runId}/reject")
+    @PreAuthorize("hasAnyRole('OPERATOR', 'ADMIN')")
     public ResponseEntity<ApiResponse<DiagnosisRunRecord>> rejectRun(@PathVariable String incidentId,
                                                                      @PathVariable String runId,
                                                                      @RequestParam(required = false) String comment) {
@@ -167,25 +175,42 @@ public class IncidentController {
     }
 
     @PostMapping("/{incidentId}/archive-case")
-    public ResponseEntity<ApiResponse<IncidentCaseService.ArchiveResult>> archiveCase(@PathVariable String incidentId) {
-        IncidentCaseService.ArchiveResult result = incidentCaseService.archiveCase(incidentId);
+    @PreAuthorize("hasAnyRole('OPERATOR', 'ADMIN')")
+    public ResponseEntity<ApiResponse<IncidentCaseService.ArchiveResult>> archiveCase(
+            @PathVariable String incidentId,
+            @RequestParam(required = false) String runId) {
+        IncidentCaseService.ArchiveResult result = runId == null || runId.isBlank()
+                ? incidentCaseService.archiveCase(incidentId)
+                : incidentCaseService.archiveCase(incidentId, runId);
         if (result.isSuccess()) {
-            incidentService.getIncident(incidentId)
-                    .flatMap(incident -> incident.getDiagnosisRuns().stream()
-                            .filter(run -> "CONFIRMED".equals(run.getHumanReviewStatus())
-                                    && ("COMPLETED".equals(run.getStatus())
-                                    || "COMPLETED_WITH_GAPS".equals(run.getStatus())))
-                            .reduce((first, second) -> second))
-                    .ifPresent(run -> incidentService.markRunCaseArchived(
-                            incidentId, run.getRunId(), true, result.getDocumentId(), result.getMessage()));
+            if (runId != null && !runId.isBlank()) {
+                incidentService.markRunCaseArchived(
+                        incidentId, runId, true, result.getDocumentId(), result.getMessage());
+            } else {
+                incidentService.getIncident(incidentId)
+                        .flatMap(incident -> incident.getDiagnosisRuns().stream()
+                                .filter(run -> "CONFIRMED".equals(run.getHumanReviewStatus())
+                                        && ("COMPLETED".equals(run.getStatus())
+                                        || "COMPLETED_WITH_GAPS".equals(run.getStatus())))
+                                .reduce((first, second) -> second))
+                        .ifPresent(run -> incidentService.markRunCaseArchived(
+                                incidentId, run.getRunId(), true, result.getDocumentId(), result.getMessage()));
+            }
         }
         return ResponseEntity.ok(ApiResponse.success(result));
     }
 
     private void enqueueCaseArchive(String incidentId, String runId) {
         try {
-            String payload = objectMapper.writeValueAsString(java.util.Map.of(
-                    "incidentId", incidentId, "runId", runId));
+            Map<String, String> payloadValues = new LinkedHashMap<>();
+            payloadValues.put("incidentId", incidentId);
+            payloadValues.put("runId", runId);
+            payloadValues.put("tenantId", TenantContext.currentTenant());
+            String traceparent = MDC.get("traceparent");
+            if (traceparent != null && !traceparent.isBlank()) {
+                payloadValues.put("traceparent", traceparent);
+            }
+            String payload = objectMapper.writeValueAsString(payloadValues);
             backgroundJobRepository.enqueue(
                     "ARCHIVE_CASE", runId, payload, jobProperties.getArchiveMaxAttempts(),
                     System.currentTimeMillis());

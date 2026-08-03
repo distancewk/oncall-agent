@@ -78,7 +78,8 @@ public class MilvusClientFactory {
         ConnectParam.Builder builder = ConnectParam.newBuilder()
                 .withHost(milvusProperties.getHost())
                 .withPort(milvusProperties.getPort())
-                .withConnectTimeout(milvusProperties.getTimeout(), TimeUnit.MILLISECONDS);
+                .withConnectTimeout(milvusProperties.getTimeout(), TimeUnit.MILLISECONDS)
+                .withRpcDeadline(milvusProperties.getTimeout(), TimeUnit.MILLISECONDS);
 
         // 如果配置了用户名和密码
         if (milvusProperties.getUsername() != null && !milvusProperties.getUsername().isEmpty()) {

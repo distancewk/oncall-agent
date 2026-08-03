@@ -54,6 +54,7 @@ class MemoryLifecycleServiceTest {
 
         assertEquals("chat_memory", metadata.get("_source"));
         assertEquals("chat_memory", metadata.get("doc_type"));
+        assertEquals("default", metadata.get("tenant_id"));
         assertEquals("session-1", metadata.get("session_id"));
         assertEquals(now, metadata.get("created_at"));
         assertEquals(now, metadata.get("last_seen_at"));
@@ -76,7 +77,8 @@ class MemoryLifecycleServiceTest {
 
         ArgumentCaptor<DeleteParam> captor = ArgumentCaptor.forClass(DeleteParam.class);
         verify(milvusClient).delete(captor.capture());
-        assertEquals("metadata[\"doc_type\"] == \"chat_memory\" && metadata[\"session_id\"] == \"session\\\"1\"",
+        assertEquals("metadata[\"doc_type\"] == \"chat_memory\" && metadata[\"tenant_id\"] == \"default\""
+                        + " && metadata[\"session_id\"] == \"session\\\"1\"",
                 captor.getValue().getExpr());
     }
 

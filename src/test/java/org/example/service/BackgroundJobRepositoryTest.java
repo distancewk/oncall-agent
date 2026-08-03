@@ -8,6 +8,7 @@ import org.springframework.jdbc.datasource.DriverManagerDataSource;
 
 import java.nio.file.Path;
 import java.sql.Connection;
+import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
@@ -61,6 +62,36 @@ class BackgroundJobRepositoryTest {
     }
 
     @Test
+    void sameBusinessKey_shouldBeIndependentAcrossTenants() {
+        BackgroundJobRecord tenantA;
+        BackgroundJobRecord tenantB;
+        try (TenantContext.Scope ignored = TenantContext.open("tenant-a")) {
+            tenantA = repository.enqueue("DIAGNOSIS", "shared-run", "{}", 2, 100L);
+        }
+        try (TenantContext.Scope ignored = TenantContext.open("tenant-b")) {
+            tenantB = repository.enqueue("DIAGNOSIS", "shared-run", "{}", 2, 100L);
+            assertNotEquals(tenantA.getJobId(), tenantB.getJobId());
+            assertEquals("tenant-b", repository.findByBusinessKey("DIAGNOSIS", "shared-run")
+                    .orElseThrow().getTenantId());
+        }
+        try (TenantContext.Scope ignored = TenantContext.open("tenant-a")) {
+            assertEquals(tenantA.getJobId(), repository.findByBusinessKey("DIAGNOSIS", "shared-run")
+                    .orElseThrow().getJobId());
+        }
+    }
+
+    @Test
+    void countReadyJobs_shouldGroupOnlyAvailableJobs() {
+        repository.enqueue("DIAGNOSIS", "run-ready", "{}", 2, 100L);
+        repository.enqueue("INDEX", "task-future", "{}", 2, 5_000L);
+
+        Map<String, Long> counts = repository.countReadyJobs(300L);
+
+        assertEquals(1L, counts.get("DIAGNOSIS"));
+        assertFalse(counts.containsKey("INDEX"));
+    }
+
+    @Test
     void requestCancelWithConnection_shouldRollbackWithCallerTransaction() throws Exception {
         BackgroundJobRecord job = repository.enqueue(
                 "DIAGNOSIS", "run-cancel-tx", "{}", 2, 100L);
@@ -110,6 +141,23 @@ class BackgroundJobRepositoryTest {
         BackgroundJobRecord recovered = repository.findById(job.getJobId()).orElseThrow();
         assertEquals("RETRY", recovered.getStatus());
         assertEquals(301L, recovered.getAvailableAt());
+    }
+
+    @Test
+    void expiredLease_shouldFenceOldWorkerFromCompletingReclaimedJob() {
+        BackgroundJobRecord job = repository.enqueue("DIAGNOSIS", "run-fenced", "{}", 3, 100L);
+        BackgroundJobRecord firstClaim = repository.claimNext("worker-a", 200L, 100L).orElseThrow();
+        assertTrue(firstClaim.getLeaseToken() != null && !firstClaim.getLeaseToken().isBlank());
+
+        assertEquals(1, repository.recoverExpiredLeases(301L));
+        BackgroundJobRecord secondClaim = repository.claimNext("worker-b", 301L, 1_000L).orElseThrow();
+        assertNotEquals(firstClaim.getLeaseToken(), secondClaim.getLeaseToken());
+
+        repository.complete(job.getJobId(), "worker-a", firstClaim.getLeaseToken(), 302L);
+
+        BackgroundJobRecord stillOwnedBySecondWorker = repository.findById(job.getJobId()).orElseThrow();
+        assertEquals("RUNNING", stillOwnedBySecondWorker.getStatus());
+        assertEquals("worker-b", stillOwnedBySecondWorker.getLeaseOwner());
     }
 
     @Test

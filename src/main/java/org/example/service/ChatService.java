@@ -4,6 +4,7 @@ import com.alibaba.cloud.ai.dashscope.chat.DashScopeChatModel;
 import com.alibaba.cloud.ai.graph.agent.ReactAgent;
 import com.alibaba.cloud.ai.graph.exception.GraphRunnerException;
 import org.example.exception.DependencyUnavailableException;
+import org.example.config.AgentObservationHandler;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.ai.chat.messages.AssistantMessage;
@@ -46,6 +47,11 @@ public class ChatService {
 
     @Autowired(required = false)
     private DependencyGuard dependencyGuard;
+
+    @Autowired(required = false)
+    private ObservabilityMetrics observabilityMetrics;
+
+    private final RagGroundingPolicy ragGroundingPolicy = new RagGroundingPolicy();
 
     /**
      * 构建系统提示词（包含历史消息）
@@ -104,6 +110,11 @@ public class ChatService {
         }
 
         systemPromptBuilder.append("请基于以上对话历史，回答用户的新问题。");
+        systemPromptBuilder.append("\n\n--- 内部知识库回答规范 ---\n")
+                .append("凡是依据 queryInternalDocs 返回内容回答内部文档、流程、最佳实践或技术指南问题，")
+                .append("必须在相关事实后使用 [来源: <id>] 标注来源，其中 <id> 必须逐字复制工具结果中的 id，禁止猜测或编造。")
+                .append("如果工具没有返回足够证据，必须明确说明知识库没有找到依据，不得用常识补写内部事实。")
+                .append("--- 内部知识库回答规范结束 ---");
 
         return systemPromptBuilder.toString();
     }
@@ -198,16 +209,30 @@ public class ChatService {
      */
     public String executeChat(ReactAgent agent, String question) throws GraphRunnerException {
         logger.info("执行 ReactAgent.call() - 自动处理工具调用");
-        AssistantMessage response = callAgent(agent, question);
-        String answer = "";
-        if (response != null) {
-            String responseText = response.getText();
-            if (responseText != null) {
-                answer = responseText;
+        try {
+            AssistantMessage response = callAgent(agent, question);
+            String answer = "";
+            if (response != null) {
+                String responseText = response.getText();
+                if (responseText != null) {
+                    answer = responseText;
+                }
             }
+            answer = enforceRagGrounding(question, answer);
+            logger.info("ReactAgent 对话完成，答案长度: {}", answer.length());
+            return answer;
+        } finally {
+            RagCitationRegistry.clearCurrent();
         }
-        logger.info("ReactAgent 对话完成，答案长度: {}", answer.length());
-        return answer;
+    }
+
+    public boolean requiresRagCitation(String question) {
+        return ragGroundingPolicy.requiresCitation(question);
+    }
+
+    public String enforceRagGrounding(String question, String answer) {
+        return ragGroundingPolicy.enforce(question, answer,
+                RagCitationRegistry.consumeCurrent());
     }
 
     public String executeDirectChat(DashScopeChatModel chatModel,
@@ -226,46 +251,93 @@ public class ChatService {
     }
 
     private ChatResponse callDirectModel(DashScopeChatModel chatModel, Prompt prompt) {
-        if (dependencyGuard == null) {
-            return chatModel.call(prompt);
+        long startedNanos = System.nanoTime();
+        try {
+            ChatResponse response;
+            if (dependencyGuard == null) {
+                response = chatModel.call(prompt);
+            } else {
+                response = dependencyGuard.execute("dashscope-chat", "chatDirectCall",
+                        () -> chatModel.call(prompt),
+                        error -> {
+                            if (error instanceof DependencyUnavailableException unavailable) {
+                                throw unavailable;
+                            }
+                            throw new DependencyUnavailableException(
+                                    "dashscope-chat", "chatDirectCall", "DEPENDENCY_ERROR", error);
+                        });
+            }
+            recordModelCall("chatDirectCall", "SUCCESS", response, startedNanos);
+            return response;
+        } catch (RuntimeException e) {
+            recordModelCall("chatDirectCall", "ERROR", null, startedNanos);
+            throw e;
         }
-        return dependencyGuard.execute("dashscope-chat", "chatDirectCall",
-                () -> chatModel.call(prompt),
-                error -> {
-                    if (error instanceof DependencyUnavailableException unavailable) {
-                        throw unavailable;
-                    }
-                    throw new DependencyUnavailableException(
-                            "dashscope-chat", "chatDirectCall", "DEPENDENCY_ERROR", error);
-                });
     }
 
     @SuppressWarnings("PMD.PreserveStackTrace")
     private AssistantMessage callAgent(ReactAgent agent, String question) throws GraphRunnerException {
-        if (dependencyGuard == null) {
-            return agent.call(question);
-        }
+        long startedNanos = System.nanoTime();
+        String previousOperation = org.slf4j.MDC.get(AgentObservationHandler.AI_OPERATION_MDC_KEY);
+        org.slf4j.MDC.put(AgentObservationHandler.AI_OPERATION_MDC_KEY, "chatAgentCall");
         try {
-            return dependencyGuard.execute("dashscope-chat", "chatAgentCall",
-                    () -> {
-                        try {
-                            return agent.call(question);
-                        } catch (GraphRunnerException e) {
-                            throw new GraphRunnerCallException(e);
-                        }
-                    },
-                    error -> {
-                        if (error instanceof DependencyUnavailableException unavailable) {
-                            throw unavailable;
-                        }
-                        if (error instanceof GraphRunnerCallException graphRunnerCallException) {
-                            throw graphRunnerCallException;
-                        }
-                        throw new DependencyUnavailableException(
-                                "dashscope-chat", "chatAgentCall", "DEPENDENCY_ERROR", error);
-                    });
+            AssistantMessage response;
+            if (dependencyGuard == null) {
+                response = agent.call(question);
+            } else {
+                response = dependencyGuard.execute("dashscope-chat", "chatAgentCall",
+                        () -> {
+                            try {
+                                return agent.call(question);
+                            } catch (GraphRunnerException e) {
+                                throw new GraphRunnerCallException(e);
+                            }
+                        },
+                        error -> {
+                            if (error instanceof DependencyUnavailableException unavailable) {
+                                throw unavailable;
+                            }
+                            if (error instanceof GraphRunnerCallException graphRunnerCallException) {
+                                throw graphRunnerCallException;
+                            }
+                            throw new DependencyUnavailableException(
+                                    "dashscope-chat", "chatAgentCall", "DEPENDENCY_ERROR", error);
+                        });
+            }
+            recordModelInvocation("chatAgentCall", "SUCCESS", startedNanos);
+            return response;
         } catch (GraphRunnerCallException e) {
+            recordModelInvocation("chatAgentCall", "ERROR", startedNanos);
             throw e.getGraphRunnerException();
+        } catch (GraphRunnerException e) {
+            recordModelInvocation("chatAgentCall", "ERROR", startedNanos);
+            throw e;
+        } catch (RuntimeException e) {
+            recordModelInvocation("chatAgentCall", "ERROR", startedNanos);
+            throw e;
+        } finally {
+            if (previousOperation == null) {
+                org.slf4j.MDC.remove(AgentObservationHandler.AI_OPERATION_MDC_KEY);
+            } else {
+                org.slf4j.MDC.put(AgentObservationHandler.AI_OPERATION_MDC_KEY, previousOperation);
+            }
+        }
+    }
+
+    private void recordModelCall(String operation,
+                                 String outcome,
+                                 ChatResponse response,
+                                 long startedNanos) {
+        if (observabilityMetrics != null) {
+            observabilityMetrics.recordModelCall(operation, null, outcome,
+                    System.nanoTime() - startedNanos, response);
+        }
+    }
+
+    private void recordModelInvocation(String operation, String outcome, long startedNanos) {
+        if (observabilityMetrics != null) {
+            observabilityMetrics.recordModelInvocation(operation, null, outcome,
+                    System.nanoTime() - startedNanos);
         }
     }
 

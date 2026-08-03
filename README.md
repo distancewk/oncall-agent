@@ -8,13 +8,13 @@ SuperBizAgent 是一个基于 Spring Boot、Spring AI Alibaba、DashScope、Milv
 |------|------|
 | RAG 知识库问答 | 上传 `.md/.txt` 文档后写入 Milvus，聊天和知识库检索只召回普通文档数据 |
 | 多轮对话 | 近期上下文保存在内存/Redis，完整聊天历史持久化到 PostgreSQL，重启后仍可查看历史会话 |
-| 私人记忆 | 被窗口淘汰的历史对话可提炼为 `chat_memory`，检索时强制按 `session_id` 隔离 |
+| 私人记忆 | 被窗口淘汰的历史对话可提炼为 `chat_memory`，写入和检索时强制按 `tenant_id + session_id` 隔离 |
 | AIOps 诊断 | Webhook 或手动触发 Incident 诊断，生成 DiagnosisRun 和最终报告 |
 | 证据链 | 每次工具调用保存为 DiagnosisEvidence，报告需要引用 evidence id |
-| 指标趋势 | `queryMetricTrend` 支持 CPU、内存、错误率、P99、重启次数的 15m/1h/6h 趋势查询 |
+| 指标趋势 | `queryMetricTrend` 支持 CPU、内存、错误率、P99、重启次数的 15m/1h/6h 趋势查询；无数据告警不臆造指标，按指标目录选择查询 |
 | 相似历史故障 | 已完成诊断可写入 `incident_case`，新故障诊断前自动召回相似案例 |
 | 前端控制台 | 提供聊天、知识库状态/检索、事故历史筛选、事故详情、诊断进度、证据链工作台和工具证据分组展示 |
-| 安全边界 | 支持 API 鉴权开关、Webhook 共享密钥、CORS 白名单、模拟告警开发开关 |
+| 安全边界 | 支持 API 鉴权、Webhook 时间戳/nonce/HMAC 防重放、独立会话签名 Secret、CORS 白名单和模拟告警开发开关 |
 
 ## 技术栈
 
@@ -46,6 +46,15 @@ SuperBizAgent 是一个基于 Spring Boot、Spring AI Alibaba、DashScope、Milv
 
 ```bash
 export DASHSCOPE_API_KEY=your-api-key
+# 默认开启 API 鉴权；生产/Compose 环境请设置强随机令牌
+export APP_API_TOKEN=your-operator-api-token
+export APP_ADMIN_TOKEN=your-admin-api-token  # 管理员令牌；生产环境必填
+export APP_WEBHOOK_SECRET=your-webhook-secret
+export APP_WEBHOOK_SIGNING_SECRET=your-different-webhook-signing-secret
+export APP_SECURITY_SESSION_SIGNING_SECRET=your-different-session-signing-secret
+# 可选：启用短期机器令牌；生产环境启用时必须配置独立 Secret 和 Redis 撤销存储
+export APP_SECURITY_MACHINE_TOKEN_ENABLED=true
+export APP_SECURITY_MACHINE_TOKEN_SIGNING_SECRET=your-different-machine-token-secret
 ```
 
 本地开发建议同时打开 mock 数据，避免没有 Prometheus 或 CLS 时诊断工具失败：
@@ -82,6 +91,7 @@ mvn spring-boot:run
 - Web UI: http://localhost:9900
 - Attu (Milvus 管理界面): http://localhost:8000
 - Milvus 健康检查: http://localhost:9900/milvus/health
+- 应用健康/指标: `GET /actuator/health`、`GET /actuator/health/liveness`、`GET /actuator/health/readiness`、`GET /actuator/metrics`；readiness 会分别反映应用状态、数据库和 Redis；与 API 一样需要 `X-API-Key` 或浏览器会话
 
 ### 3.1 可选：启用 MCP
 
@@ -145,7 +155,8 @@ docker compose up -d --build
 ```bash
 curl -X POST http://localhost:9900/api/upload \
   -F "file=@aiops-docs/cpu_high_usage.md" \
-  -H "Accept: application/json"
+  -H "Accept: application/json" \
+  -H "X-API-Key: ${APP_ADMIN_TOKEN:-$APP_API_TOKEN}"
 ```
 
 上传成功只表示文件已落盘并提交索引任务，返回中会包含：
@@ -161,14 +172,17 @@ curl -X POST http://localhost:9900/api/upload \
 查询索引任务：
 
 ```bash
-curl http://localhost:9900/api/upload/status/{indexTaskId}
-curl http://localhost:9900/api/knowledge/index-tasks
+curl http://localhost:9900/api/upload/status/{indexTaskId} \
+  -H "X-API-Key: ${APP_API_TOKEN}"
+curl http://localhost:9900/api/knowledge/index-tasks \
+  -H "X-API-Key: ${APP_API_TOKEN}"
 ```
 
 测试知识库检索：
 
 ```bash
-curl "http://localhost:9900/api/knowledge/search?query=cpu&topK=5"
+curl "http://localhost:9900/api/knowledge/search?query=cpu&topK=5" \
+  -H "X-API-Key: ${APP_API_TOKEN}"
 ```
 
 知识库普通检索只会搜索 `metadata.doc_type=document` 的数据，不会返回私人记忆或历史故障案例。
@@ -207,7 +221,7 @@ curl -X POST http://localhost:9900/api/chat \
 - 完整聊天历史写入 PostgreSQL 的 `chat_sessions` / `chat_messages` 表。
 - Redis 是热缓存，默认 TTL 1 小时；重启后可从 PostgreSQL 恢复最近窗口。
 - `APP_CHAT_HISTORY_PATH` 仅用于首次启动时导入旧 JSON 聊天文件，导入成功后源文件保留。
-- 被窗口淘汰的消息会异步提炼为 `chat_memory`，查询时必须匹配当前 `session_id`。
+- 被窗口淘汰的消息会异步提炼为 `chat_memory`，查询时必须同时匹配当前 `tenant_id + session_id`。
 
 ## AIOps 诊断流程
 
@@ -225,7 +239,7 @@ http://localhost:9900/api/webhook/alert
 2. 创建一次 DiagnosisRun，初始状态为 `QUEUED`。
 3. 诊断开始后进入 `RUNNING` 或 `WAITING_TOOL`。
 4. 诊断前自动召回相似历史故障案例。
-5. 对 CPU、内存、错误率、P99、重启类告警自动预取指标趋势证据。
+5. 对 CPU、内存、错误率、P99、慢 SQL、依赖、重启和多告警关联类告警自动预取指标趋势证据；识别出的 Runbook 按声明的指标/窗口顺序串行预取，未知告警仍使用可配置并发预取。无数据告警进入独立 Runbook，先确认活动告警，再由执行器从指标目录选择指标并核查系统日志；多告警按完整告警集合生成顺序无关关联键，并在诊断上下文中保留关联数量和分组信息。
 6. Agent 调用知识库、指标、日志等工具，工具结果写入 DiagnosisEvidence。
 7. 最终报告只保存在 `DiagnosisRunRecord.report`，并追加证据校验段。
 
@@ -278,11 +292,13 @@ curl -X POST http://localhost:9900/api/incidents/{incidentId}/diagnose
 - `success/errorMessage`: 成功状态和错误信息
 - `attemptCount/durationMs/retryable`: 实际尝试次数、耗时和是否属于可重试工具
 
-前端事故详情会将工具证据分组展示为：相似历史案例、指标趋势、日志查询、知识库检索、活动告警、时间工具、其他工具。证据区还会显示成功数、失败数、重试数和总耗时，便于判断诊断质量受模型、工具还是外部依赖影响。
+前端事故详情会将工具证据分组展示为：相似历史案例、指标趋势、日志查询、知识库检索、活动告警、时间工具、其他工具。证据区还会显示成功数、失败数、重试数和总耗时，便于判断诊断质量受模型、工具还是外部依赖影响。模型调用还会通过 Micrometer 记录按操作/模型/结果聚合的调用数、耗时、Token（若 provider 返回 usage）和估算成本；Prompt、报告和原始日志不会进入指标标签。
 
 `DiagnosisReportService` 注入给 Agent 的证据表同样包含 `attemptCount`、`durationMs` 和 `retryable`。因此最终报告不仅能引用“哪个工具证据”，也能看到该证据是否经过重试、是否因为熔断或依赖异常导致缺失。
 
 诊断工具调用会做基础治理：同一 DiagnosisRun 内相同 `toolName + queryParams` 会去重；`queryLogs` 默认最多调用 3 次，超过后返回 `TOOL_BUDGET_EXCEEDED`，重复调用返回 `TOOL_DUPLICATE_SKIPPED`，报告必须如实说明证据不足。
+
+Planner、Executor、最终报告 system prompt 和动态收口模板位于 `src/main/resources/prompts/`，由 `AiOpsPromptCatalog` 启动时校验并提供独立版本号；诊断启动日志会记录四类 Prompt 版本。修改提示词必须递增对应版本，并重新运行离线评测。
 
 ### 前端事故工作台
 
@@ -326,15 +342,25 @@ node --test src/test/js/incidentFrontendActions.test.mjs
 
 ## 安全与配置
 
-默认启用鉴权。浏览器通过 HttpOnly Cookie 登录，机器客户端可使用 `X-API-Key`；生产环境必须使用强随机密钥。
-启动 `prod` profile 时会执行生产配置校验：必须提供 DashScope Key、API Token、Webhook Secret 和非本地 CORS 白名单；同时禁止开启 Prometheus/CLS mock 和模拟告警接口。
+默认启用鉴权。运行时由 Spring Security FilterChain 处理 API Key 和签名会话，浏览器通过 `HttpOnly + SameSite` Cookie 登录，机器客户端可使用 `X-API-Key`；生产环境必须使用强随机密钥。
+启动 `prod` profile 时会执行生产配置校验：必须提供 DashScope Key、API Token、独立的 Webhook 签名 Secret、独立的会话签名 Secret 和非本地 CORS 白名单；同时禁止开启 Prometheus/CLS mock 和模拟告警接口。
 
 | 场景 | Header |
 |------|--------|
 | 普通 `/api/**` 请求 | `X-API-Key: ${APP_API_TOKEN}` |
-| `/api/webhook/**` 请求 | `X-Webhook-Secret: ${APP_WEBHOOK_SECRET}` |
+| `/api/webhook/alert` 请求 | `X-Webhook-Timestamp`、`X-Webhook-Nonce`、`X-Webhook-Signature` |
 
 内置前端首次访问时会提示输入 `APP_API_TOKEN`，登录后使用 HttpOnly Cookie；SSE 连接会自动携带该 Cookie。
+
+浏览器写请求由前端从 `SB_CSRF` Cookie 复制令牌到 `X-CSRF-Token` 请求头；缺少匹配令牌的会话请求会被 Spring Security 拒绝。显式设置 `APP_SECURITY_ENABLED=false` 只适用于本地开发，会使用单独的开放安全链。
+
+本文中的机器端 `/api/**` 示例在鉴权开启时都需要 `X-API-Key`。Webhook 请求使用独立签名 Secret，签名内容为 `timestamp.nonce.rawBody`，并以 `sha256=<hex>` 放入 `X-Webhook-Signature`；超过时间窗口或重复 nonce 的请求会被拒绝。
+
+配置 `APP_ADMIN_TOKEN` 后，普通 API 令牌仅拥有操作员权限；知识库文件上传等管理操作必须使用管理员令牌登录。生产环境未配置独立管理员令牌时会失败关闭，禁止普通 API 令牌隐式获得管理员权限。鉴权开启时，所有 `/api/**` 请求以及诊断触发、取消、确认、驳回、案例归档、文件上传和机器令牌操作都会写入低敏感度安全审计表；审计只保存主体、角色、令牌类型/ID、路径、结果和请求关联 ID，不保存 Token、Cookie、Prompt 或原始日志。管理员可通过 `GET /api/system/security-audit?limit=50` 查询最近记录。
+
+启用 `APP_SECURITY_MACHINE_TOKEN_ENABLED` 后，已认证的静态 API Key 可通过 `POST /api/auth/token` 换取短期 Bearer 令牌；令牌默认 5 分钟有效，管理员可通过 `POST /api/auth/token/revoke` 按 `tokenId` 和 `expiresAt` 撤销。机器令牌必须按资源 scope 使用：`incidents:read` 读取事故/诊断证据，`diagnosis:trigger` 触发诊断，`diagnosis:cancel` 取消诊断，`diagnosis:review` 确认或驳回结果，`cases:write` 归档历史案例，`documents:write` 配合管理员角色上传知识库文件；缺少 scope 的请求会返回 403，旧 API Key/session 调用保持现有角色兼容。生产环境必须配置独立的 `APP_SECURITY_MACHINE_TOKEN_SIGNING_SECRET` 或轮换列表，并启用 Redis 撤销存储。
+
+机器令牌可在签发请求中指定 `tenantId`，租户身份会写入签名令牌并由每次请求恢复到租户上下文；普通操作员只能为当前兼容租户签发，管理员才可为其他租户签发。可选 OIDC 使用 `APP_SECURITY_OIDC_ENABLED=true` 开启，并配置 `APP_SECURITY_OIDC_ISSUER_URI`、`APP_SECURITY_OIDC_CLIENT_ID`、`APP_SECURITY_OIDC_CLIENT_SECRET`、`APP_SECURITY_OIDC_REDIRECT_URI` 和 `APP_SECURITY_OIDC_SCOPES`；应用会通过标准 Spring Security OIDC discovery 建立 `enterprise` client registration，并从可信 `tenant_id` claim 恢复租户；生产环境缺少租户 claim 会拒绝登录。Webhook 则从签名告警的 `commonLabels.tenant_id`、`commonLabels.tenant` 或告警分组标签解析租户。Incident、告警子表、聊天历史、诊断运行/证据、索引任务、后台任务和安全审计会按当前租户隔离；Redis 会话热缓存、私人记忆和普通文档向量的写入/检索也会带租户边界，后台异步记忆提炼和文档索引会恢复租户上下文。已有未标记的旧向量不会自动归属租户，可通过管理员只读 `/api/system/milvus-vectors/inventory` 和 `make vector-inventory` 盘点；后续只能重新索引或执行受控迁移。
 
 模拟告警接口 `/api/alerts/simulate` 只有在 `APP_ALERT_SIMULATE_ENABLED=true` 时可用。CORS 使用 `APP_CORS_ALLOWED_ORIGINS` 白名单，不再默认放开 `*`。
 
@@ -348,21 +374,68 @@ node --test src/test/js/incidentFrontendActions.test.mjs
 | `REDIS_HOST` | `localhost` | Redis 主机 |
 | `REDIS_PORT` | `6379` | Redis 端口 |
 | `PROMETHEUS_BASE_URL` | `http://localhost:9090` | Prometheus 地址 |
+| `APP_DEPENDENCY_PROBES_ENABLED` | `true` | 是否启用显式依赖连通性探针 |
+| `APP_DEPENDENCY_PROBE_TIMEOUT_MILLIS` | `2000` | 单个依赖探针超时时间（毫秒） |
+| `PROMETHEUS_API_KEY` | 空 | Prometheus 探针可选认证令牌；探针还要求返回 `status=success` 和版本字段 |
+| `DASHSCOPE_PROBE_URL` | `https://dashscope.aliyuncs.com/api/v1` | DashScope 探针 Base URL |
+| `DASHSCOPE_PROBE_PATH` | `/deployments/models?page_no=1&page_size=1&version=v1.0&model_source=base` | DashScope 只读业务探针路径；要求返回 `output.models` 结构 |
 | `PROMETHEUS_MOCK_ENABLED` | `false` | Prometheus mock 开关，dev profile 默认为 true |
 | `CLS_MOCK_ENABLED` | `false` | CLS mock 开关，dev profile 默认为 true |
 | `CLS_BASE_URL` | 空 | 真实日志查询网关地址，配置后 `queryLogs` 会访问 `${CLS_BASE_URL}${CLS_QUERY_PATH}` |
+| `CLS_PROBE_PATH` | `/` | CLS 只读探针路径；启用原生签名后使用 TC3-HMAC-SHA256 请求头 |
 | `CLS_QUERY_PATH` | `/api/v1/logs/query` | 日志查询路径 |
 | `CLS_API_KEY` | 空 | 日志网关 API Key，请求头为 `X-API-Key` |
+| `CLS_NATIVE_SIGNING_ENABLED` | `false` | 是否使用 CLS 原生 TC3-HMAC-SHA256 签名 |
+| `CLS_SECRET_ID` / `CLS_SECRET_KEY` | 空 | 原生 CLS 签名凭证；不得写入仓库或日志 |
+| `CLS_REGION` / `CLS_SERVICE` | `ap-guangzhou` / `cls` | 原生 CLS 签名范围 |
 | `CLS_TIMEOUT` | `10` | 日志查询超时秒数 |
 | `FILE_UPLOAD_PATH` | `./uploads` | 上传文件目录 |
 | `APP_CORS_ALLOWED_ORIGINS` | `http://localhost:9900,http://127.0.0.1:9900` | CORS 白名单 |
 | `APP_SECURITY_ENABLED` | `true` | API 鉴权开关，关闭仅限隔离测试环境 |
 | `APP_API_TOKEN` | 必填 | 普通 API 令牌 |
-| `APP_WEBHOOK_SECRET` | 必填 | Webhook 共享密钥 |
+| `APP_ADMIN_TOKEN` | 空 | 管理员 API 令牌；生产环境必填，并与普通令牌隔离管理权限 |
+| `APP_WEBHOOK_SECRET` | 兼容 | 旧版 Webhook Secret 配置；新部署应使用 `APP_WEBHOOK_SIGNING_SECRET` |
+| `APP_WEBHOOK_SIGNING_SECRET` | 兼容（prod/Compose） | Webhook HMAC 单值签名 Secret；若使用 `APP_WEBHOOK_SIGNING_SECRETS` 轮换列表，可由列表提供唯一密钥来源，且必须与 API/会话 Secret 分离 |
+| `APP_WEBHOOK_SIGNING_SECRETS` | 可选 | 轮换过渡窗口，按“新密钥,旧密钥”排列；切换完成后移除旧密钥即可撤销 |
+| `APP_SECURITY_SESSION_SIGNING_SECRET` | 必填（prod/Compose） | 浏览器会话签名 Secret，必须与 API 和 Webhook Secret 分离 |
+| `APP_SECURITY_MACHINE_TOKEN_ENABLED` | `false`（prod 开启） | 是否启用短期机器 Bearer 令牌 |
+| `APP_SECURITY_MACHINE_TOKEN_SIGNING_SECRET` | 启用时必填 | 机器令牌签名 Secret，必须独立于 API、会话和 Webhook Secret |
+| `APP_SECURITY_MACHINE_TOKEN_SIGNING_SECRETS` | 可选 | 机器令牌轮换过渡窗口，按“新密钥,旧密钥”排列 |
+| `APP_SECURITY_MACHINE_TOKEN_TTL_SECONDS` | `300` | 机器令牌最长有效期 |
+| `APP_SECURITY_MACHINE_TOKEN_CLOCK_SKEW_SECONDS` | `30` | 机器令牌允许的时钟偏差 |
+| `APP_SECURITY_MACHINE_TOKEN_REQUIRE_REDIS` | `false`（prod 强制 `true`） | 是否要求 Redis 提供跨实例撤销存储 |
+| `APP_SECURITY_DEFAULT_TENANT_ID` | `default` | 未携带租户身份的旧 API Key/session 和旧数据使用的兼容租户；生产多租户部署应使用签名机器令牌或带租户标签的 Webhook |
+| `APP_WEBHOOK_MAX_AGE_SECONDS` | `300` | Webhook 签名允许的最大时间偏差 |
+| `APP_WEBHOOK_REPLAY_REQUIRE_REDIS` | `false`（prod 强制 `true`） | 是否要求使用 Redis 做跨实例 nonce 防重放；生产环境必须启用 |
 | `APP_SECURITY_SESSION_TTL_SECONDS` | `28800` | 浏览器登录会话有效期（秒） |
 | `APP_SECURITY_COOKIE_SECURE` | `false` | 是否要求登录 Cookie 仅通过 HTTPS 发送；prod profile 默认 true |
+| `APP_SECURITY_OIDC_ENABLED` | `false` | 是否启用企业 OIDC；生产启用时必须配置 issuer、client 和可信租户 claim |
+| `APP_SECURITY_OIDC_ISSUER_URI` | 空 | OIDC issuer URI，用于标准 discovery |
+| `APP_SECURITY_OIDC_CLIENT_ID` / `APP_SECURITY_OIDC_CLIENT_SECRET` | 空 | OIDC client 凭据 |
+| `APP_SECURITY_OIDC_REDIRECT_URI` | `{baseUrl}/login/oauth2/code/enterprise` | OIDC 回调地址 |
+| `APP_SECURITY_OIDC_SCOPES` | `openid,profile,email` | OIDC 请求 scope |
+| `APP_SECURITY_OIDC_TENANT_CLAIM` | `tenant_id` | OIDC 租户 claim 名称 |
+| `APP_SECURITY_OIDC_GROUPS_CLAIM` | `groups` | OIDC 角色组 claim 名称 |
+| `APP_MODEL_NAME` | `qwen3-max` | 模型调用观测使用的默认模型标签；真实响应元数据可覆盖该标签 |
+| `APP_MODEL_USAGE_ENABLED` | `true` | 是否记录 provider 返回的 Prompt/Completion Token 用量 |
+| `APP_MODEL_COST_CURRENCY` | `CNY` | 估算模型成本的货币标签 |
+| `APP_MODEL_INPUT_COST_PER_1K_TOKENS` | `0` | 输入 Token 每 1,000 个的估算单价；`0` 表示未配置价格 |
+| `APP_MODEL_OUTPUT_COST_PER_1K_TOKENS` | `0` | 输出 Token 每 1,000 个的估算单价；`0` 表示未配置价格 |
+| `APP_TRACE_EXPORT_ENABLED` | `false` | 是否启用 HTTP span 导出；默认关闭 |
+| `APP_TRACE_EXPORT_ENDPOINT` | 空 | Zipkin v2 JSON `/api/v2/spans` 接收地址；启用时必填 |
+| `APP_TRACE_EXPORT_API_KEY` | 空 | 可选 exporter Bearer token，不会写入日志或 span |
+| `APP_TRACE_SERVICE_NAME` | `superbizagent` | 导出 span 的服务名 |
+| `APP_TRACE_EXPORT_SAMPLING_PROBABILITY` | `0.1` | HTTP span 采样比例，范围 0–1 |
+| `APP_TRACE_EXPORT_TIMEOUT_MILLIS` | `1000` | 单次 exporter 请求超时 |
+| `APP_TRACE_EXPORT_MAX_PENDING` | `100` | exporter 最大待处理请求数，超出后丢弃新 span |
+| `APP_LIFECYCLE_ENABLED` | `false` | 是否启用后台数据生命周期清理 |
+| `APP_LIFECYCLE_TERMINAL_JOB_RETENTION_DAYS` | `0` | 已完成/失败/取消后台任务保留天数；`0` 表示不清理 |
+| `APP_LIFECYCLE_INDEX_TASK_RETENTION_DAYS` | `0` | 已完成/失败/取消知识库索引任务保留天数；`0` 表示不清理 |
+| `APP_LIFECYCLE_CHAT_SESSION_RETENTION_DAYS` | `0` | 聊天会话保留天数；`0` 表示不清理 |
+| `APP_LIFECYCLE_SECURITY_AUDIT_RETENTION_DAYS` | `0`（prod 默认 365） | 安全审计保留天数；`0` 表示不清理 |
 | `APP_TRUSTED_PROXIES` | 空 | 受信任反向代理地址，用于安全地解析转发请求信息 |
 | `APP_ALERT_SIMULATE_ENABLED` | `false` | 模拟告警接口开关 |
+
 | `APP_CHAT_HISTORY_PATH` | `./data/chat-history` | 完整聊天历史目录 |
 | `APP_INCIDENTS_PATH` | `./data/incidents` | 旧 JSON Incident 导入目录，仅用于从历史文件迁移到 JDBC |
 | `APP_INCIDENT_JDBC_URL` | `jdbc:postgresql://localhost:5432/superbizagent` | Incident JDBC 数据库地址 |
@@ -394,7 +467,7 @@ node --test src/test/js/incidentFrontendActions.test.mjs
 | `APP_DBHUB_MAX_CALLS_PER_RUN` | `2` | 单次 DiagnosisRun 中 DBHub 最大调用次数 |
 | `APP_MAX_TOOL_CALLS_PER_RUN` | `12` | 单次 DiagnosisRun 最大工具调用预算 |
 | `APP_MAX_TOOL_ATTEMPTS_PER_RUN` | `16` | 单次 DiagnosisRun 最大工具尝试预算 |
-| `APP_MAX_SUPERVISOR_ROUNDS` | `8` | 单次 DiagnosisRun 最大 Supervisor 轮数 |
+| `APP_MAX_SUPERVISOR_ROUNDS` | `8` | 单次 DiagnosisRun 最大 Planner/Executor 编排轮数 |
 | `APP_STALE_RUN_TIMEOUT_MILLIS` | `600000` | 活跃诊断 run 超时判定窗口 |
 | `APP_STALE_RUN_SWEEP_DELAY_MILLIS` | `60000` | 超时诊断 run 扫描间隔 |
 | `APP_RESILIENCE_ENABLED` | `true` | 依赖熔断/重试总开关 |
@@ -434,9 +507,11 @@ node --test src/test/js/incidentFrontendActions.test.mjs
 | `MCP_DBHUB_PACKAGE` | `@bytebase/dbhub@0.21.2` | DBHub MCP npm 包版本 |
 | `MCP_DBHUB_CONFIG` | `./config/dbhub.toml` | DBHub 多数据库配置文件路径 |
 
+DashScope 默认探针使用官方的只读[可部署模型列表接口](https://help.aliyun.com/zh/model-studio/list-deployable-models-api)，不会发起模型推理；如果 API Key 没有该列表接口的权限，探针会显示 `AUTH_FAILED`，这只说明探针凭据不足，不能单独推断 Chat/Embedding 调用必然失败。需要时可用 `DASHSCOPE_PROBE_PATH` 改为账号实际允许的只读部署查询路径。
+
 运行时业务状态只写 PostgreSQL，不再写 Incident 或聊天 JSON。Flyway 脚本位于 `src/main/resources/db/migration/incidents`，覆盖 normalized operational tables 和 `background_jobs`。应用启动时会幂等导入旧 `incidents.payload`、`APP_INCIDENTS_PATH` 和 `APP_CHAT_HISTORY_PATH` 数据，并在 `legacy_import_markers` 记录完成标记；源行和源文件不会删除。升级前应先备份 PostgreSQL 和旧数据目录。
 
-诊断和文档索引请求只创建 durable job。诊断 run 与对应 job 在同一个数据库事务内创建；文档索引 task 与对应 job 也在同一个数据库事务内创建，任一写入失败都会整体回滚，不留下孤立 run、task 或 job。Worker 原子领取任务、持有并刷新租约；进程中断后，过期租约会转为 `RETRY` 或在尝试耗尽后转为 `FAILED`。取消先在数据库事务中把 DiagnosisRun 置为 `CANCELLED` 并标记 job 的 `cancel_requested`，事务提交后再尽力中断本实例正在执行的 Future；终态不会被后续完成/失败回写覆盖。
+诊断和文档索引请求只创建 durable job。诊断 run 与对应 job 在同一个数据库事务内创建；文档索引 task 与对应 job 也在同一个数据库事务内创建，任一写入失败都会整体回滚，不留下孤立 run、task 或 job。Worker 原子领取任务，持有带 `lease_token` 的租约并定期刷新；进程中断后，过期租约会转为 `RETRY` 或在尝试耗尽后转为 `FAILED`，旧 worker 的 heartbeat、完成和失败回写会被 fencing 条件拒绝。取消先在数据库事务中把 DiagnosisRun 置为 `CANCELLED` 并标记 job 的 `cancel_requested`，事务提交后再尽力中断本实例正在执行的 Future；终态不会被后续完成/失败回写覆盖。
 
 所有 job 时间、并发和重试配置都必须为正数，并在启动时校验。`APP_JOB_HEARTBEAT_INTERVAL_MILLIS` 必须小于 `APP_JOB_LEASE_DURATION_MILLIS / 2`，否则应用拒绝启动，避免心跳过慢导致运行中任务被错误回收。
 
@@ -477,6 +552,8 @@ node --test src/test/js/incidentFrontendActions.test.mjs
 | `POST` | `/api/incidents/{incidentId}/runs/{runId}/confirm` | 人工确认诊断，并尝试写入历史案例库 |
 | `POST` | `/api/incidents/{incidentId}/runs/{runId}/reject` | 人工驳回诊断 |
 | `GET` | `/api/system/dependencies` | 查看被熔断治理的外部依赖健康快照 |
+| `GET` | `/api/system/dependencies/probe` | 按需执行 Prometheus、CLS、DashScope、Milvus 和 MCP 连通性探针 |
+| `GET` | `/api/system/security-audit` | 管理员查询有界的低敏感度安全审计记录 |
 
 ## 项目结构
 
@@ -509,6 +586,24 @@ super-biz-agent/
 - `OPTIMIZATION_PLAN.md` 是本地规划文件，保留在开发机但不纳入 Git 跟踪。
 
 ## 测试与质量
+
+除了 Java、前端、Compose 和容器检查外，项目提供一个不调用外部模型的诊断评测契约 smoke 基线，以及一个从运行中应用采集真实持久化报告/证据的在线适配器：
+
+```bash
+make eval
+```
+
+结果会写入 `target/diagnosis-eval.json` 和 `target/diagnosis-eval.md`，并包含数据集、适配器、模型、Prompt、知识库版本和随机种子元数据。该 smoke 基线只验证场景格式、指标计算、版本记录和声明式门禁；真实上线门禁仍需要脱敏事故集、专家标注和实际诊断结果适配器，不能把 smoke 分数当成模型准确率。
+
+评测输入可通过 `EVAL_SCENARIOS`、`EVAL_RESULTS`、`EVAL_METADATA`、`EVAL_GATE_CONFIG` 覆盖。发布前使用 `make eval-release`；该命令会拒绝 smoke/fixture 元数据，要求 `dataset.source=deidentified-incident`、真实运行信息、专家标注复核/脱敏审批元数据、与场景数匹配的 `annotation.scenarioCount`，以及 `approval.approvedBy`、`approval.approvedAt` 审批字段，并自动拦截明显邮箱、常见令牌和敏感字段中的未脱敏值。该扫描只是安全网，不能替代人工脱敏审批。诊断 Planner/Executor 调用会启用 DashScope 原生 JSON object 输出模式，精确 schema、证据 ID 绑定和失败关闭仍由应用代码校验。
+
+真实运行采集使用：
+
+```bash
+make eval-live EVAL_LIVE_SCENARIOS=path/to/approved-scenarios.json
+```
+
+适配器会通过签名 Webhook 或已有 `incidentId` 触发/跟踪 durable DiagnosisRun，并把实际报告、持久化 evidence、工具次数和时延写成 JSONL；之后仍需使用专家批准的场景、metadata 和 gate 运行 `make eval-release`。`rootCausePatterns`、`claimMatchers` 和非空 `requiredClaimIds` 是评测标注的一部分，适配器不会从自身输出推断正确性。聊天 RAG 会保留原始问题并追加受控运维术语别名；来源引用必须属于本次检索返回的稳定 ID，伪造 ID 会在完成阶段降级。
 
 完整测试分层、PR 门禁、故障处理和发布前检查见 [TESTING.md](TESTING.md)。
 
@@ -562,7 +657,7 @@ curl http://localhost:9091/healthz
 
 ### 4. 生产环境请求返回 401
 
-生产 profile 默认启用鉴权。普通 API 需要 `X-API-Key`，Webhook 需要 `X-Webhook-Secret`。
+生产 profile 默认启用鉴权。普通 API 需要 `X-API-Key`；Webhook 需要时间戳、nonce 和 HMAC 签名请求头。
 
 ### 5. Docker 镜像拉取失败
 

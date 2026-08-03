@@ -20,16 +20,11 @@ public class WebConfig implements WebMvcConfigurer {
     @org.springframework.beans.factory.annotation.Autowired
     private RateLimitInterceptor rateLimitInterceptor;
 
-    @org.springframework.beans.factory.annotation.Autowired
-    private ApiSecurityInterceptor apiSecurityInterceptor;
-
     @org.springframework.beans.factory.annotation.Autowired(required = false)
     private AppCorsProperties appCorsProperties = new AppCorsProperties();
 
     @Override
     public void addInterceptors(org.springframework.web.servlet.config.annotation.InterceptorRegistry registry) {
-        registry.addInterceptor(apiSecurityInterceptor)
-                .addPathPatterns("/api/**");
         // 限流 (防刷)
         registry.addInterceptor(rateLimitInterceptor)
                 .addPathPatterns("/api/**");

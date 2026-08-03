@@ -4,10 +4,22 @@
 # 配置变量
 SERVER_URL = http://localhost:9900
 UPLOAD_API = $(SERVER_URL)/api/upload
+UPLOAD_API_KEY ?= $(if $(APP_ADMIN_TOKEN),$(APP_ADMIN_TOKEN),$(APP_API_TOKEN))
 DOCS_DIR = aiops-docs
 HEALTH_CHECK_API = $(SERVER_URL)/milvus/health
 DOCKER_COMPOSE_FILE = docker-compose.yml
 MILVUS_CONTAINER = milvus-standalone
+EVAL_SCENARIOS ?= eval/scenarios/smoke.json
+EVAL_RESULTS ?= eval/results/smoke.jsonl
+EVAL_METADATA ?= eval/metadata/smoke.json
+EVAL_GATE_CONFIG ?= eval/gates/smoke.json
+EVAL_OUTPUT ?= target/diagnosis-eval.json
+EVAL_MARKDOWN_OUTPUT ?= target/diagnosis-eval.md
+EVAL_LIVE_BASE_URL ?= http://localhost:9900
+EVAL_LIVE_SCENARIOS ?=
+EVAL_LIVE_RESULTS ?= target/diagnosis-live-results.jsonl
+EVAL_LIVE_TIMEOUT_SECONDS ?= 900
+EVAL_LIVE_POLL_SECONDS ?= 2
 
 # 颜色输出
 GREEN = \033[0;32m
@@ -15,7 +27,7 @@ YELLOW = \033[0;33m
 RED = \033[0;31m
 NC = \033[0m # No Color
 
-.PHONY: help init start stop restart check upload clean up down status wait docker-build
+.PHONY: help init start stop restart check upload eval eval-live eval-release eval-test vector-inventory vector-migration-plan clean up down status wait docker-build
 
 # 默认目标：显示帮助信息
 help:
@@ -32,12 +44,72 @@ help:
 	@echo "  $(YELLOW)make restart$(NC) - 重启 Spring Boot 服务"
 	@echo "  $(YELLOW)make check$(NC)   - 检查服务器是否运行"
 	@echo "  $(YELLOW)make upload$(NC)  - 上传 aiops-docs 目录下的所有文档"
+	@echo "  $(YELLOW)make eval$(NC)    - 运行诊断离线评测 smoke 基线"
+	@echo "  $(YELLOW)make eval-live EVAL_LIVE_SCENARIOS=...$(NC) - 从运行中的应用采集真实诊断结果"
+	@echo "  $(YELLOW)make eval-release$(NC) - 使用真实数据集运行发布质量门禁"
+	@echo "  $(YELLOW)make vector-inventory API_TOKEN=...$(NC) - 导出只读 Milvus 向量租户清单"
+	@echo "  $(YELLOW)make vector-migration-plan INVENTORY=... MAPPING=...$(NC) - 生成不写 Milvus 的迁移计划"
+	@echo "  $(YELLOW)make eval-test$(NC) - 运行评测契约单元测试"
 	@echo "  $(YELLOW)make clean$(NC)   - 清理临时文件"
 	@echo ""
 	@echo "使用示例："
 	@echo "  1. 一键初始化: make init"
 	@echo "  2. 手动启动: make up && make start && make upload"
 	@echo "  3. 停止服务: make stop && make down"
+
+# 运行确定性的诊断评测契约，不调用外部模型
+eval:
+	@python3 tools/diagnosis_eval.py \
+		--scenarios $(EVAL_SCENARIOS) \
+		--results $(EVAL_RESULTS) \
+		--metadata $(EVAL_METADATA) \
+		--gate-config $(EVAL_GATE_CONFIG) \
+		--output $(EVAL_OUTPUT) \
+		--markdown-output $(EVAL_MARKDOWN_OUTPUT)
+
+# 从运行中的应用采集真实诊断结果，不负责替代专家标注或发布门禁。
+eval-live:
+	@test -n "$(EVAL_LIVE_SCENARIOS)" || (echo "请设置 EVAL_LIVE_SCENARIOS=脱敏评测场景文件"; exit 2)
+	@python3 tools/diagnosis_live_adapter.py \
+		--base-url $(EVAL_LIVE_BASE_URL) \
+		--scenarios $(EVAL_LIVE_SCENARIOS) \
+		--output $(EVAL_LIVE_RESULTS) \
+		--api-token "$${APP_API_TOKEN}" \
+		--webhook-secret "$${APP_WEBHOOK_SIGNING_SECRET:-$${APP_WEBHOOK_SECRET}}" \
+		--timeout-seconds $(EVAL_LIVE_TIMEOUT_SECONDS) \
+		--poll-seconds $(EVAL_LIVE_POLL_SECONDS)
+
+# 发布门禁必须使用已审批的脱敏真实事故集，不接受 smoke/fixture 元数据。
+eval-release:
+	@python3 tools/diagnosis_eval.py \
+		--scenarios $(EVAL_SCENARIOS) \
+		--results $(EVAL_RESULTS) \
+		--metadata $(EVAL_METADATA) \
+		--gate-config $(EVAL_GATE_CONFIG) \
+		--output $(EVAL_OUTPUT) \
+		--markdown-output $(EVAL_MARKDOWN_OUTPUT) \
+		--require-approved-dataset
+
+eval-test:
+	@python3 -m unittest tools/test_diagnosis_eval.py tools/test_diagnosis_live_adapter.py tools/test_milvus_vector_migration_plan.py
+
+vector-inventory:
+	@test -n "$(API_TOKEN)" || (echo "请设置 API_TOKEN"; exit 2)
+	@python3 tools/milvus_vector_inventory.py \
+		--base-url $(SERVER_URL) \
+		--api-token "$(API_TOKEN)" \
+		--output target/milvus-vector-inventory.json
+
+vector-migration-plan:
+	@test -n "$(INVENTORY)" || (echo "请设置 INVENTORY"; exit 2)
+	@test -n "$(MAPPING)" || (echo "请设置 MAPPING"; exit 2)
+	@python3 tools/milvus_vector_migration_plan.py \
+		--inventory "$(INVENTORY)" \
+		--mapping "$(MAPPING)" \
+		--output "$${OUTPUT:-target/milvus-vector-migration-plan.json}" \
+		--batch-size "$${BATCH_SIZE:-100}" \
+		--resume-from "$${RESUME_FROM:-0}" \
+		$(if $(CHECKPOINT),--checkpoint "$(CHECKPOINT)")
 
 # 一键初始化：启动Docker → 启动服务 → 检查服务 → 上传文档
 init:
@@ -126,7 +198,8 @@ upload:
 			echo "$(YELLOW)  [$$count] 上传文件: $$filename$(NC)"; \
 			response=$$(curl -s -w "\n%{http_code}" -X POST $(UPLOAD_API) \
 				-F "file=@$$file" \
-				-H "Accept: application/json"); \
+				-H "Accept: application/json" \
+				-H "X-API-Key: $(UPLOAD_API_KEY)"); \
 			http_code=$$(echo "$$response" | tail -n1); \
 			body=$$(echo "$$response" | sed '$$d'); \
 			if [ "$$http_code" = "200" ]; then \
@@ -201,7 +274,8 @@ test-upload:
 	@if [ -f "$(DOCS_DIR)/cpu_high_usage.md" ]; then \
 		curl -X POST $(UPLOAD_API) \
 			-F "file=@$(DOCS_DIR)/cpu_high_usage.md" \
-			-H "Accept: application/json" | jq .; \
+			-H "Accept: application/json" \
+			-H "X-API-Key: $(UPLOAD_API_KEY)" | jq .; \
 	else \
 		echo "$(RED)测试文件不存在$(NC)"; \
 	fi

@@ -8,10 +8,12 @@ import com.alibaba.cloud.ai.graph.streaming.OutputType;
 import com.alibaba.cloud.ai.graph.streaming.StreamingOutput;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import jakarta.servlet.http.HttpServletResponse;
 import lombok.Getter;
 import lombok.Setter;
 import org.example.config.AppMemoryProperties;
 import org.example.config.AppChatProperties;
+import org.example.config.MdcContext;
 import org.example.dto.ApiResponse;
 import org.example.dto.ChatSessionRecord;
 import org.example.dto.ChatSessionSummary;
@@ -191,7 +193,9 @@ public class ChatController {
      * 支持 session 管理，保留对话历史
      */
     @PostMapping(value = "/chat_stream", produces = "text/event-stream;charset=UTF-8")
-    public SseEmitter chatStream(@RequestBody ChatRequest request) {
+    public SseEmitter chatStream(@RequestBody ChatRequest request,
+                                 HttpServletResponse response) {
+        prepareSseResponse(response);
         SseEmitter emitter = new SseEmitter(300000L); // 5分钟超时
 
         // 参数校验
@@ -206,7 +210,7 @@ public class ChatController {
             return emitter;
         }
 
-        executor.execute(() -> {
+        executor.execute(MdcContext.wrapRunnable(() -> {
             try {
                 logger.info("收到 ReactAgent 对话请求 - SessionId: {}, questionLength: {}",
                         request.getId(), request.getQuestion() == null ? 0 : request.getQuestion().length());
@@ -237,6 +241,7 @@ public class ChatController {
                 
                 // 用于累积完整答案
                 StringBuilder fullAnswerBuilder = new StringBuilder();
+                boolean bufferForGrounding = chatService.requiresRagCitation(request.getQuestion());
                 
                 // 使用 agent.stream() 进行流式对话
                 Flux<NodeOutput> stream;
@@ -266,10 +271,12 @@ public class ChatController {
                                     if (chunk != null && !chunk.isEmpty()) {
                                         fullAnswerBuilder.append(chunk);
                                         
-                                        // 实时发送到前端
-                                        emitter.send(SseEmitter.event()
-                                                .name("message")
-                                                .data(SseMessage.content(chunk), MediaType.APPLICATION_JSON));
+                                        // 知识库问题先缓冲，完成后通过确定性引用门禁再发送。
+                                        if (!bufferForGrounding) {
+                                            emitter.send(SseEmitter.event()
+                                                    .name("message")
+                                                    .data(SseMessage.content(chunk), MediaType.APPLICATION_JSON));
+                                        }
                                         
                                         logger.debug("发送流式内容块, length: {}", chunk.length());
                                     }
@@ -311,7 +318,13 @@ public class ChatController {
                             if (dependencyGuard != null) {
                                 dependencyGuard.recordSuccess("dashscope-chat");
                             }
-                            String fullAnswer = fullAnswerBuilder.toString();
+                            String rawAnswer = fullAnswerBuilder.toString();
+                            String groundedAnswer = chatService.enforceRagGrounding(
+                                    request.getQuestion(), rawAnswer);
+                            String fullAnswer = groundedAnswer == null ? rawAnswer : groundedAnswer;
+                            if (bufferForGrounding) {
+                                sendContentChunks(emitter, fullAnswer);
+                            }
                             logger.info("ReactAgent 流式对话完成 - SessionId: {}, 答案长度: {}", 
                                 request.getId(), fullAnswer.length());
                             
@@ -344,9 +357,22 @@ public class ChatController {
                 }
                 emitter.completeWithError(clientError);
             }
-        });
+        }));
 
         return emitter;
+    }
+
+    private void sendContentChunks(SseEmitter emitter, String content) throws IOException {
+        if (content == null || content.isEmpty()) {
+            return;
+        }
+        int chunkSize = 50;
+        for (int i = 0; i < content.length(); i += chunkSize) {
+            int end = Math.min(i + chunkSize, content.length());
+            emitter.send(SseEmitter.event()
+                    .name("message")
+                    .data(SseMessage.content(content.substring(i, end)), MediaType.APPLICATION_JSON));
+        }
     }
 
     /**
@@ -354,7 +380,9 @@ public class ChatController {
      * 可选的 alertContext 参数，用于传入告警上下文
      */
     @PostMapping(value = "/ai_ops", produces = "text/event-stream;charset=UTF-8")
-    public SseEmitter aiOps(@RequestBody(required = false) Map<String, Object> body) {
+    public SseEmitter aiOps(@RequestBody(required = false) Map<String, Object> body,
+                            HttpServletResponse response) {
+        prepareSseResponse(response);
         SseEmitter emitter = new SseEmitter(600000L); // 10分钟超时（告警分析可能较慢）
 
         // 从请求体中提取 alertContext
@@ -372,7 +400,7 @@ public class ChatController {
         final String context = alertContext;
         final String aId = alertId;
 
-        executor.execute(() -> {
+        executor.execute(MdcContext.wrapRunnable(() -> {
             try {
                 logger.info("收到 AI 智能运维请求 - 启动多 Agent 协作流程");
 
@@ -454,9 +482,14 @@ public class ChatController {
                 }
                 emitter.completeWithError(e);
             }
-        });
+        }));
 
         return emitter;
+    }
+
+    private void prepareSseResponse(HttpServletResponse response) {
+        response.setCharacterEncoding(java.nio.charset.StandardCharsets.UTF_8.name());
+        response.setContentType("text/event-stream;charset=UTF-8");
     }
 
 

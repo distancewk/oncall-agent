@@ -15,6 +15,7 @@ import org.springframework.ai.tool.ToolCallbackProvider;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.test.util.ReflectionTestUtils;
+import org.springframework.mock.web.MockHttpServletRequest;
 
 import java.util.List;
 import java.util.Map;
@@ -55,9 +56,18 @@ class WebhookControllerTest {
         WebhookController controller = new WebhookController();
         ReflectionTestUtils.setField(controller, "alertService", alertService);
         ReflectionTestUtils.setField(controller, "incidentService", incidentService);
-        ResponseEntity<String> response = controller.receiveAlert(payload);
+        ObjectMapper objectMapper = new ObjectMapper();
+        ReflectionTestUtils.setField(controller, "objectMapper", objectMapper);
+        org.example.service.WebhookSignatureVerifier verifier = mock(org.example.service.WebhookSignatureVerifier.class);
+        when(verifier.verifyAndClaim(any(), any())).thenReturn(true);
+        ReflectionTestUtils.setField(controller, "webhookSignatureVerifier", verifier);
+        ResponseEntity<String> response = controller.receiveAlert(
+                new MockHttpServletRequest("POST", "/api/webhook/alert"),
+                objectMapper.writeValueAsString(payload));
 
         assertEquals(HttpStatus.OK, response.getStatusCode());
+        assertEquals("incident-1", response.getHeaders().getFirst("X-Incident-ID"));
+        assertEquals("run-1", response.getHeaders().getFirst("X-Diagnosis-Run-ID"));
         verify(incidentService).createDiagnosisRunAndEnqueue(
                 "incident-1", "告警上下文", alertId);
         verify(aiOpsService, never()).executeAiOpsAnalysis(any(), any(), any(), any(), any());
@@ -91,11 +101,20 @@ class WebhookControllerTest {
         WebhookController controller = new WebhookController();
         ReflectionTestUtils.setField(controller, "alertService", alertService);
         ReflectionTestUtils.setField(controller, "incidentService", incidentService);
+        ObjectMapper objectMapper = new ObjectMapper();
+        ReflectionTestUtils.setField(controller, "objectMapper", objectMapper);
+        org.example.service.WebhookSignatureVerifier verifier = mock(org.example.service.WebhookSignatureVerifier.class);
+        when(verifier.verifyAndClaim(any(), any())).thenReturn(true);
+        ReflectionTestUtils.setField(controller, "webhookSignatureVerifier", verifier);
 
-        ResponseEntity<String> response = controller.receiveAlert(payload);
+        ResponseEntity<String> response = controller.receiveAlert(
+                new MockHttpServletRequest("POST", "/api/webhook/alert"),
+                objectMapper.writeValueAsString(payload));
 
         assertEquals(HttpStatus.OK, response.getStatusCode());
         assertEquals("Alert received and reused existing diagnosis report.", response.getBody());
+        assertEquals("incident-1", response.getHeaders().getFirst("X-Incident-ID"));
+        assertEquals("run-reuse", response.getHeaders().getFirst("X-Diagnosis-Run-ID"));
         verify(alertService).storeReport(alertId, "# 复用报告");
         verify(incidentService, never()).createDiagnosisRunAndEnqueue(eq("incident-1"), any(), any());
         verify(aiOpsService, never()).executeAiOpsAnalysis(any(), any(), any(), any(), any());

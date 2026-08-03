@@ -1,19 +1,22 @@
 package org.example.service;
 
 import com.alibaba.cloud.ai.dashscope.chat.DashScopeChatModel;
+import com.alibaba.cloud.ai.dashscope.chat.DashScopeChatOptions;
+import com.alibaba.cloud.ai.dashscope.api.DashScopeResponseFormat;
 import com.alibaba.cloud.ai.graph.OverAllState;
 import com.alibaba.cloud.ai.graph.CompileConfig;
+import com.alibaba.cloud.ai.graph.agent.Agent;
 import com.alibaba.cloud.ai.graph.agent.ReactAgent;
-import com.alibaba.cloud.ai.graph.agent.flow.agent.SupervisorAgent;
 import com.alibaba.cloud.ai.graph.exception.GraphRunnerException;
 import com.alibaba.cloud.ai.graph.agent.hook.Hook;
 import com.alibaba.cloud.ai.graph.agent.hook.toolcalllimit.ToolCallLimitHook;
 import org.example.config.AppIncidentProperties;
-import org.example.agent.tool.MetricCatalog;
+import org.example.config.AgentObservationHandler;
 import org.example.dto.DiagnosisRunRecord;
 import org.example.exception.DependencyUnavailableException;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.slf4j.MDC;
 import org.springframework.ai.chat.messages.AssistantMessage;
 import org.springframework.ai.tool.ToolCallback;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -25,6 +28,7 @@ import java.util.ArrayList;
 import java.util.Map;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
+import java.util.Objects;
 
 /**
  * AI Ops 智能运维服务
@@ -55,6 +59,26 @@ public class AiOpsService {
 
     @Autowired(required = false)
     private AppIncidentProperties incidentProperties;
+
+    @Autowired(required = false)
+    private ObservabilityMetrics observabilityMetrics;
+
+    private final AiOpsPromptCatalog promptCatalog;
+    private final DiagnosisOrchestrationPolicy orchestrationPolicy = new DiagnosisOrchestrationPolicy();
+    private final DiagnosisRunbookPolicy runbookPolicy = new DiagnosisRunbookPolicy();
+
+    public AiOpsService() {
+        this(new AiOpsPromptCatalog());
+    }
+
+    @Autowired
+    public AiOpsService(AiOpsPromptCatalog promptCatalog) {
+        this.promptCatalog = Objects.requireNonNull(promptCatalog, "promptCatalog");
+    }
+
+    public String promptVersionSummary() {
+        return promptCatalog.versionSummary();
+    }
 
     /**
      * 执行 AI Ops 告警分析流程（向后兼容，无告警上下文）
@@ -122,26 +146,11 @@ public class AiOpsService {
                                                                String alertContext,
                                                                boolean recordToolEvidence)
             throws GraphRunnerException {
-        logger.info("开始执行 AI Ops 多 Agent 协作流程");
+        logger.info("开始执行 AI Ops 多 Agent 协作流程, promptVersions={}",
+                promptCatalog.versionSummary());
 
-        // 构建 Planner 和 Executor Agent
         ReactAgent plannerAgent = buildPlannerAgent(chatModel, toolCallbacks, recordToolEvidence);
         ReactAgent executorAgent = buildExecutorAgent(chatModel, toolCallbacks, recordToolEvidence);
-
-        // 构建 Supervisor Agent
-        SupervisorAgent supervisorAgent = SupervisorAgent.builder()
-                .name("ai_ops_supervisor")
-                .description("负责调度 Planner 与 Executor 的多 Agent 控制器")
-                .model(chatModel)
-                .systemPrompt(buildSupervisorSystemPrompt())
-                // One supervisor round traverses several graph nodes. The graph
-                // recursion limit is the hard safety valve; the prompt remains
-                // responsible for asking the model to finish cleanly first.
-                .compileConfig(CompileConfig.builder()
-                        .recursionLimit(supervisorRecursionLimit())
-                        .build())
-                .subAgents(List.of(plannerAgent, executorAgent))
-                .build();
 
         String taskPrompt = "你是企业级 SRE，接到了自动化告警排查任务。请结合工具调用，执行**规划→执行→再规划**的闭环，并最终按照固定模板输出《告警分析报告》。禁止编造虚假数据，如连续多次查询失败需诚实反馈无法完成的原因。报告结论必须绑定 evidence id；证据不足时必须显式说明缺失证据。";
 
@@ -149,29 +158,118 @@ public class AiOpsService {
             taskPrompt += "\n\n## 当前告警上下文\n" + alertContext + "\n\n请基于以上告警上下文进行分析和处理。";
             logger.info("已注入告警上下文，长度: {}", alertContext.length());
         }
+        taskPrompt += "\n\n" + runbookPolicy.promptFor(alertContext);
 
-        logger.info("调用 Supervisor Agent 开始编排...");
-        Optional<OverAllState> state = invokeSupervisor(supervisorAgent, taskPrompt);
-        if (state.isPresent() && extractFinalReport(state.get()).isEmpty()) {
-            state = finalizeReport(chatModel, state.get(), alertContext);
+        logger.info("调用代码侧编排器开始执行 Planner/Executor 状态机...");
+        return executeOrchestration(plannerAgent, executorAgent, chatModel, taskPrompt, alertContext);
+    }
+
+    private Optional<OverAllState> executeOrchestration(ReactAgent plannerAgent,
+                                                        ReactAgent executorAgent,
+                                                        DashScopeChatModel chatModel,
+                                                        String taskPrompt,
+                                                        String alertContext) throws GraphRunnerException {
+        OverAllState state = new OverAllState();
+        String plannerPrompt = taskPrompt;
+        String lastFeedback = "";
+        int maxRounds = incidentProperties == null
+                ? 8 : Math.max(1, incidentProperties.getMaxSupervisorRounds());
+
+        for (int round = 1; round <= maxRounds; round++) {
+            Optional<OverAllState> plannerState = invokeAgent(
+                    plannerAgent, plannerPrompt, "aiOpsPlannerInvoke");
+            if (plannerState.isEmpty()) {
+                return Optional.empty();
+            }
+            String plannerOutput = stateText(plannerState.get(), "planner_plan");
+            if (plannerOutput.isBlank()) {
+                logger.warn("Planner 第 {} 轮没有返回控制输出，进入安全收口", round);
+                break;
+            }
+            state.updateState(Map.of("planner_plan", new AssistantMessage(plannerOutput)));
+
+            DiagnosisOrchestrationPolicy.Decision decision = orchestrationPolicy.classify(plannerOutput);
+            logger.info("Planner 第 {} 轮代码侧决策: {}, reason={}", round,
+                    decision.action(), decision.reason());
+            if (decision.action() == DiagnosisOrchestrationPolicy.Action.FINISH_REPORT) {
+                return Optional.of(state);
+            }
+            if (decision.action() == DiagnosisOrchestrationPolicy.Action.STOP_AND_FINALIZE) {
+                break;
+            }
+
+            if (decision.action() == DiagnosisOrchestrationPolicy.Action.EXECUTE) {
+                Optional<OverAllState> executorState = invokeAgent(
+                        executorAgent,
+                        buildExecutorRoundPrompt(taskPrompt, plannerOutput, lastFeedback),
+                        "aiOpsExecutorInvoke");
+                if (executorState.isEmpty()) {
+                    break;
+                }
+                String executorOutput = stateText(executorState.get(), "executor_feedback");
+                if (executorOutput.isBlank()) {
+                    logger.warn("Executor 第 {} 轮没有返回反馈，进入安全收口", round);
+                    break;
+                }
+                java.util.Set<String> usableEvidenceIds = diagnosisEvidenceRecorder != null
+                        && diagnosisEvidenceRecorder.hasActiveRun()
+                        ? diagnosisEvidenceRecorder.activeUsableEvidenceIds()
+                        : null;
+                if (!orchestrationPolicy.isValidExecutorFeedback(executorOutput, usableEvidenceIds)) {
+                    logger.warn("Executor 第 {} 轮反馈不符合 JSON schema 或未绑定当前成功证据，进入安全收口", round);
+                    break;
+                }
+                state.updateState(Map.of("executor_feedback", new AssistantMessage(executorOutput)));
+                lastFeedback = executorOutput;
+                if (orchestrationPolicy.requestsStop(executorOutput)) {
+                    logger.warn("Executor 第 {} 轮返回停止信号，进入安全收口", round);
+                    break;
+                }
+            }
+            plannerPrompt = buildPlannerRoundPrompt(taskPrompt, plannerOutput, lastFeedback, round);
         }
-        return state;
+
+        logger.warn("代码侧编排达到终止条件，进入单次最终报告收口");
+        return finalizeReport(chatModel, state, alertContext);
+    }
+
+    private String buildPlannerRoundPrompt(String taskPrompt,
+                                           String plannerOutput,
+                                           String executorFeedback,
+                                           int round) {
+        return taskPrompt
+                + "\n\n## 当前代码侧编排状态\n"
+                + "当前轮次: " + round
+                + "\n上一轮 Planner 输出:\n" + safePromptValue(plannerOutput)
+                + "\n上一轮 Executor 反馈:\n" + safePromptValue(executorFeedback)
+                + "\n请严格输出单个 JSON 对象（不得带前置说明或代码围栏），decision 只能是 PLAN、EXECUTE 或 FINISH；PLAN/EXECUTE 必须有不超过 500 字的 step，EXECUTE 必须有白名单 tool。";
+    }
+
+    private String buildExecutorRoundPrompt(String taskPrompt,
+                                            String plannerOutput,
+                                            String executorFeedback) {
+        return taskPrompt
+                + "\n\n## Planner 当前计划\n" + safePromptValue(plannerOutput)
+                + "\n## 上一轮 Executor 反馈\n" + safePromptValue(executorFeedback)
+                + "\n只执行 Planner 计划中的第一步，并输出单个 JSON 执行反馈对象。";
     }
 
     private Optional<OverAllState> finalizeReport(DashScopeChatModel chatModel,
                                                    OverAllState state,
                                                    String alertContext) throws GraphRunnerException {
-        logger.warn("Supervisor 未返回可入库的最终报告，启动最终报告收口 Agent");
+        logger.warn("代码侧编排器未返回可入库的最终报告，启动最终报告收口 Agent");
         ReactAgent finalReportAgent = buildFinalReportAgent(chatModel);
         String finalizationPrompt = buildFinalizationPrompt(state, alertContext);
-        Optional<OverAllState> finalState = invokeFinalReportAgent(finalReportAgent, finalizationPrompt);
+        Optional<OverAllState> finalState = invokeAgent(
+                finalReportAgent, finalizationPrompt, "aiOpsFinalReportInvoke");
         AssistantMessage finalReport = finalState.flatMap(result -> result.value("final_report"))
                 .filter(AssistantMessage.class::isInstance)
                 .map(AssistantMessage.class::cast)
                 .orElse(null);
         String finalReportText = finalReport == null ? null : finalReport.getText();
-        if (finalReportText == null || finalReportText.isBlank()) {
-            logger.warn("最终报告收口 Agent 返回为空");
+        if (finalReportText == null || finalReportText.isBlank()
+                || !DiagnosisReportService.isFinalReportCandidate(finalReportText)) {
+            logger.warn("最终报告收口 Agent 返回为空或未通过报告结构校验");
             return Optional.of(state);
         }
         state.updateState(Map.of("final_report", finalReport));
@@ -180,59 +278,59 @@ public class AiOpsService {
     }
 
     @SuppressWarnings("PMD.PreserveStackTrace")
-    private Optional<OverAllState> invokeFinalReportAgent(ReactAgent finalReportAgent,
-                                                           String finalizationPrompt)
+    private Optional<OverAllState> invokeAgent(Agent agent,
+                                               String prompt,
+                                               String operation)
             throws GraphRunnerException {
-        if (dependencyGuard == null) {
-            return finalReportAgent.invoke(finalizationPrompt);
-        }
+        long startedNanos = System.nanoTime();
+        String previousOperation = MDC.get(AgentObservationHandler.AI_OPERATION_MDC_KEY);
+        MDC.put(AgentObservationHandler.AI_OPERATION_MDC_KEY, operation);
         try {
-            return dependencyGuard.execute("dashscope-chat", "aiOpsFinalReportInvoke",
-                    () -> {
-                        try {
-                            return finalReportAgent.invoke(finalizationPrompt);
-                        } catch (GraphRunnerException e) {
-                            throw new GraphRunnerCallException(e);
-                        }
-                    },
-                    error -> {
-                        if (error instanceof DependencyUnavailableException unavailable) {
-                            throw unavailable;
-                        }
-                        throw new DependencyUnavailableException(
-                                "dashscope-chat", "aiOpsFinalReportInvoke", "DEPENDENCY_ERROR", error);
-                    });
+            Optional<OverAllState> result;
+            if (dependencyGuard == null) {
+                result = agent.invoke(prompt);
+            } else {
+                result = dependencyGuard.execute("dashscope-chat", operation,
+                        () -> {
+                            try {
+                                return agent.invoke(prompt);
+                            } catch (GraphRunnerException e) {
+                                throw new GraphRunnerCallException(e);
+                            }
+                        },
+                        error -> {
+                            if (error instanceof DependencyUnavailableException unavailable) {
+                                throw unavailable;
+                            }
+                            throw new DependencyUnavailableException(
+                                    "dashscope-chat", operation, "DEPENDENCY_ERROR", error);
+                        });
+            }
+            recordModelInvocation(operation, "SUCCESS", startedNanos);
+            return result;
         } catch (GraphRunnerCallException e) {
+            recordModelInvocation(operation, "ERROR", startedNanos);
             GraphRunnerException cause = e.getGraphRunnerException();
             throw new GraphRunnerException(cause.getMessage(), cause);
+        } catch (GraphRunnerException e) {
+            recordModelInvocation(operation, "ERROR", startedNanos);
+            throw e;
+        } catch (RuntimeException e) {
+            recordModelInvocation(operation, "ERROR", startedNanos);
+            throw e;
+        } finally {
+            if (previousOperation == null) {
+                MDC.remove(AgentObservationHandler.AI_OPERATION_MDC_KEY);
+            } else {
+                MDC.put(AgentObservationHandler.AI_OPERATION_MDC_KEY, previousOperation);
+            }
         }
     }
 
-    @SuppressWarnings("PMD.PreserveStackTrace")
-    private Optional<OverAllState> invokeSupervisor(SupervisorAgent supervisorAgent, String taskPrompt)
-            throws GraphRunnerException {
-        if (dependencyGuard == null) {
-            return supervisorAgent.invoke(taskPrompt);
-        }
-        try {
-            return dependencyGuard.execute("dashscope-chat", "aiOpsSupervisorInvoke",
-                    () -> {
-                        try {
-                            return supervisorAgent.invoke(taskPrompt);
-                        } catch (GraphRunnerException e) {
-                            throw new GraphRunnerCallException(e);
-                        }
-                    },
-                    error -> {
-                        if (error instanceof DependencyUnavailableException unavailable) {
-                            throw unavailable;
-                        }
-                        throw new DependencyUnavailableException(
-                                "dashscope-chat", "aiOpsSupervisorInvoke", "DEPENDENCY_ERROR", error);
-                    });
-        } catch (GraphRunnerCallException e) {
-            GraphRunnerException cause = e.getGraphRunnerException();
-            throw new GraphRunnerException(cause.getMessage(), cause);
+    private void recordModelInvocation(String operation, String outcome, long startedNanos) {
+        if (observabilityMetrics != null) {
+            observabilityMetrics.recordModelInvocation(operation, null, outcome,
+                    System.nanoTime() - startedNanos);
         }
     }
 
@@ -290,7 +388,11 @@ public class AiOpsService {
                 .name("planner_agent")
                 .description("负责拆解告警、规划与再规划步骤")
                 .model(chatModel)
+                .chatOptions(structuredJsonChatOptions())
                 .systemPrompt(buildPlannerPrompt())
+                .compileConfig(CompileConfig.builder()
+                        .recursionLimit(agentRecursionLimit())
+                        .build())
                 .methodTools(buildPlannerMethodToolsArray())
                 .tools(recordMcpEvidence(
                         agentToolSurfaceService.aiOpsPlannerMcpTools(toolCallbacks), recordToolEvidence))
@@ -308,7 +410,11 @@ public class AiOpsService {
                 .name("executor_agent")
                 .description("负责执行 Planner 的首个步骤并及时反馈")
                 .model(chatModel)
+                .chatOptions(structuredJsonChatOptions())
                 .systemPrompt(buildExecutorPrompt())
+                .compileConfig(CompileConfig.builder()
+                        .recursionLimit(agentRecursionLimit())
+                        .build())
                 .methodTools(buildExecutorMethodToolsArray())
                 .hooks(buildExecutorToolCallHooks())
                 .tools(recordMcpEvidence(
@@ -327,40 +433,29 @@ public class AiOpsService {
                 .build();
     }
 
+    private DashScopeChatOptions structuredJsonChatOptions() {
+        return DashScopeChatOptions.builder()
+                .responseFormat(new DashScopeResponseFormat(DashScopeResponseFormat.Type.JSON_OBJECT))
+                .build();
+    }
+
     private String buildFinalizationPrompt(OverAllState state, String alertContext) {
-        return """
-                请根据下面的告警上下文、Planner 最近输出和 Executor 证据，生成最终《告警分析报告》。
-                这是报告收口阶段，不要重新规划，不要调用工具，不要输出 JSON。
-                只输出以“# 告警分析报告”开头的纯 Markdown。
-
-                ## 告警上下文
-                %s
-
-                ## Planner 最近输出
-                %s
-
-                ## Executor 最近反馈
-                %s
-                """.formatted(
+        String latestEvidence = "";
+        if (diagnosisEvidenceRecorder != null && diagnosisEvidenceRecorder.hasActiveRun()
+                && diagnosisReportService != null) {
+            latestEvidence = diagnosisReportService.buildEvidenceTable(
+                    diagnosisEvidenceRecorder.activeEvidenceSnapshot());
+        }
+        return promptCatalog.finalizationPrompt().formatted(
                 safePromptValue(alertContext),
+                runbookPolicy.promptFor(alertContext),
                 stateValueText(state, "planner_plan"),
-                stateValueText(state, "executor_feedback"));
+                stateValueText(state, "executor_feedback"),
+                safePromptValue(latestEvidence));
     }
 
     private String buildFinalReportPrompt() {
-        return """
-                你是最终报告编写 Agent。你只能使用输入中已有的告警上下文和 Executor 实际返回的证据，禁止编造指标、日志、时间、根因或处理结果。
-                你必须直接输出纯 Markdown，且严格包含以下章节：
-                # 告警分析报告
-                ## 活跃告警清单
-                ## 告警根因分析
-                ## 处理方案执行
-                ## 结论
-                ### 置信度
-                ### 缺失证据
-                所有无法由已有 evidence 支撑的判断都写“证据不足”，并保留已有的 [evidence: ev-xxxx] 引用。
-                不要输出 JSON、解释文字、代码围栏或 decision 字段。
-                """;
+        return promptCatalog.finalReportPrompt();
     }
 
     private String stateValueText(OverAllState state, String key) {
@@ -370,6 +465,15 @@ public class AiOpsService {
                         : String.valueOf(value))
                 .filter(value -> value != null && !value.isBlank())
                 .orElse("无");
+    }
+
+    private String stateText(OverAllState state, String key) {
+        return state.value(key)
+                .map(value -> value instanceof AssistantMessage message
+                        ? message.getText()
+                        : String.valueOf(value))
+                .filter(value -> value != null && !value.isBlank())
+                .orElse("");
     }
 
     private String safePromptValue(String value) {
@@ -405,7 +509,7 @@ public class AiOpsService {
         return hooks.toArray(new Hook[0]);
     }
 
-    private int supervisorRecursionLimit() {
+    private int agentRecursionLimit() {
         int rounds = incidentProperties == null ? 8 : Math.max(1, incidentProperties.getMaxSupervisorRounds());
         return rounds * 4 + 4;
     }
@@ -434,176 +538,14 @@ public class AiOpsService {
      * 构建 Planner Agent 系统提示词
      */
     private String buildPlannerPrompt() {
-        return """
-                你是 Planner Agent，同时承担 Replanner 角色，负责：
-                1. 读取当前输入任务 {input} 以及 Executor 的最近反馈 {executor_feedback}。
-                2. 分析 Prometheus 告警、日志、内部文档等信息，制定可执行的下一步步骤。
-                3. 在执行阶段，输出 JSON，包含 decision (PLAN|EXECUTE|FINISH)、step 描述、预期要调用的工具、以及必要的上下文。
-                3a. Planner 只负责规划和再规划，严禁直接调用诊断工具；所有工具调用必须交给 Executor。
-                4. 调用任何腾讯云日志/主题相关工具时，region 参数必须使用连字符格式（如 ap-guangzhou），若不确定请省略以使用默认值。
-                5. 严格禁止编造数据，只能引用工具返回的真实内容；如果连续 3 次调用同一工具仍失败或返回空结果，需停止该方向并在最终报告的结论部分说明"无法完成"的原因。
-                5a. 当前指标目录为：{{SUPPORTED_METRICS}}。只能规划目录中的指标名；若工具返回 UNSUPPORTED_METRIC，立即停止该方向并报告证据缺口。
-                6. 遇到 CPU、内存、错误率、P99 延迟、重启次数相关告警时，必须先检查当前上下文是否已有成功的 queryMetricTrend evidence；只有 toolName=queryMetricTrend、success=true，且 metric、service、instance、window 与当前诊断目标匹配，并覆盖 15m/1h/6h 中最相关窗口时，才优先复用并引用 evidence id；缺失 15m/1h/6h 中最相关窗口或查询失败时才规划新的 queryMetricTrend 调用。
-
-                ## 工具调用策略（减少冗余）
-
-                - 当前 Incident 告警上下文是首要事实源；如果输入中已经包含告警名称、级别、实例、服务、摘要、标签或注解，优先基于这些字段规划诊断。
-                - queryPrometheusAlerts 是条件工具，用于确认全局告警面、发现关联告警或校验当前告警是否仍在 firing；不要把 queryPrometheusAlerts 作为默认第一步。
-                - 推荐证据顺序：当前 Incident 告警上下文 -> 相似历史故障/已提供证据 -> queryMetricTrend -> queryLogs -> queryInternalDocs -> 条件性 queryPrometheusAlerts。
-                - 只有无法根据告警类型推断日志主题时，才调用 getAvailableLogTopics；能推断时直接规划 queryLogs。
-                - 日志主题推断规则：CPU/内存/磁盘使用率 -> system-metrics；错误率/服务不可用/慢响应/下游依赖 -> application-logs；慢 SQL/数据库性能 -> database-slow-query；OOMKilled/CrashLoop/重启/容器崩溃 -> system-events。
-                - 每个 DiagnosisRun 中实际工具调用总次数默认最多 12 次，模型工具调用尝试默认最多 16 次；queryLogs 实际调用最多 3 次、尝试最多 5 次。同一 toolName + 同一参数或等价参数禁止重复调用（如 queryMetricTrend 只改变 step 仍视为重复）。超过预算或重复时应停止扩散查询，并在最终报告写明证据不足。
-                - Tavily MCP 仅用于查询外部公开资料、官方文档、错误码说明和组件版本差异；不能用外部搜索结果覆盖 Incident、指标、日志或内部知识库中的事实。
-                - 数据库 MCP 仅用于只读验证业务状态、配置、事件记录和 CMDB 信息；必须先说明要验证的问题，再规划有限范围查询。
-                - 不要为了“补全流程”调用无关工具；每个工具调用都必须能回答当前诊断问题，并在报告中形成可引用 evidence。
-                
-                ## 最终报告输出要求（CRITICAL）
-                
-                当 decision=FINISH 时，你必须：
-                1. **不要输出 JSON 格式**
-                2. **直接输出完整的 Markdown 格式报告文本**
-                3. **报告必须严格遵循以下模板**：
-                
-                ```
-                # 告警分析报告
-                
-                ---
-                
-                ## 📋 活跃告警清单
-                
-                | 告警名称 | 级别 | 目标服务 | 首次触发时间 | 最新触发时间 | 状态 |
-                |---------|------|----------|-------------|-------------|------|
-                | [告警1名称] | [级别] | [服务名] | [时间] | [时间] | 活跃 |
-                | [告警2名称] | [级别] | [服务名] | [时间] | [时间] | 活跃 |
-                
-                ---
-                
-                ## 🔍 告警根因分析1 - [告警名称]
-                
-                ### 告警详情
-                - **告警级别**: [级别]
-                - **受影响服务**: [服务名]
-                - **持续时间**: [X分钟]
-                
-                ### 症状描述
-                [根据监控指标描述症状]
-                
-                ### 日志证据
-                [引用查询到的关键日志]
-                
-                ### 根因结论
-                [基于证据得出的根本原因]
-                
-                ---
-                
-                ## 🛠️ 处理方案执行1 - [告警名称]
-                
-                ### 已执行的排查步骤
-                1. [步骤1]
-                2. [步骤2]
-                
-                ### 处理建议
-                [给出具体的处理建议]
-                
-                ### 预期效果
-                [说明预期的效果]
-                
-                ---
-                
-                ## 🔍 告警根因分析2 - [告警名称]
-                [如果有第2个告警，重复上述格式]
-                
-                ---
-                
-                ## 📊 结论
-                
-                ### 整体评估
-                [总结所有告警的整体情况]
-                
-                ### 关键发现
-                - [发现1]
-                - [发现2]
-
-                ### 置信度
-                [高/中/低；说明置信度来自哪些 evidence id，以及哪些结论仍缺少证据]
-
-                ### 缺失证据
-                - [缺失证据1；如果没有，写“无”]
-                - [缺失证据2；如果没有，写“无”]
-                
-                ### 后续建议
-                1. [建议1]
-                2. [建议2]
-                
-                ### 风险评估
-                [评估当前风险等级和影响范围]
-                ```
-                
-                **重要提醒**：
-                - 最终输出必须是纯 Markdown 文本，不要包含 JSON 结构
-                - 不要使用 "finalReport": "..." 这样的格式
-                - 直接从 "# 告警分析报告" 开始输出
-                - 所有内容必须基于工具查询的真实数据，严禁编造
-                - 工具返回中若包含 _diagnosisEvidenceId，报告中引用对应结论时必须标注 [evidence: ev-xxxx]
-                - 每个根因、症状和处理建议必须绑定 evidence id；不能被 evidence id 支撑的判断必须写“证据不足”
-                - 报告必须明确写出“置信度”和“缺失证据”
-                - 资源、错误率、延迟、重启类结论必须引用 queryMetricTrend 的趋势 evidence id；如果趋势查询失败，必须明确说明趋势证据缺失
-                - 根因、症状和处理建议应尽量引用 evidence id；无法拿到证据 id 时，必须说明证据来源缺失
-                - 如果某个步骤失败，在结论中如实说明，不要跳过
-                
-                """.replace("{{SUPPORTED_METRICS}}", MetricCatalog.supportedNamesText());
+        return promptCatalog.plannerPrompt();
     }
 
     /**
      * 构建 Executor Agent 系统提示词
      */
     private String buildExecutorPrompt() {
-        return """
-                你是 Executor Agent，负责读取 Planner 最新输出 {planner_plan}，只执行其中的第一步。
-                - 确认步骤所需的工具与参数，尤其是 region 参数要使用连字符格式（ap-guangzhou）；若 Planner 未给出则使用默认区域。
-                - 调用相应的工具并收集结果，如工具返回错误或空数据，需要将失败原因、请求参数一并记录，并停止进一步调用该工具（同一工具失败达到 3 次时应直接返回 FAILED）。
-                - 当前指标目录为：{{SUPPORTED_METRICS}}。只能执行目录中的指标名；若返回 UNSUPPORTED_METRIC，立即停止该方向。
-                - 执行 CPU、内存、错误率、P99 延迟或重启次数排查时，先检查 Planner 输入和告警上下文中是否已有成功的 queryMetricTrend evidence；只有 toolName=queryMetricTrend、success=true，且 metric、service、instance、window 与当前诊断目标匹配，并覆盖 15m/1h/6h 中最相关窗口时，才优先复用并反馈 evidence id；缺失 15m/1h/6h 中最相关窗口或查询失败时才再次调用 queryMetricTrend，并获取趋势摘要后再继续日志或文档查询。
-                - 已有明确告警上下文时，不要重复查询活动告警；只有 Planner 明确要求确认全局告警面、关联告警或 firing 状态时，才调用 queryPrometheusAlerts。
-                - 能从告警类型推断日志主题时，直接调用 queryLogs；只有 Planner 未给出主题且无法从告警类型推断时，才调用 getAvailableLogTopics。
-                - 日志主题推断规则：CPU/内存/磁盘使用率 -> system-metrics；错误率/服务不可用/慢响应/下游依赖 -> application-logs；慢 SQL/数据库性能 -> database-slow-query；OOMKilled/CrashLoop/重启/容器崩溃 -> system-events。
-                - 每个 DiagnosisRun 中实际工具调用总次数默认最多 12 次，模型工具调用尝试默认最多 16 次；queryLogs 实际调用最多 3 次、尝试最多 5 次。不要重复执行同一 toolName + 同一参数或等价参数。若工具返回 stop=true、TOOL_BUDGET_EXCEEDED 或 TOOL_DUPLICATE_SKIPPED，立即停止对应方向；若 nextAction=STOP_DIAGNOSTIC_TOOLS，则不得再调用任何工具，并把证据缺口反馈给 Planner。
-                - 调用 Tavily MCP 时，只能查询公开资料、官方文档、错误码或版本差异，并在反馈中注明其属于外部参考。
-                - 调用数据库 MCP 时只能执行只读查询；禁止执行 INSERT / UPDATE / DELETE / DROP / ALTER / TRUNCATE / CREATE 等写入或结构变更语句，查询必须限制字段、时间范围和返回行数。
-                - 将日志、指标、文档等证据整理成结构化摘要，标注对应的告警名称或资源，方便 Planner 填充"告警根因分析 / 处理方案执行"章节。
-                - 工具返回中若包含 _diagnosisEvidenceId，必须把该 id 原样写入 evidence 列表，格式为 [evidence: ev-xxxx]。
-                - 以 JSON 形式返回执行状态、证据以及给 Planner 的建议，写入 executor_feedback，严禁编造未实际查询到的内容。
-
-
-                输出示例：
-                {
-                  "status": "SUCCESS",
-                  "summary": "近1小时未见 error 日志，仅有 info",
-                  "evidence": "...",
-                  "nextHint": "建议转向高占用进程"
-                }
-                """.replace("{{SUPPORTED_METRICS}}", MetricCatalog.supportedNamesText());
+        return promptCatalog.executorPrompt();
     }
 
-    /**
-     * 构建 Supervisor Agent 系统提示词
-     */
-    private String buildSupervisorSystemPrompt() {
-        return """
-                你是 AI Ops Supervisor，负责调度 planner_agent 与 executor_agent：
-                1. 当需要拆解任务或重新制定策略时，调用 planner_agent。
-                2. 当 planner_agent 输出 decision=EXECUTE 时，调用 executor_agent 执行第一步。
-                3. 根据 executor_agent 的反馈，评估是否需要再次调用 planner_agent，直到 decision=FINISH。
-                4. 只有已经完成所有必要工具调用、并且 decision=FINISH 后，才能结束流程。若 Planner 返回 PLAN 或 EXECUTE，绝不能直接结束，也绝不能把该 JSON 作为最终报告输出。
-                5. FINISH 后，确保向最终用户输出完整的《告警分析报告》，格式必须严格为：
-                   # 告警分析报告\n\n## 活跃告警清单\n## 告警根因分析N\n## 处理方案执行N\n## 结论\n## 置信度\n## 缺失证据。
-                6. 若步骤涉及腾讯云日志/主题工具，请确保使用连字符区域 ID（ap-guangzhou 等），或省略 region 以采用默认值。
-                7. 如果发现 Planner/Executor 在同一方向连续 3 次调用工具仍失败或没有数据，必须终止流程，直接输出"任务无法完成"的报告，明确告知失败原因，严禁凭空编造结果。
-                8. 最多进行 %d 轮 planner/executor 调度；达到轮次上限时立即停止工具调用，进入最终报告收口，报告中列出尚未验证的证据缺口。
-                9. 收到 stop=true、nextAction=STOP_DIAGNOSTIC_TOOLS 或 UNSUPPORTED_METRIC 后，不得继续扩展工具方向，必须进入报告收口。
-
-                只允许在 planner_agent、executor_agent 与 FINISH 之间做出选择。
-
-                """.formatted(incidentProperties == null ? 8 : Math.max(1, incidentProperties.getMaxSupervisorRounds()));
-    }
 }

@@ -1,6 +1,7 @@
 package org.example.service;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import org.example.config.MdcContext;
 import org.example.dto.AlertPayload;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -115,13 +116,13 @@ public class AlertService {
     private void notifyListeners(StoredAlert alert) {
         for (AlertListener listener : listeners) {
             try {
-                listenerExecutor.execute(() -> {
+                listenerExecutor.execute(MdcContext.wrapRunnable(() -> {
                     try {
                         listener.onAlert(alert);
                     } catch (Exception e) {
                         LOGGER.warn("通知告警监听器失败, type: {}", e.getClass().getSimpleName());
                     }
-                });
+                }));
             } catch (RejectedExecutionException e) {
                 LOGGER.warn("告警监听器队列已满，跳过本次广播");
             }

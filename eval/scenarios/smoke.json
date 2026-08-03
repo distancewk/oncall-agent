@@ -1,0 +1,40 @@
+{
+  "scenarios": [
+    {
+      "id": "cpu-saturation-smoke",
+      "expectedRootCauses": ["cpu_saturation"],
+      "acceptableRootCauses": [],
+      "allowedEvidence": ["metric_trend"],
+      "requiredEvidence": ["metric_trend"],
+      "requiredClaimIds": ["cpu_saturation"],
+      "claimEvidence": {"cpu_saturation": ["metric_trend"]},
+      "allowHonestFailure": false,
+      "expectedHonestFailure": false
+    },
+    {
+      "id": "oom-evidence-gap-smoke",
+      "expectedRootCauses": ["memory_exhaustion"],
+      "acceptableRootCauses": ["jvm_heap_pressure"],
+      "allowedEvidence": ["metric_trend", "log_search"],
+      "requiredEvidence": ["metric_trend", "log_search"],
+      "requiredClaimIds": ["memory_exhaustion", "oom_log"],
+      "claimEvidence": {
+        "memory_exhaustion": ["metric_trend"],
+        "oom_log": ["log_search"]
+      },
+      "allowHonestFailure": true,
+      "expectedHonestFailure": false
+    },
+    {
+      "id": "dependency-timeout-smoke",
+      "expectedRootCauses": ["dependency_timeout"],
+      "acceptableRootCauses": [],
+      "allowedEvidence": ["log_search"],
+      "requiredEvidence": ["log_search"],
+      "requiredClaimIds": ["dependency_timeout"],
+      "claimEvidence": {"dependency_timeout": ["log_search"]},
+      "allowHonestFailure": false,
+      "expectedHonestFailure": false
+    }
+  ]
+}

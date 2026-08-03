@@ -3,6 +3,7 @@ package org.example.controller;
 import org.example.dto.ApiResponse;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.security.access.AccessDeniedException;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.ExceptionHandler;
@@ -35,6 +36,13 @@ public class GlobalExceptionHandler {
         String requestId = requestId();
         logger.error("IO异常, requestId: {}", requestId, ex);
         return errorResponse(500, "文件读写失败，请稍后重试", requestId);
+    }
+
+    @ExceptionHandler(AccessDeniedException.class)
+    public ResponseEntity<ApiResponse<Void>> handleAccessDeniedException(AccessDeniedException ex) {
+        String requestId = requestId();
+        logger.warn("访问被拒绝, requestId: {}", requestId);
+        return errorResponse(403, "Forbidden", requestId);
     }
 
     @ExceptionHandler(Exception.class)

@@ -1,4 +1,6 @@
 app:
+  security:
+    enabled: false
   alerts:
     simulate-enabled: true
 

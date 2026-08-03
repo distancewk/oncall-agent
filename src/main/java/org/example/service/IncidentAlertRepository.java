@@ -29,16 +29,19 @@ public class IncidentAlertRepository {
                        long receivedAt) throws Exception {
         String rowId = alertId == null || alertId.isBlank()
                 ? "ial-" + UUID.randomUUID().toString().substring(0, 12)
-                : "ial-" + alertId;
+                : "ial-" + UUID.nameUUIDFromBytes(
+                        (TenantContext.currentTenant() + "|" + alertId)
+                                .getBytes(StandardCharsets.UTF_8));
         try (PreparedStatement statement = connection.prepareStatement("""
-                insert into incident_alerts (id, incident_id, alert_id, payload, received_at)
-                values (?, ?, ?, ?, ?)
+                insert into incident_alerts (id, tenant_id, incident_id, alert_id, payload, received_at)
+                values (?, ?, ?, ?, ?, ?)
                 """)) {
             statement.setString(1, rowId);
-            statement.setString(2, incidentId);
-            statement.setString(3, alertId);
-            statement.setString(4, objectMapper.writeValueAsString(payload));
-            statement.setLong(5, receivedAt);
+            statement.setString(2, TenantContext.currentTenant());
+            statement.setString(3, incidentId);
+            statement.setString(4, alertId);
+            statement.setString(5, objectMapper.writeValueAsString(payload));
+            statement.setLong(6, receivedAt);
             statement.executeUpdate();
         }
     }
@@ -61,25 +64,26 @@ public class IncidentAlertRepository {
                             .getBytes(StandardCharsets.UTF_8));
             try (PreparedStatement statement = connection.prepareStatement("""
                     merge into incident_alerts as target
-                    using (values (?, ?, ?, ?, ?)) as source (
-                        id, incident_id, alert_id, payload, received_at
+                    using (values (?, ?, ?, ?, ?, ?)) as source (
+                        id, tenant_id, incident_id, alert_id, payload, received_at
                     )
                     on target.id = source.id
                     when matched then update set
                         payload = source.payload,
                         received_at = source.received_at
                     when not matched then insert (
-                        id, incident_id, alert_id, payload, received_at
+                        id, tenant_id, incident_id, alert_id, payload, received_at
                     ) values (
-                        source.id, source.incident_id, source.alert_id,
+                        source.id, source.tenant_id, source.incident_id, source.alert_id,
                         source.payload, source.received_at
                     )
                     """)) {
                 statement.setString(1, rowId);
-                statement.setString(2, incidentId);
-                statement.setString(3, null);
-                statement.setString(4, serializedPayload);
-                statement.setLong(5, receivedAt + index);
+                statement.setString(2, TenantContext.currentTenant());
+                statement.setString(3, incidentId);
+                statement.setString(4, null);
+                statement.setString(5, serializedPayload);
+                statement.setLong(6, receivedAt + index);
                 statement.executeUpdate();
             }
         }
@@ -88,9 +92,11 @@ public class IncidentAlertRepository {
     private boolean payloadExists(Connection connection, String incidentId, String payload)
             throws Exception {
         try (PreparedStatement statement = connection.prepareStatement(
-                "select 1 from incident_alerts where incident_id = ? and payload = ? limit 1")) {
-            statement.setString(1, incidentId);
-            statement.setString(2, payload);
+                "select 1 from incident_alerts where tenant_id = ? and incident_id = ? "
+                        + "and payload = ? limit 1")) {
+            statement.setString(1, TenantContext.currentTenant());
+            statement.setString(2, incidentId);
+            statement.setString(3, payload);
             try (ResultSet resultSet = statement.executeQuery()) {
                 return resultSet.next();
             }
@@ -102,10 +108,11 @@ public class IncidentAlertRepository {
         try (Connection connection = dataSource.getConnection();
              PreparedStatement statement = connection.prepareStatement("""
                      select payload from incident_alerts
-                     where incident_id = ?
+                     where tenant_id = ? and incident_id = ?
                      order by received_at, id
                      """)) {
-            statement.setString(1, incidentId);
+            statement.setString(1, TenantContext.currentTenant());
+            statement.setString(2, incidentId);
             try (ResultSet resultSet = statement.executeQuery()) {
                 while (resultSet.next()) {
                     payloads.add(objectMapper.readValue(resultSet.getString("payload"), AlertPayload.class));
@@ -132,14 +139,17 @@ public class IncidentAlertRepository {
              PreparedStatement statement = connection.prepareStatement("""
                      select alert_id, incident_id, payload, report, received_at
                      from incident_alerts
-                     where alert_id is not null
+                     where tenant_id = ? and alert_id is not null
                      order by received_at desc, alert_id
                      """);
-             ResultSet resultSet = statement.executeQuery()) {
+             ) {
+            statement.setString(1, TenantContext.currentTenant());
+            try (ResultSet resultSet = statement.executeQuery()) {
             while (resultSet.next()) {
                 rows.add(mapStoredAlert(resultSet));
             }
             return rows;
+            }
         } catch (Exception e) {
             throw new IllegalStateException("读取告警列表失败", e);
         }
@@ -149,9 +159,10 @@ public class IncidentAlertRepository {
         try (Connection connection = dataSource.getConnection();
              PreparedStatement statement = connection.prepareStatement("""
                      select alert_id, incident_id, payload, report, received_at
-                     from incident_alerts where alert_id = ?
+                     from incident_alerts where tenant_id = ? and alert_id = ?
                      """)) {
-            statement.setString(1, alertId);
+            statement.setString(1, TenantContext.currentTenant());
+            statement.setString(2, alertId);
             try (ResultSet resultSet = statement.executeQuery()) {
                 return resultSet.next() ? mapStoredAlert(resultSet) : null;
             }
@@ -163,10 +174,12 @@ public class IncidentAlertRepository {
     public void updateReport(String alertId, String report) {
         try (Connection connection = dataSource.getConnection();
              PreparedStatement statement = connection.prepareStatement("""
-                     update incident_alerts set report = ? where alert_id = ?
+                     update incident_alerts set report = ?
+                     where tenant_id = ? and alert_id = ?
                      """)) {
             statement.setString(1, report);
-            statement.setString(2, alertId);
+            statement.setString(2, TenantContext.currentTenant());
+            statement.setString(3, alertId);
             statement.executeUpdate();
         } catch (Exception e) {
             throw new IllegalStateException("保存告警报告失败: " + alertId, e);
@@ -178,10 +191,12 @@ public class IncidentAlertRepository {
              PreparedStatement statement = connection.prepareStatement("""
                      update incident_alerts
                      set report = ?
-                     where incident_id = ? and report is null and alert_id is not null
+                     where tenant_id = ? and incident_id = ?
+                       and report is null and alert_id is not null
                      """)) {
             statement.setString(1, report);
-            statement.setString(2, incidentId);
+            statement.setString(2, TenantContext.currentTenant());
+            statement.setString(3, incidentId);
             statement.executeUpdate();
         } catch (Exception e) {
             throw new IllegalStateException("保存 Incident 告警报告失败: " + incidentId, e);

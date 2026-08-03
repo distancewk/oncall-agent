@@ -35,6 +35,11 @@ jobs:
       - name: Run frontend behavior tests
         run: node --test src/test/js/evidenceRendering.test.mjs src/test/js/incidentFrontendActions.test.mjs
 
+      - name: Run deterministic diagnosis evaluation contract
+        run: |
+          python3 -m unittest tools/test_diagnosis_eval.py tools/test_diagnosis_live_adapter.py
+          make eval
+
       - name: Validate Docker Compose configuration
         env:
           DASHSCOPE_API_KEY: ci-placeholder
@@ -43,6 +48,8 @@ jobs:
           POSTGRES_PASSWORD: ci-postgres
           APP_API_TOKEN: ci-api-token
           APP_WEBHOOK_SECRET: ci-webhook-secret
+          APP_WEBHOOK_SIGNING_SECRET: ci-webhook-signing-secret
+          APP_SECURITY_SESSION_SIGNING_SECRET: ci-session-signing-secret
           APP_INCIDENT_JDBC_PASSWORD: ci-postgres
         run: docker compose config --quiet
 

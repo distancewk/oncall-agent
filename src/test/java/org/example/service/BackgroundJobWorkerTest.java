@@ -7,12 +7,14 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 import org.springframework.jdbc.datasource.DriverManagerDataSource;
+import org.slf4j.MDC;
 
 import java.nio.file.Path;
 import java.util.List;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -64,6 +66,35 @@ class BackgroundJobWorkerTest {
         worker.pollOnce(200L);
 
         assertTrue(handled.await(2, TimeUnit.SECONDS));
+        awaitStatus(job.getJobId(), "COMPLETED");
+    }
+
+    @Test
+    void pollOnce_shouldRestorePersistedTraceContextForDurableJob() throws Exception {
+        CountDownLatch handled = new CountDownLatch(1);
+        AtomicReference<String> traceId = new AtomicReference<>();
+        BackgroundJobHandler handler = new BackgroundJobHandler() {
+            @Override
+            public String jobType() {
+                return "DIAGNOSIS";
+            }
+
+            @Override
+            public void handle(BackgroundJobRecord job) {
+                traceId.set(MDC.get("trace_id"));
+                handled.countDown();
+            }
+        };
+        worker = new BackgroundJobWorker(
+                repository, List.of(handler), properties(), new RunningJobRegistry());
+        BackgroundJobRecord job = repository.enqueue(
+                "DIAGNOSIS", "run-trace", "{\"traceparent\":\"00-0123456789abcdef0123456789abcdef-0123456789abcdef-01\"}",
+                2, 100L);
+
+        worker.pollOnce(200L);
+
+        assertTrue(handled.await(2, TimeUnit.SECONDS));
+        assertEquals("0123456789abcdef0123456789abcdef", traceId.get());
         awaitStatus(job.getJobId(), "COMPLETED");
     }
 

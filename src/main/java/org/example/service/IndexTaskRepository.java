@@ -30,9 +30,9 @@ public class IndexTaskRepository {
     public void insert(Connection connection, IndexTaskStatus status) throws SQLException {
         try (PreparedStatement statement = connection.prepareStatement("""
                 insert into index_tasks (
-                    task_id, file_name, file_path, document_id, content_hash, status, message,
+                    tenant_id, task_id, file_name, file_path, document_id, content_hash, status, message,
                     error_message, created_at, updated_at
-                ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """)) {
             bind(statement, status);
             statement.executeUpdate();
@@ -45,13 +45,14 @@ public class IndexTaskRepository {
              PreparedStatement statement = connection.prepareStatement("""
                      update index_tasks
                      set status = ?, message = ?, error_message = ?, updated_at = ?
-                     where task_id = ?
+                     where tenant_id = ? and task_id = ?
                      """)) {
             statement.setString(1, status);
             statement.setString(2, message);
             statement.setString(3, errorMessage);
             statement.setLong(4, updatedAt);
-            statement.setString(5, taskId);
+            statement.setString(5, TenantContext.currentTenant());
+            statement.setString(6, taskId);
             statement.executeUpdate();
         } catch (Exception e) {
             throw new IllegalStateException("更新索引任务失败: " + taskId, e);
@@ -61,8 +62,9 @@ public class IndexTaskRepository {
     public Optional<IndexTaskStatus> find(String taskId) {
         try (var connection = dataSource.getConnection();
              PreparedStatement statement = connection.prepareStatement(
-                     "select * from index_tasks where task_id = ?")) {
-            statement.setString(1, taskId);
+                     "select * from index_tasks where tenant_id = ? and task_id = ?")) {
+            statement.setString(1, TenantContext.currentTenant());
+            statement.setString(2, taskId);
             try (ResultSet resultSet = statement.executeQuery()) {
                 return resultSet.next() ? Optional.of(map(resultSet)) : Optional.empty();
             }
@@ -72,36 +74,47 @@ public class IndexTaskRepository {
     }
 
     public List<IndexTaskStatus> list() {
+        return list(200);
+    }
+
+    public List<IndexTaskStatus> list(int limit) {
         List<IndexTaskStatus> statuses = new ArrayList<>();
         try (var connection = dataSource.getConnection();
              PreparedStatement statement = connection.prepareStatement("""
-                     select * from index_tasks order by updated_at desc, task_id
-                     """);
-             ResultSet resultSet = statement.executeQuery()) {
-            while (resultSet.next()) {
-                statuses.add(map(resultSet));
+                     select * from index_tasks
+                     where tenant_id = ?
+                     order by updated_at desc, task_id limit ?
+                     """)) {
+            statement.setString(1, TenantContext.currentTenant());
+            statement.setInt(2, Math.max(1, Math.min(limit, 1000)));
+            try (ResultSet resultSet = statement.executeQuery()) {
+                while (resultSet.next()) {
+                    statuses.add(map(resultSet));
+                }
+                return statuses;
             }
-            return statuses;
         } catch (Exception e) {
             throw new IllegalStateException("读取索引任务列表失败", e);
         }
     }
 
     private void bind(PreparedStatement statement, IndexTaskStatus status) throws SQLException {
-        statement.setString(1, status.getTaskId());
-        statement.setString(2, status.getFileName());
-        statement.setString(3, status.getFilePath());
-        statement.setString(4, status.getDocumentId());
-        statement.setString(5, status.getContentHash());
-        statement.setString(6, status.getStatus());
-        statement.setString(7, status.getMessage());
-        statement.setString(8, status.getErrorMessage());
-        statement.setLong(9, status.getCreatedAt());
-        statement.setLong(10, status.getUpdatedAt());
+        statement.setString(1, TenantContext.currentTenant());
+        statement.setString(2, status.getTaskId());
+        statement.setString(3, status.getFileName());
+        statement.setString(4, status.getFilePath());
+        statement.setString(5, status.getDocumentId());
+        statement.setString(6, status.getContentHash());
+        statement.setString(7, status.getStatus());
+        statement.setString(8, status.getMessage());
+        statement.setString(9, status.getErrorMessage());
+        statement.setLong(10, status.getCreatedAt());
+        statement.setLong(11, status.getUpdatedAt());
     }
 
     private IndexTaskStatus map(ResultSet resultSet) throws Exception {
         IndexTaskStatus status = new IndexTaskStatus();
+        status.setTenantId(resultSet.getString("tenant_id"));
         status.setTaskId(resultSet.getString("task_id"));
         status.setFileName(resultSet.getString("file_name"));
         status.setFilePath(resultSet.getString("file_path"));
