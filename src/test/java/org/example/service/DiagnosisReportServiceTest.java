@@ -116,6 +116,20 @@ class DiagnosisReportServiceTest {
     }
 
     @Test
+    void evaluateQuality_shouldRequireRunbookToolsForRecognizedCpuContext() {
+        DiagnosisEvidence trend = DiagnosisEvidence.toolCall(
+                "queryMetricTrend", "{\"metric\":\"cpu_usage\"}", "15m",
+                "CPU 趋势", "{\"success\":true}", true, null, 1L);
+        trend.setId("ev-runbook-trend");
+
+        DiagnosisReportService.QualityAssessment quality = service.evaluateQuality(
+                "CPU 使用率持续上升 [evidence: ev-runbook-trend]。", List.of(trend), "CPU 告警上下文");
+
+        assertEquals("LOW", quality.grade());
+        assertTrue(quality.issues().contains("Runbook 证据缺口: 缺少成功且已引用的 queryLogs evidence"));
+    }
+
+    @Test
     void evaluateQuality_shouldForceGapWhenSuccessfulEvidenceIsNotCited() {
         DiagnosisEvidence trend = DiagnosisEvidence.toolCall(
                 "queryMetricTrend", "{\"metric\":\"cpu_usage\"}", "15m",
@@ -500,6 +514,38 @@ class DiagnosisReportServiceTest {
         assertEquals("HIGH", quality.grade());
         assertTrue(quality.score() >= 85);
         assertTrue(quality.issues().isEmpty());
+    }
+
+    @Test
+    void evaluateQuality_shouldDowngradeWhenOneDiagnosisClaimLacksInlineEvidence() {
+        DiagnosisEvidence trend = DiagnosisEvidence.toolCall(
+                "queryMetricTrend",
+                "{\"metric\":\"cpu_usage\"}",
+                "15m",
+                "cpu_usage 最近 15m 持续上升",
+                "{\"success\":true}",
+                true,
+                null,
+                1L);
+        trend.setId("ev-trend");
+
+        DiagnosisReportService.QualityAssessment quality = service.evaluateQuality("""
+                # 告警分析报告
+                ## 告警根因分析
+                CPU 使用率持续上升 [evidence: ev-trend]
+                根因是线程池耗尽。
+                ## 处理方案执行
+                等待人工复核。
+                ## 结论
+                暂不下结论。
+                ### 置信度
+                中
+                ### 缺失证据
+                - 线程池指标
+                """, List.of(trend));
+
+        assertTrue(quality.issues().contains("存在未逐条引用 evidence 的事实陈述"));
+        assertTrue(quality.score() < 60);
     }
 
     @Test

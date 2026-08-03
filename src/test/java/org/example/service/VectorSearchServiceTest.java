@@ -104,7 +104,8 @@ class VectorSearchServiceTest {
         HybridSearchParam param = captor.getValue();
         assertEquals(2, param.getSearchRequests().size());
         for (AnnSearchParam request : param.getSearchRequests()) {
-            assertEquals("metadata[\"doc_type\"] == \"document\"", request.getExpr());
+            assertEquals("metadata[\"doc_type\"] == \"document\" && metadata[\"tenant_id\"] == \"default\"",
+                    request.getExpr());
         }
         assertTrue(param.getSearchRequests().get(0).getParams().contains("\"ef\":64"));
     }
@@ -128,13 +129,14 @@ class VectorSearchServiceTest {
 
         HybridSearchParam param = captor.getValue();
         for (AnnSearchParam request : param.getSearchRequests()) {
-            assertEquals("metadata[\"doc_type\"] == \"chat_memory\" && metadata[\"session_id\"] == \"session-123\"",
+            assertEquals("metadata[\"doc_type\"] == \"chat_memory\" && metadata[\"tenant_id\"] == \"default\""
+                            + " && metadata[\"session_id\"] == \"session-123\"",
                     request.getExpr());
         }
     }
 
     @Test
-    void searchIncidentCases_shouldRequireIncidentCaseDocTypeFilter() {
+    void searchIncidentCases_shouldRequireIncidentCaseDocTypeAndTenantFilter() {
         when(embeddingService.generateQueryVector("cpu incident")).thenReturn(List.of(0.1f, 0.2f));
         TreeMap<Long, Float> sparseVector = new TreeMap<>();
         sparseVector.put(1L, 0.5f);
@@ -152,7 +154,32 @@ class VectorSearchServiceTest {
 
         HybridSearchParam param = captor.getValue();
         for (AnnSearchParam request : param.getSearchRequests()) {
-            assertEquals("metadata[\"doc_type\"] == \"incident_case\"", request.getExpr());
+            assertEquals("metadata[\"doc_type\"] == \"incident_case\""
+                    + " && metadata[\"tenant_id\"] == \"default\"", request.getExpr());
+        }
+    }
+
+    @Test
+    void searchIncidentCases_shouldUseCurrentTenantInFilter() {
+        when(embeddingService.generateQueryVector("cpu incident")).thenReturn(List.of(0.1f, 0.2f));
+        TreeMap<Long, Float> sparseVector = new TreeMap<>();
+        sparseVector.put(1L, 0.5f);
+        when(embeddingService.generateSparseVector("cpu incident")).thenReturn(sparseVector);
+
+        R<SearchResults> errorResponse = R.failed(R.Status.UnexpectedError, "search failed");
+        when(milvusClient.hybridSearch(any(HybridSearchParam.class))).thenReturn(errorResponse);
+
+        try (TenantContext.Scope ignored = TenantContext.open("tenant-a")) {
+            assertThrows(RuntimeException.class, () ->
+                    vectorSearchService.searchIncidentCases("cpu incident", 3));
+        }
+
+        org.mockito.ArgumentCaptor<HybridSearchParam> captor =
+                org.mockito.ArgumentCaptor.forClass(HybridSearchParam.class);
+        verify(milvusClient).hybridSearch(captor.capture());
+        for (AnnSearchParam request : captor.getValue().getSearchRequests()) {
+            assertEquals("metadata[\"doc_type\"] == \"incident_case\""
+                    + " && metadata[\"tenant_id\"] == \"tenant-a\"", request.getExpr());
         }
     }
 

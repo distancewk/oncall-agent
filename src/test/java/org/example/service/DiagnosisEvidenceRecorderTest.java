@@ -8,11 +8,13 @@ import org.example.dto.DiagnosisRunRecord;
 import org.example.exception.DependencyUnavailableException;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
+import org.slf4j.MDC;
 import org.springframework.ai.chat.model.ToolContext;
 import org.springframework.ai.tool.ToolCallback;
 import org.springframework.ai.tool.definition.ToolDefinition;
 
 import java.util.List;
+import java.util.Set;
 import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.mockito.ArgumentMatchers.any;
@@ -30,6 +32,43 @@ import static org.mockito.Mockito.when;
 class DiagnosisEvidenceRecorderTest {
 
     private final ObjectMapper objectMapper = new ObjectMapper();
+
+    @Test
+    void withRun_shouldExposeAndThenClearStableMdcCorrelation() throws Exception {
+        DiagnosisEvidenceRecorder recorder = new DiagnosisEvidenceRecorder(
+                mockIncidentService(), objectMapper);
+        MDC.clear();
+
+        recorder.withRun("inc-1", "run-1", () -> {
+            assertEquals("inc-1", MDC.get("incident_id"));
+            assertEquals("run-1", MDC.get("run_id"));
+            return null;
+        });
+
+        assertEquals(null, MDC.get("incident_id"));
+        assertEquals(null, MDC.get("run_id"));
+    }
+
+    @Test
+    void activeUsableEvidenceIds_shouldExposeOnlySuccessfulPersistedEvidence() throws Exception {
+        IncidentService incidentService = mockIncidentService();
+        DiagnosisEvidence successful = evidence("queryLogs", "{\"query\":\"error\"}");
+        DiagnosisEvidence failed = evidence("queryLogs", "{\"query\":\"timeout\"}");
+        failed.setSuccess(false);
+        when(incidentService.getDiagnosisRun("inc-1", "run-1"))
+                .thenReturn(OptionalRun.singleRun(successful, failed));
+        when(incidentService.getDiagnosisRuns("inc-1"))
+                .thenReturn(OptionalRun.with(successful, failed));
+        DiagnosisEvidenceRecorder recorder = new DiagnosisEvidenceRecorder(incidentService, objectMapper);
+
+        Set<String> ids = recorder.withRun("inc-1", "run-1", () -> {
+            assertTrue(recorder.hasActiveRun());
+            return recorder.activeUsableEvidenceIds();
+        });
+
+        assertEquals(Set.of(successful.getId()), ids);
+        assertFalse(recorder.hasActiveRun());
+    }
 
     @Test
     void recordToolCall_shouldPersistProgressEvidenceAndReturnEvidenceId() throws Exception {
@@ -227,6 +266,35 @@ class DiagnosisEvidenceRecorderTest {
         verify(incidentService).addToolEvidence(eq("inc-1"), eq("run-1"), evidenceCaptor.capture());
         assertEquals("TOOL_DUPLICATE_SKIPPED", evidenceCaptor.getValue().getErrorCode());
         assertFalse(evidenceCaptor.getValue().isSuccess());
+    }
+
+    @Test
+    void recordToolCall_shouldBlockRunbookStepOutOfOrder() throws Exception {
+        IncidentService incidentService = mockIncidentService();
+        DiagnosisRunRecord run = new DiagnosisRunRecord();
+        run.setRunId("run-1");
+        run.setAlertContext("OOMKilled: payment-service memory alert");
+        when(incidentService.getDiagnosisRun("inc-1", "run-1"))
+                .thenReturn(java.util.Optional.of(run));
+        when(incidentService.getDiagnosisRuns("inc-1"))
+                .thenReturn(OptionalRun.with());
+        DiagnosisEvidenceRecorder recorder = new DiagnosisEvidenceRecorder(incidentService, objectMapper);
+        AtomicInteger calls = new AtomicInteger();
+
+        String result = recorder.withRun("inc-1", "run-1", () -> recorder.recordToolCall(
+                "queryLogs",
+                "{\"logTopic\":\"system-events\"}",
+                "recent logs",
+                () -> {
+                    calls.incrementAndGet();
+                    return "{\"success\":true}";
+                }
+        ));
+
+        assertEquals(0, calls.get());
+        JsonNode json = objectMapper.readTree(result);
+        assertEquals("RUNBOOK_STEP_ORDER", json.path("errorCode").asText());
+        assertTrue(json.path("message").asText().contains("memory_usage"));
     }
 
     @Test
@@ -497,6 +565,13 @@ class DiagnosisEvidenceRecorderTest {
             run.setRunId("run-1");
             run.getEvidence().addAll(List.of(evidence));
             return java.util.Optional.of(List.of(run));
+        }
+
+        private static java.util.Optional<DiagnosisRunRecord> singleRun(DiagnosisEvidence... evidence) {
+            DiagnosisRunRecord run = new DiagnosisRunRecord();
+            run.setRunId("run-1");
+            run.getEvidence().addAll(List.of(evidence));
+            return java.util.Optional.of(run);
         }
     }
 

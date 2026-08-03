@@ -37,10 +37,11 @@ class MetricTrendPrefetchServiceTest {
         MetricTrendPrefetchService service = new MetricTrendPrefetchService(tools, recorder);
         IncidentRecord incident = incidentService.recordAlert(alertPayload("HighCPUUsage", "payment-service",
                 "pod-payment-service-1"));
-        DiagnosisRunRecord run = incidentService.createDiagnosisRun(incident.getId(), "基础告警上下文");
+        DiagnosisRunRecord run = incidentService.createDiagnosisRun(incident.getId(), "HighCPUUsage: payment-service");
         incidentService.markRunRunning(incident.getId(), run.getRunId());
 
-        String enrichedContext = service.prefetchAndAppend(incident, run, "基础告警上下文");
+        String enrichedContext = service.prefetchAndAppend(
+                incident, run, "HighCPUUsage: payment-service");
 
         assertTrue(enrichedContext.contains("预取指标趋势证据"));
         assertTrue(enrichedContext.contains("metric=cpu_usage"));
@@ -53,6 +54,32 @@ class MetricTrendPrefetchServiceTest {
                 .filter(evidence -> evidence.getQueryParams().contains("\"metric\":\"cpu_usage\""))
                 .count();
         assertEquals(2, trendEvidenceCount);
+    }
+
+    @Test
+    void prefetchAndAppend_shouldUseSlowSqlRunbookMetricAndWindow() throws Exception {
+        ObjectMapper objectMapper = new ObjectMapper();
+        IncidentService incidentService = newIncidentService(objectMapper);
+        DiagnosisEvidenceRecorder recorder = new DiagnosisEvidenceRecorder(incidentService, objectMapper);
+        QueryMetricsTools tools = new QueryMetricsTools();
+        ReflectionTestUtils.setField(tools, "prometheusBaseUrl", "http://localhost:9090");
+        ReflectionTestUtils.setField(tools, "mockEnabled", true);
+        ReflectionTestUtils.setField(tools, "diagnosisEvidenceRecorder", recorder);
+
+        MetricTrendPrefetchService service = new MetricTrendPrefetchService(tools, recorder);
+        IncidentRecord incident = incidentService.recordAlert(alertPayload("SlowSQL", "orders-service",
+                "pod-orders-service-1"));
+        DiagnosisRunRecord run = incidentService.createDiagnosisRun(incident.getId(), "数据库慢 SQL");
+        incidentService.markRunRunning(incident.getId(), run.getRunId());
+
+        String enrichedContext = service.prefetchAndAppend(incident, run, "数据库慢 SQL");
+
+        assertTrue(enrichedContext.contains("metric=p99_latency"));
+        assertTrue(enrichedContext.contains("window=15m"));
+        DiagnosisRunRecord updatedRun = incidentService.getDiagnosisRuns(incident.getId()).orElseThrow().get(0);
+        assertEquals(1, updatedRun.getEvidence().stream()
+                .filter(evidence -> "queryMetricTrend".equals(evidence.getToolName()))
+                .count());
     }
 
     @Test

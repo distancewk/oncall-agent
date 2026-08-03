@@ -46,6 +46,8 @@ public class RagService {
     private String baseUrl;
 
     private Generation generation;
+    private final RagQueryRewritePolicy queryRewritePolicy = new RagQueryRewritePolicy();
+    private final RagGroundingPolicy ragGroundingPolicy = new RagGroundingPolicy();
 
     @PostConstruct
     public void init() {
@@ -81,8 +83,9 @@ public class RagService {
             logger.info("收到 RAG 流式查询, questionLength: {}", question == null ? 0 : question.length());
 
             // 1. 从向量数据库检索相关文档
-            List<VectorSearchService.SearchResult> searchResults = 
-                vectorSearchService.searchSimilarDocuments(question, topK);
+            String retrievalQuery = queryRewritePolicy.rewrite(question);
+            List<VectorSearchService.SearchResult> searchResults =
+                vectorSearchService.searchSimilarDocuments(retrievalQuery, topK);
 
             // 发送检索结果
             callback.onSearchResults(searchResults);
@@ -98,7 +101,7 @@ public class RagService {
             String prompt = buildPrompt(question, context);
 
             // 3. 流式调用大语言模型（传入历史消息）
-            generateAnswerStream(prompt, history, callback);
+            generateAnswerStream(question, prompt, history, searchResults, callback);
 
         } catch (Exception e) {
             logger.error("RAG 流式查询失败", e);
@@ -114,7 +117,10 @@ public class RagService {
         
         for (int i = 0; i < searchResults.size(); i++) {
             VectorSearchService.SearchResult result = searchResults.get(i);
-            context.append("【参考资料 ").append(i + 1).append("】\n");
+            String sourceId = result.getId() == null || result.getId().isBlank()
+                    ? "document-" + (i + 1) : result.getId();
+            context.append("【参考资料 ").append(i + 1).append("，来源: ")
+                    .append(sourceId).append("】\n");
             context.append(result.getContent()).append("\n\n");
         }
         
@@ -129,7 +135,8 @@ public class RagService {
             "你是一个专业的AI助手。请根据以下参考资料回答用户的问题。\n\n" +
             "参考资料：\n%s\n" +
             "用户问题：%s\n\n" +
-            "请基于上述参考资料给出准确、详细的回答。如果参考资料中没有相关信息，请明确说明。",
+            "请基于上述参考资料给出准确、详细的回答。每个依赖资料的事实后必须使用 " +
+                    "[来源: <id>] 引用对应资料的来源 id，不能编造 id。若资料中没有相关信息，请明确说明知识库没有找到依据。",
             context, question
         );
     }
@@ -141,7 +148,10 @@ public class RagService {
      * @param history 历史消息列表
      * @param callback 流式回调接口
      */
-    private void generateAnswerStream(String prompt, List<Map<String, String>> history, StreamCallback callback) 
+    private void generateAnswerStream(String question, String prompt,
+                                      List<Map<String, String>> history,
+                                      List<VectorSearchService.SearchResult> searchResults,
+                                      StreamCallback callback)
             throws NoApiKeyException, ApiException, InputRequiredException {
         
         // 构建消息列表：历史消息 + 当前问题
@@ -189,6 +199,7 @@ public class RagService {
         
         StringBuilder reasoningContent = new StringBuilder();
         StringBuilder finalContent = new StringBuilder();
+        boolean bufferForGrounding = ragGroundingPolicy.requiresCitation(question);
         
         logger.info("开始接收AI模型流式响应...");
 
@@ -210,9 +221,13 @@ public class RagService {
                         // 对于 thinking 模型，content 可能包含思考过程和最终答案
                         // 这里我们将所有内容都作为答案返回
                         finalContent.append(content);
-                        callback.onContentChunk(content);
+                        if (!bufferForGrounding) {
+                            callback.onContentChunk(content);
+                        }
 
-                        logger.debug("已调用 onContentChunk 回调");
+                        if (!bufferForGrounding) {
+                            logger.debug("已调用 onContentChunk 回调");
+                        }
                     } else {
                         logger.debug("收到空内容块，跳过");
                     }
@@ -222,8 +237,19 @@ public class RagService {
         
         logger.info("AI模型流式响应完成，总内容长度: {}", finalContent.length());
 
-        callback.onComplete(finalContent.toString(), reasoningContent.toString());
+        callback.onComplete(ragGroundingPolicy.enforce(
+                question, finalContent.toString(), sourceIds(searchResults)),
+                reasoningContent.toString());
         logger.info("已调用 onComplete 回调");
+    }
+
+    private java.util.Set<String> sourceIds(List<VectorSearchService.SearchResult> results) {
+        java.util.Set<String> ids = new java.util.LinkedHashSet<>();
+        for (int index = 0; index < results.size(); index++) {
+            String id = results.get(index).getId();
+            ids.add(id == null || id.isBlank() ? "document-" + (index + 1) : id);
+        }
+        return ids;
     }
 
     /**

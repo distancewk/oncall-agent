@@ -6,6 +6,7 @@ import java.util.List;
 public class IncidentRecord {
 
     private String id;
+    private String tenantId = "default";
     private String aggregationKey;
     private String title;
     private String status = "OPEN";
@@ -24,6 +25,14 @@ public class IncidentRecord {
 
     public void setId(String id) {
         this.id = id;
+    }
+
+    public String getTenantId() {
+        return tenantId;
+    }
+
+    public void setTenantId(String tenantId) {
+        this.tenantId = tenantId == null || tenantId.isBlank() ? "default" : tenantId;
     }
 
     public String getAggregationKey() {

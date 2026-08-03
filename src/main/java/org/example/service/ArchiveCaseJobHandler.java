@@ -38,7 +38,17 @@ public class ArchiveCaseJobHandler implements BackgroundJobHandler {
         JsonNode payload = objectMapper.readTree(job.getPayload());
         String incidentId = required(payload, "incidentId");
         String runId = required(payload, "runId");
+        String tenantId = TenantContext.requireMatch(
+                job.getTenantId(), payload.path("tenantId").asText(null));
+        try (TenantContext.Scope ignored = TenantContext.open(tenantId)) {
+            handleInTenant(job, incidentId, runId);
+        }
+    }
+
+    private void handleInTenant(BackgroundJobRecord job, String incidentId, String runId) throws Exception {
         try {
+            incidentService.transitionRunCaseArchive(
+                    incidentId, runId, "RUNNING", null, "历史案例写入中");
             ArchiveResult result = incidentCaseService.archiveCase(incidentId, runId);
             incidentService.markRunCaseArchived(
                     incidentId, runId, result.isSuccess(), result.getDocumentId(), result.getMessage());

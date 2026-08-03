@@ -24,12 +24,12 @@ public class DiagnosisEvidenceRepository {
     public void save(Connection connection, String runId, DiagnosisEvidence evidence) throws Exception {
         try (PreparedStatement statement = connection.prepareStatement("""
                 merge into diagnosis_evidence as target
-                using (values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)) as source (
-                    id, run_id, type, title, content, tool_name, query_params, time_range,
+                using (values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)) as source (
+                    id, tenant_id, run_id, type, title, content, tool_name, query_params, time_range,
                     summary, raw_fragment, success, error_message, error_code,
                     attempt_count, duration_ms, retryable, created_at
                 )
-                on target.id = source.id
+                on target.id = source.id and target.tenant_id = source.tenant_id
                 when matched then update set
                     title = source.title,
                     content = source.content,
@@ -41,11 +41,11 @@ public class DiagnosisEvidenceRepository {
                     duration_ms = source.duration_ms,
                     retryable = source.retryable
                 when not matched then insert (
-                    id, run_id, type, title, content, tool_name, query_params, time_range,
+                    id, tenant_id, run_id, type, title, content, tool_name, query_params, time_range,
                     summary, raw_fragment, success, error_message, error_code,
                     attempt_count, duration_ms, retryable, created_at
                 ) values (
-                    source.id, source.run_id, source.type, source.title, source.content,
+                    source.id, source.tenant_id, source.run_id, source.type, source.title, source.content,
                     source.tool_name, source.query_params, source.time_range, source.summary,
                     source.raw_fragment, source.success, source.error_message, source.error_code,
                     source.attempt_count, source.duration_ms, source.retryable, source.created_at
@@ -59,10 +59,10 @@ public class DiagnosisEvidenceRepository {
     public void insert(Connection connection, String runId, DiagnosisEvidence evidence) throws Exception {
         try (PreparedStatement statement = connection.prepareStatement("""
                 insert into diagnosis_evidence (
-                    id, run_id, type, title, content, tool_name, query_params, time_range,
+                    id, tenant_id, run_id, type, title, content, tool_name, query_params, time_range,
                     summary, raw_fragment, success, error_message, error_code,
                     attempt_count, duration_ms, retryable, created_at
-                ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """)) {
             bind(statement, runId, evidence);
             statement.executeUpdate();
@@ -81,10 +81,11 @@ public class DiagnosisEvidenceRepository {
         List<DiagnosisEvidence> evidence = new ArrayList<>();
         try (PreparedStatement statement = connection.prepareStatement("""
                 select * from diagnosis_evidence
-                where run_id = ?
+                where tenant_id = ? and run_id = ?
                 order by created_at, id
                 """)) {
-            statement.setString(1, runId);
+            statement.setString(1, TenantContext.currentTenant());
+            statement.setString(2, runId);
             try (ResultSet resultSet = statement.executeQuery()) {
                 while (resultSet.next()) {
                     evidence.add(map(resultSet));
@@ -120,6 +121,7 @@ public class DiagnosisEvidenceRepository {
                       DiagnosisEvidence evidence) throws Exception {
         int index = 1;
         statement.setString(index++, evidence.getId());
+        statement.setString(index++, TenantContext.currentTenant());
         statement.setString(index++, runId);
         statement.setString(index++, evidence.getType());
         statement.setString(index++, evidence.getTitle());

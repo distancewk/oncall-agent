@@ -54,7 +54,8 @@ public class VectorSearchService {
      * @return 搜索结果列表
      */
     public List<SearchResult> searchSimilarDocuments(String query, int topK) {
-        return searchWithFilter(query, topK, MilvusConstants.DOCUMENT_FILTER_EXPR, "相似文档").getResults();
+        return searchWithFilter(query, topK,
+                MilvusConstants.documentFilterExpr(TenantContext.currentTenant()), "相似文档").getResults();
     }
 
     /**
@@ -65,7 +66,8 @@ public class VectorSearchService {
      * @return 包含粗排候选、精排结果和检索参数的追踪信息
      */
     public SearchTrace explainSimilarDocuments(String query, int topK) {
-        return searchWithFilter(query, topK, MilvusConstants.DOCUMENT_FILTER_EXPR, "相似文档");
+        return searchWithFilter(query, topK,
+                MilvusConstants.documentFilterExpr(TenantContext.currentTenant()), "相似文档");
     }
 
     /**
@@ -80,12 +82,24 @@ public class VectorSearchService {
         if (sessionId == null || sessionId.isBlank()) {
             throw new IllegalArgumentException("sessionId 不能为空");
         }
-        return searchWithFilter(query, topK, MilvusConstants.chatMemoryFilterExpr(sessionId), "会话私人记忆")
+        return searchWithFilter(query, topK,
+                MilvusConstants.chatMemoryFilterExpr(TenantContext.currentTenant(), sessionId), "会话私人记忆")
                 .getResults();
     }
 
+    /**
+     * 搜索历史故障案例。
+     *
+     * <p>查询被限制为 {@code incident_case} 文档类型，并使用稠密向量与稀疏向量混合
+     * 检索，再交给重排服务截取最终结果。</p>
+     *
+     * @param query 查询文本
+     * @param topK 返回的最终结果数
+     * @return 相似历史故障案例
+     */
     public List<SearchResult> searchIncidentCases(String query, int topK) {
-        return searchWithFilter(query, topK, MilvusConstants.INCIDENT_CASE_FILTER_EXPR, "相似历史故障案例")
+        String filterExpr = MilvusConstants.incidentCaseFilterExpr(TenantContext.currentTenant());
+        return searchWithFilter(query, topK, filterExpr, "相似历史故障案例")
                 .getResults();
     }
 

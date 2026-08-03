@@ -6,7 +6,7 @@ import io.milvus.param.R;
 import io.milvus.param.RpcStatus;
 import io.milvus.param.collection.LoadCollectionParam;
 import io.milvus.param.dml.DeleteParam;
-import io.milvus.param.dml.InsertParam;
+import io.milvus.param.dml.UpsertParam;
 import org.example.config.AppResilienceProperties;
 import org.example.dto.DocumentChunk;
 import org.example.exception.DependencyUnavailableException;
@@ -47,6 +47,7 @@ class VectorIndexServiceTest {
                 service, "buildMetadata", "/tmp/runbook.md", chunk, 3);
 
         assertEquals("document", metadata.get("doc_type"));
+        assertEquals("default", metadata.get("tenant_id"));
         assertEquals("/tmp/runbook.md", metadata.get("_source"));
         assertEquals(2, metadata.get("chunkIndex"));
         assertEquals(3, metadata.get("totalChunks"));
@@ -71,7 +72,7 @@ class VectorIndexServiceTest {
         when(mutationResponse.getStatus()).thenReturn(0);
         when(mutationResponse.getData()).thenReturn(MutationResult.getDefaultInstance());
         when(milvusClient.delete(any(DeleteParam.class))).thenReturn(mutationResponse);
-        when(milvusClient.insert(any(InsertParam.class))).thenReturn(mutationResponse);
+        when(milvusClient.upsert(any(UpsertParam.class))).thenReturn(mutationResponse);
 
         List<DocumentChunk> chunks = List.of(
                 new DocumentChunk("chunk one", 0, 9, 0),
@@ -96,15 +97,19 @@ class VectorIndexServiceTest {
         verify(embeddingService, never()).generateEmbedding(any());
         verify(milvusClient).loadCollection(any(LoadCollectionParam.class));
 
-        ArgumentCaptor<InsertParam> insertCaptor = ArgumentCaptor.forClass(InsertParam.class);
-        verify(milvusClient).insert(insertCaptor.capture());
-        InsertParam insertParam = insertCaptor.getValue();
+        ArgumentCaptor<UpsertParam> upsertCaptor = ArgumentCaptor.forClass(UpsertParam.class);
+        verify(milvusClient).upsert(upsertCaptor.capture());
+        UpsertParam upsertParam = upsertCaptor.getValue();
 
-        assertEquals(2, insertParam.getRowCount());
-        assertEquals(2, fieldValues(insertParam, "content").size());
-        assertEquals(2, fieldValues(insertParam, "vector").size());
-        assertEquals(2, fieldValues(insertParam, "sparse_vector").size());
-        assertEquals(2, fieldValues(insertParam, "metadata").size());
+        assertEquals(2, upsertParam.getFields().stream()
+                .filter(field -> "content".equals(field.getName()))
+                .findFirst().orElseThrow().getValues().size());
+        assertEquals(2, fieldValues(upsertParam, "vector").size());
+        assertEquals(2, fieldValues(upsertParam, "sparse_vector").size());
+        assertEquals(2, fieldValues(upsertParam, "metadata").size());
+
+        service.indexSingleFile(file.toString());
+        verify(milvusClient, times(2)).upsert(any(UpsertParam.class));
     }
 
     @Test
@@ -142,8 +147,8 @@ class VectorIndexServiceTest {
         verify(milvusClient, times(1)).loadCollection(any(LoadCollectionParam.class));
     }
 
-    private List<?> fieldValues(InsertParam insertParam, String fieldName) {
-        return insertParam.getFields().stream()
+    private List<?> fieldValues(UpsertParam upsertParam, String fieldName) {
+        return upsertParam.getFields().stream()
                 .filter(field -> fieldName.equals(field.getName()))
                 .findFirst()
                 .orElseThrow()

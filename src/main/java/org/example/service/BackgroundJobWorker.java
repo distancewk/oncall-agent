@@ -2,9 +2,12 @@ package org.example.service;
 
 import jakarta.annotation.PreDestroy;
 import org.example.config.AppJobProperties;
+import org.example.config.MdcContext;
 import org.example.dto.BackgroundJobRecord;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.lang.Nullable;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
 
@@ -28,6 +31,7 @@ public class BackgroundJobWorker {
     private final Map<String, BackgroundJobHandler> handlers = new ConcurrentHashMap<>();
     private final AppJobProperties properties;
     private final RunningJobRegistry runningJobRegistry;
+    private final ObservabilityMetrics observabilityMetrics;
     private final ExecutorService executor;
     private final ScheduledExecutorService heartbeatExecutor;
     private final String workerId = "worker-" + UUID.randomUUID().toString().substring(0, 8);
@@ -37,10 +41,20 @@ public class BackgroundJobWorker {
                                List<BackgroundJobHandler> handlers,
                                AppJobProperties properties,
                                RunningJobRegistry runningJobRegistry) {
+        this(repository, handlers, properties, runningJobRegistry, null);
+    }
+
+    @Autowired
+    public BackgroundJobWorker(BackgroundJobRepository repository,
+                               List<BackgroundJobHandler> handlers,
+                               AppJobProperties properties,
+                               RunningJobRegistry runningJobRegistry,
+                               @Nullable ObservabilityMetrics observabilityMetrics) {
         this.repository = repository;
         handlers.forEach(handler -> this.handlers.put(handler.jobType(), handler));
         this.properties = properties;
         this.runningJobRegistry = runningJobRegistry;
+        this.observabilityMetrics = observabilityMetrics;
         this.executor = Executors.newFixedThreadPool(Math.max(1, properties.getWorkerConcurrency()));
         this.heartbeatExecutor = Executors.newSingleThreadScheduledExecutor();
     }
@@ -70,23 +84,53 @@ public class BackgroundJobWorker {
         }
     }
 
+    @Scheduled(fixedDelayString = "${app.jobs.metrics-delay-millis:15000}")
+    public void recordQueueDepth() {
+        if (!acceptingJobs || !properties.isEnabled() || observabilityMetrics == null) {
+            return;
+        }
+        try {
+            Map<String, Long> readyJobs = repository.countReadyJobs(System.currentTimeMillis());
+            handlers.keySet().forEach(jobType ->
+                    observabilityMetrics.recordJobQueueDepth(jobType, readyJobs.getOrDefault(jobType, 0L)));
+        } catch (RuntimeException e) {
+            LOGGER.warn("记录后台任务队列深度失败", e);
+        }
+    }
+
     private void submit(BackgroundJobRecord job) {
-        FutureTask<Void> task = new FutureTask<>(() -> {
-            execute(job);
+        if (observabilityMetrics != null) {
+            observabilityMetrics.recordJobClaimDelay(job.getJobType(),
+                    System.currentTimeMillis() - job.getAvailableAt());
+        }
+        FutureTask<Void> contextualTask = new FutureTask<>(MdcContext.wrapCallable(() -> {
+            String traceparent = MdcContext.extractTraceparent(job.getPayload());
+            if (traceparent == null) {
+                execute(job);
+            } else {
+                MdcContext.withTraceparent(traceparent, () -> execute(job));
+            }
             return null;
-        });
-        runningJobRegistry.register(job, task);
-        executor.execute(task);
+        }));
+        runningJobRegistry.register(job, contextualTask);
+        executor.execute(contextualTask);
     }
 
     private void execute(BackgroundJobRecord job) {
+        if (observabilityMetrics != null) {
+            observabilityMetrics.recordJobStarted(job.getJobType());
+        }
+        String outcome = "FAILED";
+        long startedNanos = System.nanoTime();
         long heartbeatInterval = Math.max(1L, properties.getHeartbeatIntervalMillis());
         ScheduledFuture<?> heartbeat = heartbeatExecutor.scheduleAtFixedRate(
-                () -> heartbeat(job), heartbeatInterval, heartbeatInterval, TimeUnit.MILLISECONDS);
+                MdcContext.wrapRunnable(() -> heartbeat(job)),
+                heartbeatInterval, heartbeatInterval, TimeUnit.MILLISECONDS);
         try {
             if (repository.isCancelRequested(job.getJobId())) {
-                repository.retryOrFail(job.getJobId(), workerId, "任务已取消",
+                repository.retryOrFail(job.getJobId(), workerId, job.getLeaseToken(), "任务已取消",
                         System.currentTimeMillis(), System.currentTimeMillis());
+                outcome = "CANCELLED";
                 return;
             }
             BackgroundJobHandler handler = handlers.get(job.getJobType());
@@ -94,16 +138,21 @@ public class BackgroundJobWorker {
                 throw new IllegalStateException("未注册后台任务处理器: " + job.getJobType());
             }
             handler.handle(job);
-            repository.complete(job.getJobId(), workerId, System.currentTimeMillis());
+            repository.complete(job.getJobId(), workerId, job.getLeaseToken(), System.currentTimeMillis());
+            outcome = "COMPLETED";
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
-            repository.retryOrFail(job.getJobId(), workerId, "任务执行被中断",
+            repository.retryOrFail(job.getJobId(), workerId, job.getLeaseToken(), "任务执行被中断",
                     retryAt(), System.currentTimeMillis());
         } catch (Exception e) {
             LOGGER.warn("后台任务执行失败, jobId: {}, type: {}", job.getJobId(), job.getJobType(), e);
-            repository.retryOrFail(job.getJobId(), workerId, e.getMessage(),
+            repository.retryOrFail(job.getJobId(), workerId, job.getLeaseToken(), e.getMessage(),
                     retryAt(), System.currentTimeMillis());
         } finally {
+            if (observabilityMetrics != null) {
+                observabilityMetrics.recordJobOutcome(job.getJobType(), outcome,
+                        System.nanoTime() - startedNanos);
+            }
             heartbeat.cancel(false);
             runningJobRegistry.unregister(job);
         }
@@ -111,8 +160,12 @@ public class BackgroundJobWorker {
 
     private void heartbeat(BackgroundJobRecord job) {
         try {
-            repository.heartbeat(job.getJobId(), workerId, System.currentTimeMillis(),
+            boolean renewed = repository.heartbeat(job.getJobId(), workerId, job.getLeaseToken(),
+                    System.currentTimeMillis(),
                     properties.getLeaseDurationMillis());
+            if (!renewed) {
+                LOGGER.warn("后台任务租约已丢失，旧 worker 的终态更新将被拒绝, jobId: {}", job.getJobId());
+            }
         } catch (RuntimeException e) {
             LOGGER.warn("后台任务心跳失败, jobId: {}", job.getJobId(), e);
         }

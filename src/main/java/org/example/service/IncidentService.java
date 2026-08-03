@@ -9,6 +9,7 @@ import org.example.dto.DiagnosisEvidence;
 import org.example.dto.DiagnosisRunRecord;
 import org.example.dto.IncidentRecord;
 import org.example.dto.IncidentSummary;
+import org.slf4j.MDC;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Service;
 
@@ -31,6 +32,7 @@ public class IncidentService {
     private final BackgroundJobRepository backgroundJobRepository;
     private final RunningJobRegistry runningJobRegistry;
     private final AppJobProperties jobProperties;
+    private final DiagnosisRunbookPolicy runbookPolicy = new DiagnosisRunbookPolicy();
 
     public IncidentService(IncidentStore incidentStore, ObjectMapper objectMapper) {
         this(incidentStore, objectMapper, null);
@@ -136,16 +138,8 @@ public class IncidentService {
 
     public DiagnosisRunRecord createDiagnosisRun(String incidentId, String alertContext) {
         IncidentRecord incident = requireIncident(incidentId);
-        long now = System.currentTimeMillis();
-        DiagnosisRunRecord run = new DiagnosisRunRecord();
-        run.setRunId("run-" + UUID.randomUUID().toString().substring(0, 12));
-        run.setIncidentId(incidentId);
-        run.setStatus("QUEUED");
-        run.setCreatedAt(now);
-        run.setAlertContext(alertContext);
-        run.setCurrentStep("等待诊断任务开始");
-        run.setProgressMessage("诊断任务已入队");
-        run.getEvidence().add(DiagnosisEvidence.of("alert_context", "注入给 AI 的告警上下文", alertContext, now));
+        DiagnosisRunRecord run = newDiagnosisRun(incident, alertContext, false);
+        long now = run.getCreatedAt();
 
         incident.getDiagnosisRuns().add(run);
         incident.setUpdatedAt(now);
@@ -164,27 +158,21 @@ public class IncidentService {
         if (backgroundJobRepository == null) {
             throw new IllegalStateException("后台任务仓库未配置");
         }
-        requireIncident(incidentId);
-        long now = System.currentTimeMillis();
-        DiagnosisRunRecord run = new DiagnosisRunRecord();
-        run.setRunId("run-" + UUID.randomUUID().toString().substring(0, 12));
-        run.setIncidentId(incidentId);
-        run.setStatus("QUEUED");
-        run.setCreatedAt(now);
-        run.setAlertContext(alertContext);
-        run.setCurrentStep("等待诊断任务开始");
-        run.setProgressMessage("诊断任务已入队");
-        DiagnosisEvidence initialEvidence = DiagnosisEvidence.of(
-                "alert_context", "注入给 AI 的告警上下文", alertContext, now);
-        initialEvidence.setId("ev-" + run.getRunId() + "-alert-context");
-        run.getEvidence().add(initialEvidence);
+        IncidentRecord incident = requireIncident(incidentId);
+        DiagnosisRunRecord run = newDiagnosisRun(incident, alertContext, true);
+        long now = run.getCreatedAt();
 
         Map<String, String> jobPayload = new LinkedHashMap<>();
         jobPayload.put("incidentId", incidentId);
+        jobPayload.put("tenantId", incident.getTenantId());
         jobPayload.put("runId", run.getRunId());
         jobPayload.put("alertContext", alertContext == null ? "" : alertContext);
         if (notBlank(alertId)) {
             jobPayload.put("alertId", alertId);
+        }
+        String traceparent = MDC.get("traceparent");
+        if (notBlank(traceparent)) {
+            jobPayload.put("traceparent", traceparent);
         }
         String payload;
         try {
@@ -224,6 +212,7 @@ public class IncidentService {
 
         DiagnosisRunRecord source = sourceOptional.get();
         DiagnosisRunRecord run = new DiagnosisRunRecord();
+        run.setTenantId(TenantContext.currentTenant());
         run.setRunId("run-" + UUID.randomUUID().toString().substring(0, 12));
         run.setIncidentId(incidentId);
         run.setStatus(source.getStatus());
@@ -232,6 +221,8 @@ public class IncidentService {
         run.setCompletedAt(now);
         run.setAlertContext(alertContext);
         run.setReport(source.getReport());
+        applyRunbookProgress(run,
+                runbookPolicy.progressFor(alertContext, source.getEvidence()), false);
         run.setErrorMessage(null);
         run.setCurrentTool(null);
         run.setCurrentStep("复用历史诊断报告");
@@ -294,6 +285,9 @@ public class IncidentService {
         }
         long now = System.currentTimeMillis();
         run.setStatus("RUNNING");
+        if (!"NOT_APPLICABLE".equals(run.getRunbookStatus())) {
+            run.setRunbookStatus("IN_PROGRESS");
+        }
         run.setStartedAt(now);
         run.setCurrentStep("正在拆解诊断任务");
         run.setProgressMessage("AI Ops 诊断已开始");
@@ -344,6 +338,8 @@ public class IncidentService {
                 run.setCurrentStep("已完成工具调用 " + evidence.getToolName());
                 run.setProgressMessage(evidence.getSummary());
                 run.getEvidence().add(evidence);
+                applyRunbookProgress(run,
+                        runbookPolicy.progressFor(run.getAlertContext(), run.getEvidence()), false);
                 return run;
             }
         }
@@ -381,6 +377,8 @@ public class IncidentService {
         if (run.getStartedAt() == 0L) {
             run.setStartedAt(now);
         }
+        applyRunbookProgress(run,
+                runbookPolicy.progressFor(run.getAlertContext(), run.getEvidence()), true);
         run.setCompletedAt(now);
         String guardedReport = diagnosisReportService == null
                 ? report
@@ -388,14 +386,16 @@ public class IncidentService {
         run.setReport(guardedReport);
         if (diagnosisReportService != null) {
             DiagnosisReportService.QualityAssessment quality =
-                    diagnosisReportService.evaluateQuality(guardedReport, run.getEvidence());
+                    diagnosisReportService.evaluateQuality(guardedReport, run.getEvidence(), run.getAlertContext());
             run.setQualityScore(quality.score());
             run.setQualityGrade(quality.grade());
             run.setQualitySummary(quality.summary());
             run.setQualityIssues(quality.issues());
-            run.setStatus(quality.score() < 60 ? "COMPLETED_WITH_GAPS" : "COMPLETED");
+            run.setStatus(quality.score() < 60 || "BLOCKED".equals(run.getRunbookStatus())
+                    ? "COMPLETED_WITH_GAPS" : "COMPLETED");
         } else {
-            run.setStatus("COMPLETED");
+            run.setStatus("BLOCKED".equals(run.getRunbookStatus())
+                    ? "COMPLETED_WITH_GAPS" : "COMPLETED");
         }
         run.setErrorMessage(null);
         run.setCurrentTool(null);
@@ -417,6 +417,9 @@ public class IncidentService {
             run.setStartedAt(now);
         }
         run.setStatus("FAILED");
+        if (!"NOT_APPLICABLE".equals(run.getRunbookStatus())) {
+            run.setRunbookStatus("BLOCKED");
+        }
         run.setCompletedAt(now);
         run.setErrorMessage(errorMessage);
         run.setCurrentTool(null);
@@ -476,6 +479,14 @@ public class IncidentService {
         return incidentStore.updateRunCaseArchive(incidentId, runId, archived, documentId, message);
     }
 
+    public DiagnosisRunRecord transitionRunCaseArchive(String incidentId,
+                                                       String runId,
+                                                       String targetStatus,
+                                                       String documentId,
+                                                       String message) {
+        return incidentStore.transitionRunCaseArchive(incidentId, runId, targetStatus, documentId, message);
+    }
+
     public List<DiagnosisRunRecord> markStaleRunsFailed(long nowMillis) {
         long timeoutMillis = incidentProperties.getStaleRunTimeoutMillis();
         if (timeoutMillis <= 0) {
@@ -511,6 +522,10 @@ public class IncidentService {
         if (!isCompletedRun(run)) {
             throw new IllegalStateException("只有已完成诊断才能进行人工确认: " + runId);
         }
+        if (!"UNREVIEWED".equals(run.getHumanReviewStatus())
+                && !reviewStatus.equals(run.getHumanReviewStatus())) {
+            throw new IllegalStateException("诊断已经完成其他人工审核，不允许再次修改: " + runId);
+        }
         long now = System.currentTimeMillis();
         run.setHumanReviewStatus(reviewStatus);
         run.setHumanReviewComment(comment);
@@ -544,6 +559,7 @@ public class IncidentService {
 
         appendMap(builder, "公共标签", payload.getCommonLabels());
         appendMap(builder, "公共注解", payload.getCommonAnnotations());
+        appendCorrelationMetadata(builder, payload);
 
         builder.append("告警列表:").append('\n');
         if (payload.getAlerts() != null) {
@@ -572,6 +588,7 @@ public class IncidentService {
     private IncidentRecord newIncident(AlertPayload payload, String aggregationKey, long now) {
         IncidentRecord record = new IncidentRecord();
         record.setId("inc-" + UUID.randomUUID().toString().substring(0, 12));
+        record.setTenantId(TenantContext.currentTenant());
         record.setAggregationKey(aggregationKey);
         record.setTitle(title(payload));
         record.setSeverity(severity(payload));
@@ -711,6 +728,10 @@ public class IncidentService {
     }
 
     private String aggregationKey(AlertPayload payload) {
+        String correlationKey = AlertIdentity.correlationKey(payload, objectMapper);
+        if (notBlank(correlationKey)) {
+            return correlationKey;
+        }
         AlertPayload.Alert alert = firstAlert(payload);
         if (alert != null && notBlank(alert.getFingerprint())) {
             return "fingerprint:" + alert.getFingerprint();
@@ -786,6 +807,15 @@ public class IncidentService {
     }
 
     private String title(AlertPayload payload) {
+        if (alertCount(payload) > 1) {
+            String firstSummary = value(payload.getCommonAnnotations(), "summary");
+            if (!notBlank(firstSummary)) {
+                AlertPayload.Alert first = firstAlert(payload);
+                firstSummary = first == null ? "" : value(first.getAnnotations(), "summary");
+            }
+            return "多告警关联(" + alertCount(payload) + ")"
+                    + (notBlank(firstSummary) ? ": " + firstSummary : "");
+        }
         String summary = value(payload.getCommonAnnotations(), "summary");
         if (notBlank(summary)) {
             return summary;
@@ -809,6 +839,17 @@ public class IncidentService {
     }
 
     private String severity(AlertPayload payload) {
+        if (alertCount(payload) > 1) {
+            return payload.getAlerts().stream()
+                    .filter(alert -> alert != null)
+                    .map(alert -> value(alert.getLabels(), "severity"))
+                    .filter(this::notBlank)
+                    .max(Comparator.comparingInt(this::severityRank))
+                    .orElseGet(() -> {
+                        String common = value(payload.getCommonLabels(), "severity");
+                        return notBlank(common) ? common : "unknown";
+                    });
+        }
         String severity = value(payload.getCommonLabels(), "severity");
         if (notBlank(severity)) {
             return severity;
@@ -832,6 +873,29 @@ public class IncidentService {
             return null;
         }
         return payload.getAlerts().get(0);
+    }
+
+    private int alertCount(AlertPayload payload) {
+        return payload == null || payload.getAlerts() == null ? 0 : payload.getAlerts().size();
+    }
+
+    private int severityRank(String severity) {
+        return switch (value(severity).toLowerCase(Locale.ROOT)) {
+            case "critical", "page", "fatal" -> 4;
+            case "error", "high" -> 3;
+            case "warning", "warn", "medium" -> 2;
+            case "info", "low" -> 1;
+            default -> 0;
+        };
+    }
+
+    private void appendCorrelationMetadata(StringBuilder builder, AlertPayload payload) {
+        if (alertCount(payload) <= 1) {
+            return;
+        }
+        builder.append("多告警关联: true").append('\n');
+        builder.append("关联告警数量: ").append(alertCount(payload)).append('\n');
+        builder.append("关联分组键: ").append(value(payload.getGroupKey())).append('\n');
     }
 
     private void appendMap(StringBuilder builder, String title, Map<String, String> values) {
@@ -861,6 +925,49 @@ public class IncidentService {
 
     private String value(String value) {
         return value == null ? "" : value;
+    }
+
+    private DiagnosisRunRecord newDiagnosisRun(IncidentRecord incident,
+                                               String alertContext,
+                                               boolean scopedEvidenceId) {
+        long now = System.currentTimeMillis();
+        DiagnosisRunRecord run = new DiagnosisRunRecord();
+        run.setTenantId(TenantContext.currentTenant());
+        run.setRunId("run-" + UUID.randomUUID().toString().substring(0, 12));
+        run.setIncidentId(incident.getId());
+        run.setStatus("QUEUED");
+        run.setCreatedAt(now);
+        run.setAlertContext(alertContext);
+        applyRunbookProgress(run, runbookPolicy.progressFor(alertContext, List.of()), false);
+        run.setCurrentStep("等待诊断任务开始");
+        run.setProgressMessage("诊断任务已入队");
+        DiagnosisEvidence initialEvidence = DiagnosisEvidence.of(
+                "alert_context", "注入给 AI 的告警上下文", alertContext, now);
+        if (scopedEvidenceId) {
+            initialEvidence.setId("ev-" + run.getRunId() + "-alert-context");
+        }
+        run.getEvidence().add(initialEvidence);
+        return run;
+    }
+
+    private void applyRunbookProgress(DiagnosisRunRecord run,
+                                      DiagnosisRunbookPolicy.Progress progress,
+                                      boolean terminal) {
+        run.setRunbookId(progress.runbookId());
+        run.setRunbookStep(progress.completedStep());
+        run.setRunbookRequiredTools(progress.requiredTools());
+        run.setRunbookCompletedTools(progress.completedTools());
+        if ("NOT_APPLICABLE".equals(progress.status())) {
+            run.setRunbookStatus(progress.status());
+        } else if ("NOT_STARTED".equals(progress.status()) && "QUEUED".equals(run.getStatus())) {
+            run.setRunbookStatus("NOT_STARTED");
+        } else if (terminal && !"COMPLETED".equals(progress.status())) {
+            run.setRunbookStatus("BLOCKED");
+        } else if ("COMPLETED".equals(progress.status())) {
+            run.setRunbookStatus("COMPLETED");
+        } else {
+            run.setRunbookStatus("IN_PROGRESS");
+        }
     }
 
     private boolean notBlank(String value) {

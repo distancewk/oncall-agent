@@ -23,6 +23,7 @@ import org.springframework.ai.tool.ToolCallback;
 import org.springframework.ai.tool.ToolCallbackProvider;
 import org.springframework.ai.tool.definition.ToolDefinition;
 import org.springframework.test.util.ReflectionTestUtils;
+import org.slf4j.MDC;
 
 import java.time.Duration;
 import java.util.Arrays;
@@ -116,8 +117,38 @@ class ChatServiceTest {
         assertTrue(prompt.contains("不要调用 tavily_search"));
         assertTrue(prompt.contains("当前环境未配置联网查询"));
         assertTrue(prompt.contains("普通聊天不直接查询业务数据库"));
+        assertTrue(prompt.contains("[来源: <id>]"));
+        assertTrue(prompt.contains("禁止猜测或编造"));
         assertFalse(prompt.contains("可以获取当前时间、查询天气信息"));
         assertFalse(prompt.contains("当用户需要查询业务系统数据库结构或数据时"));
+    }
+
+    @Test
+    void executeChat_shouldReplaceUncitedInternalAnswerWithGroundingFallback() throws Exception {
+        ReactAgent agent = mock(ReactAgent.class);
+        when(agent.call("查询内部发布流程"))
+                .thenReturn(new AssistantMessage("发布前直接执行上线即可。"));
+
+        String answer = chatService.executeChat(agent, "查询内部发布流程");
+
+        assertEquals(new RagGroundingPolicy().fallbackMessage(), answer);
+    }
+
+    @Test
+    void executeChat_shouldRejectCitationNotReturnedByInternalDocsTool() throws Exception {
+        ReactAgent agent = mock(ReactAgent.class);
+        when(agent.call("查询内部发布流程"))
+                .thenReturn(new AssistantMessage("按文档执行灰度发布。[来源: forged-id]"));
+        MDC.put("trace_id", "chat-rag-test");
+        try {
+            RagCitationRegistry.recordIds(List.of("doc-release"));
+            String answer = chatService.executeChat(agent, "查询内部发布流程");
+
+            assertEquals(new RagGroundingPolicy().fallbackMessage(), answer);
+        } finally {
+            RagCitationRegistry.clearCurrent();
+            MDC.clear();
+        }
     }
 
     @Test

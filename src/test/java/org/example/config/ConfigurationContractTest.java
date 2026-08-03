@@ -39,6 +39,22 @@ class ConfigurationContractTest {
         assertTrue(yaml.contains("search-ef: ${RAG_SEARCH_EF:64}"));
         assertTrue(yaml.contains("enabled: ${APP_SECURITY_ENABLED:true}"));
         assertTrue(yaml.contains("webhook-secret: ${APP_WEBHOOK_SECRET:}"));
+        assertTrue(yaml.contains("admin-token: ${APP_ADMIN_TOKEN:}"));
+        assertTrue(yaml.contains("webhook-signing-secret: ${APP_WEBHOOK_SIGNING_SECRET:${APP_WEBHOOK_SECRET:}}"));
+        assertTrue(yaml.contains("session-signing-secret: ${APP_SECURITY_SESSION_SIGNING_SECRET:}"));
+        assertTrue(yaml.contains("machine-token-enabled: ${APP_SECURITY_MACHINE_TOKEN_ENABLED:false}"));
+        assertTrue(yaml.contains(
+                "machine-token-signing-secret: ${APP_SECURITY_MACHINE_TOKEN_SIGNING_SECRET:}"));
+        assertTrue(yaml.contains("machine-token-require-redis: ${APP_SECURITY_MACHINE_TOKEN_REQUIRE_REDIS:false}"));
+        assertTrue(yaml.contains(
+                "security-audit-retention-days: ${APP_LIFECYCLE_SECURITY_AUDIT_RETENTION_DAYS:0}"));
+        assertTrue(yaml.contains("webhook-replay-require-redis: ${APP_WEBHOOK_REPLAY_REQUIRE_REDIS:false}"));
+        assertTrue(yaml.contains("include: health,info,metrics"));
+        assertTrue(yaml.contains("application: superbizagent"));
+        assertTrue(yaml.contains("model-usage-enabled: ${APP_MODEL_USAGE_ENABLED:true}"));
+        assertTrue(yaml.contains("default-model: ${APP_MODEL_NAME:qwen3-max}"));
+        assertTrue(yaml.contains("input-cost-per-1k-tokens: ${APP_MODEL_INPUT_COST_PER_1K_TOKENS:0}"));
+        assertTrue(yaml.contains("include: readinessState,db,redis"));
         assertTrue(yaml.contains("retry-max-attempts: ${APP_RESILIENCE_RETRY_MAX_ATTEMPTS:1}"));
         assertTrue(yaml.contains("retry-max-attempts: ${APP_PROMETHEUS_RETRY_MAX_ATTEMPTS:2}"));
         assertTrue(yaml.contains("retry-max-attempts: ${APP_CLS_RETRY_MAX_ATTEMPTS:2}"));
@@ -129,6 +145,11 @@ class ConfigurationContractTest {
         assertTrue(yaml.contains("mock-enabled: false"));
         assertTrue(yaml.contains("cls:"));
         assertTrue(yaml.contains("jdbc-initialization-fail-timeout-millis: ${APP_INCIDENT_JDBC_INITIALIZATION_FAIL_TIMEOUT_MILLIS:30000}"));
+        assertTrue(yaml.contains("webhook-replay-require-redis: true"));
+        assertTrue(yaml.contains("machine-token-enabled: true"));
+        assertTrue(yaml.contains("machine-token-require-redis: true"));
+        assertTrue(yaml.contains(
+                "security-audit-retention-days: ${APP_LIFECYCLE_SECURITY_AUDIT_RETENTION_DAYS:365}"));
     }
 
     @Test

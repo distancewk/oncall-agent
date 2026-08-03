@@ -23,6 +23,8 @@ public class DiagnosisReportService {
     private static final int SUMMARY_LIMIT = 180;
     private static final String TOOL_DUPLICATE_SKIPPED = "TOOL_DUPLICATE_SKIPPED";
     private static final String TOOL_BUDGET_EXCEEDED = "TOOL_BUDGET_EXCEEDED";
+    private final DiagnosisRunbookPolicy runbookPolicy = new DiagnosisRunbookPolicy();
+    private final ClaimSupportService claimSupportService = new ClaimSupportService();
 
     public static boolean isFinalReportCandidate(String report) {
         if (report == null || report.isBlank()) {
@@ -141,6 +143,11 @@ public class DiagnosisReportService {
     }
 
     public QualityAssessment evaluateQuality(String report, List<DiagnosisEvidence> evidence) {
+        return evaluateQuality(report, evidence, null);
+    }
+
+    public QualityAssessment evaluateQuality(String report, List<DiagnosisEvidence> evidence,
+                                             String alertContext) {
         String safeReport = stripExistingValidationSection(report == null ? "" : report).trim();
         EvidenceReferenceContext refs = evidenceReferenceContext(safeReport, evidence);
 
@@ -193,6 +200,31 @@ public class DiagnosisReportService {
                 && !(containsJvmClaim && (hasSuccessfulJvmText || hasSuccessfulJvmMetric))) {
             issues.add("日志/异常结论缺少成功日志 evidence");
             score -= 15;
+        }
+        List<String> uncitedClaimLines = findUncitedClaimLines(safeReport);
+        if (!uncitedClaimLines.isEmpty()) {
+            issues.add("存在未逐条引用 evidence 的事实陈述");
+            score = Math.min(score, 59);
+        }
+        List<String> unsupportedClaimLines = claimSupportService.findUnsupportedClaims(
+                safeReport, refs.usableEvidenceById());
+        if (!unsupportedClaimLines.isEmpty()) {
+            issues.add("存在 evidence 内容无法支持的事实陈述");
+            score = Math.min(score, 59);
+        }
+        List<String> runbookTools = runbookPolicy.requiredTools(alertContext);
+        for (String requiredTool : runbookTools) {
+            if (!hasCitedSuccessfulTool(refs.knownCitedIds(), refs.usableEvidenceById(), requiredTool)) {
+                issues.add("Runbook 证据缺口: 缺少成功且已引用的 " + requiredTool + " evidence");
+                score = Math.min(score, 59);
+            }
+        }
+        if (!runbookTools.isEmpty()) {
+            DiagnosisRunbookPolicy.Progress progress = runbookPolicy.progressFor(alertContext, evidence);
+            if (!"COMPLETED".equals(progress.status())) {
+                issues.add("Runbook 执行缺口: 未按确定性首轮顺序完成必要步骤");
+                score = Math.min(score, 59);
+            }
         }
         long failedToolEvidence = failedToolEvidence(evidence).size();
         if (!refs.toolEvidence().isEmpty() && failedToolEvidence > 0) {
@@ -273,6 +305,16 @@ public class DiagnosisReportService {
         if (evidenceById.isEmpty()) {
             missing.add("没有成功工具 evidence");
         }
+        List<String> uncitedClaimLines = findUncitedClaimLines(report);
+        if (!uncitedClaimLines.isEmpty()) {
+            missing.add("存在未逐条引用 evidence 的事实陈述: " + String.join("；", uncitedClaimLines));
+        }
+        List<String> unsupportedClaimLines = claimSupportService.findUnsupportedClaims(
+                report, evidenceById);
+        if (!unsupportedClaimLines.isEmpty()) {
+            missing.add("存在 evidence 内容无法支持的事实陈述: "
+                    + String.join("；", unsupportedClaimLines));
+        }
         if (hasCitedMockEvidence(knownCitedIds, evidenceById)) {
             missing.add("报告引用了 Mock 数据，缺少真实运行数据");
         }
@@ -293,6 +335,52 @@ public class DiagnosisReportService {
             missing.add("日志/异常结论缺少成功的 queryLogs evidence");
         }
         return missing;
+    }
+
+    /**
+     * Finds factual statements in the diagnosis sections that have no inline
+     * evidence reference. Explicit uncertainty and missing-evidence statements
+     * are intentionally exempt because they describe a limitation rather than
+     * assert an observed fact.
+     */
+    private List<String> findUncitedClaimLines(String report) {
+        List<String> uncited = new ArrayList<>();
+        boolean claimSection = false;
+        String[] lines = value(report).split("\\R");
+        for (String line : lines) {
+            String trimmed = line.trim();
+            if (trimmed.startsWith("## ")) {
+                claimSection = trimmed.startsWith("## 告警根因分析")
+                        || trimmed.startsWith("## 处理方案执行")
+                        || trimmed.startsWith("## 结论");
+                continue;
+            }
+            if (!claimSection || trimmed.isBlank() || trimmed.startsWith("|")
+                    || trimmed.startsWith("```") || trimmed.startsWith("---")) {
+                continue;
+            }
+            if (trimmed.startsWith("### ")) {
+                if (trimmed.contains("置信度") || trimmed.contains("缺失证据")) {
+                    claimSection = false;
+                }
+                continue;
+            }
+            if (trimmed.startsWith("#")) {
+                continue;
+            }
+            if (EVIDENCE_REF_PATTERN.matcher(trimmed).find() || isUncertaintyStatement(trimmed)) {
+                continue;
+            }
+            uncited.add(compact(trimmed, 120));
+        }
+        return uncited;
+    }
+
+    private boolean isUncertaintyStatement(String line) {
+        return containsAny(line,
+                "证据不足", "没有足够证据", "无法确认", "暂不确认", "暂不下结论",
+                "无法完成进一步确认", "等待人工复核", "待补充证据", "未能确认",
+                "建议观察", "建议先观察", "建议人工复核");
     }
 
     private String stripExistingValidationSection(String report) {

@@ -5,6 +5,7 @@ import java.util.List;
 
 public class DiagnosisRunRecord {
 
+    private String tenantId = "default";
     private String runId;
     private String incidentId;
     private String status = "QUEUED";
@@ -17,6 +18,11 @@ public class DiagnosisRunRecord {
     private String currentStep;
     private String progressMessage;
     private String currentTool;
+    private String runbookId;
+    private String runbookStatus = "NOT_STARTED";
+    private int runbookStep;
+    private List<String> runbookRequiredTools = new ArrayList<>();
+    private List<String> runbookCompletedTools = new ArrayList<>();
     private String reusedFromRunId;
     private String reuseReason;
     private double reuseConfidence;
@@ -29,10 +35,19 @@ public class DiagnosisRunRecord {
     private String humanReviewComment;
     private long humanReviewedAt;
     private boolean caseArchived;
+    private String caseArchiveStatus = "NOT_REQUESTED";
     private String caseDocumentId;
     private String caseArchiveMessage;
     private long version;
     private List<DiagnosisEvidence> evidence = new ArrayList<>();
+
+    public String getTenantId() {
+        return tenantId;
+    }
+
+    public void setTenantId(String tenantId) {
+        this.tenantId = tenantId == null || tenantId.isBlank() ? "default" : tenantId;
+    }
 
     public String getRunId() {
         return runId;
@@ -138,6 +153,49 @@ public class DiagnosisRunRecord {
         this.currentTool = currentTool;
     }
 
+    public String getRunbookId() {
+        return runbookId;
+    }
+
+    public void setRunbookId(String runbookId) {
+        this.runbookId = runbookId;
+    }
+
+    public String getRunbookStatus() {
+        return runbookStatus;
+    }
+
+    public void setRunbookStatus(String runbookStatus) {
+        this.runbookStatus = runbookStatus == null || runbookStatus.isBlank()
+                ? "NOT_STARTED" : runbookStatus;
+    }
+
+    public int getRunbookStep() {
+        return runbookStep;
+    }
+
+    public void setRunbookStep(int runbookStep) {
+        this.runbookStep = Math.max(0, runbookStep);
+    }
+
+    public List<String> getRunbookRequiredTools() {
+        return runbookRequiredTools;
+    }
+
+    public void setRunbookRequiredTools(List<String> runbookRequiredTools) {
+        this.runbookRequiredTools = runbookRequiredTools == null
+                ? new ArrayList<>() : new ArrayList<>(runbookRequiredTools);
+    }
+
+    public List<String> getRunbookCompletedTools() {
+        return runbookCompletedTools;
+    }
+
+    public void setRunbookCompletedTools(List<String> runbookCompletedTools) {
+        this.runbookCompletedTools = runbookCompletedTools == null
+                ? new ArrayList<>() : new ArrayList<>(runbookCompletedTools);
+    }
+
     public String getReusedFromRunId() {
         return reusedFromRunId;
     }
@@ -232,6 +290,15 @@ public class DiagnosisRunRecord {
 
     public void setCaseArchived(boolean caseArchived) {
         this.caseArchived = caseArchived;
+    }
+
+    public String getCaseArchiveStatus() {
+        return caseArchiveStatus;
+    }
+
+    public void setCaseArchiveStatus(String caseArchiveStatus) {
+        this.caseArchiveStatus = caseArchiveStatus == null || caseArchiveStatus.isBlank()
+                ? "NOT_REQUESTED" : caseArchiveStatus;
     }
 
     public String getCaseDocumentId() {

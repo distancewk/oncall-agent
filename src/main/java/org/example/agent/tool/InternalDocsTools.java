@@ -3,6 +3,8 @@ package org.example.agent.tool;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.example.exception.DependencyUnavailableException;
 import org.example.service.DiagnosisEvidenceRecorder;
+import org.example.service.RagCitationRegistry;
+import org.example.service.RagQueryRewritePolicy;
 import org.example.service.VectorSearchService;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -29,6 +31,7 @@ public class InternalDocsTools {
     public static final String TOOL_QUERY_INTERNAL_DOCS = "queryInternalDocs";
     
     private final VectorSearchService vectorSearchService;
+    private final RagQueryRewritePolicy queryRewritePolicy = new RagQueryRewritePolicy();
     
     @Value("${rag.top-k:3}")
     private int topK = 3; // 默认值
@@ -56,7 +59,8 @@ public class InternalDocsTools {
     @Tool(description = "Use this tool to search internal documentation and knowledge base for relevant information. " +
             "It performs RAG (Retrieval-Augmented Generation) to find similar documents and extract processing steps. " +
             "This is useful when you need to understand internal procedures, best practices, or step-by-step guides " +
-            "stored in the company's documentation.")
+            "stored in the company's documentation. Each result includes a stable id; cite that exact id as [来源: id] " +
+            "when using a result in the final answer.")
     public String queryInternalDocs(
             @ToolParam(description = "Search query describing what information you are looking for") 
             String query) {
@@ -72,13 +76,17 @@ public class InternalDocsTools {
 
     private String doQueryInternalDocs(String query) {
         try {
+            String retrievalQuery = queryRewritePolicy.rewrite(query);
             // 使用向量搜索服务检索相关文档
             List<VectorSearchService.SearchResult> searchResults = 
-                    vectorSearchService.searchSimilarDocuments(query, topK);
+                    vectorSearchService.searchSimilarDocuments(retrievalQuery, topK);
             
             if (searchResults.isEmpty()) {
                 return "{\"status\": \"no_results\", \"message\": \"No relevant documents found in the knowledge base.\"}";
             }
+            RagCitationRegistry.recordIds(searchResults.stream()
+                    .map(VectorSearchService.SearchResult::getId)
+                    .toList());
             
             // 将搜索结果转换为 JSON 格式
             String resultJson = objectMapper.writeValueAsString(searchResults);
@@ -100,6 +108,7 @@ public class InternalDocsTools {
         try {
             Map<String, Object> params = new HashMap<>();
             params.put("query", query);
+            params.put("retrievalQuery", queryRewritePolicy.rewrite(query));
             params.put("topK", topK);
             return objectMapper.writeValueAsString(params);
         } catch (Exception e) {

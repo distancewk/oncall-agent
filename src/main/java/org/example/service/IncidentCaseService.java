@@ -28,6 +28,12 @@ import java.util.Optional;
 import java.util.SortedMap;
 import java.util.UUID;
 
+/**
+ * 管理历史故障案例的沉淀与召回。
+ *
+ * <p>案例写入 Milvus 前会校验诊断已经完成、报告非空且通过人工确认；召回结果会
+ * 作为诊断证据追加到当前运行上下文，依赖不可用时也会保留失败证据。</p>
+ */
 @Service
 public class IncidentCaseService {
 
@@ -59,6 +65,14 @@ public class IncidentCaseService {
         this.insertHelper = insertHelper;
     }
 
+    /**
+     * 将事件最新的已完成且已人工确认诊断报告写入历史案例库。
+     *
+     * @param incidentId 事件 ID
+     * @return 历史案例写入结果及生成的文档 ID
+     * @throws IllegalArgumentException 事件不存在时抛出
+     * @throws IllegalStateException 没有可归档报告或报告未被人工确认时抛出
+     */
     public ArchiveResult archiveCase(String incidentId) {
         IncidentRecord incident = incidentService.getIncident(incidentId)
                 .orElseThrow(() -> new IllegalArgumentException("Incident 不存在: " + incidentId));
@@ -70,6 +84,18 @@ public class IncidentCaseService {
         return archiveCase(incident, run);
     }
 
+    /**
+     * 将指定诊断运行的报告写入历史案例库。
+     *
+     * <p>与按事件选择最新运行的重载不同，此方法只归档指定的 {@code runId}，并要求该
+     * 运行已完成、报告非空且人工审核状态为 {@code CONFIRMED}。</p>
+     *
+     * @param incidentId 事件 ID
+     * @param runId 要归档的诊断运行 ID
+     * @return 历史案例写入结果及生成的文档 ID
+     * @throws IllegalArgumentException 事件或诊断运行不存在时抛出
+     * @throws IllegalStateException 运行未完成、没有报告或未被人工确认时抛出
+     */
     public ArchiveResult archiveCase(String incidentId, String runId) {
         IncidentRecord incident = incidentService.getIncident(incidentId)
                 .orElseThrow(() -> new IllegalArgumentException("Incident 不存在: " + incidentId));
@@ -87,6 +113,7 @@ public class IncidentCaseService {
     }
 
     private ArchiveResult archiveCase(IncidentRecord incident, DiagnosisRunRecord run) {
+        assertCurrentTenant(incident);
         CaseDocument document = buildCaseDocument(incident, run);
         upsertCaseDocument(document);
 
@@ -105,6 +132,7 @@ public class IncidentCaseService {
     }
 
     public List<VectorSearchService.SearchResult> findSimilarCases(IncidentRecord incident, int topK) {
+        assertCurrentTenant(incident);
         String query = buildIncidentCaseQuery(incident);
         return vectorSearchService.searchIncidentCases(query, normalizeTopK(topK));
     }
@@ -247,6 +275,7 @@ public class IncidentCaseService {
         Map<String, Object> metadata = new HashMap<>();
         metadata.put("_source", "incident_case:" + incident.getId());
         metadata.put("doc_type", MilvusConstants.DOC_TYPE_INCIDENT_CASE);
+        metadata.put("tenant_id", TenantContext.normalize(incident.getTenantId()));
         metadata.put("incident_id", incident.getId());
         metadata.put("run_id", run.getRunId());
         metadata.put("alertname", value(alertName));
@@ -420,6 +449,13 @@ public class IncidentCaseService {
 
     private String escapeJson(String value) {
         return value(value).replace("\\", "\\\\").replace("\"", "\\\"");
+    }
+
+    private void assertCurrentTenant(IncidentRecord incident) {
+        String incidentTenant = TenantContext.normalize(incident.getTenantId());
+        if (!TenantContext.currentTenant().equals(incidentTenant)) {
+            throw new IllegalStateException("Incident 不属于当前租户: " + incident.getId());
+        }
     }
 
     private record CaseDocument(String id, String content, Map<String, Object> metadata) {

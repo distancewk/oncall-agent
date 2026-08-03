@@ -28,6 +28,7 @@ public class ThreadPoolConfig {
         executor.setQueueCapacity(100);
         // 线程前缀
         executor.setThreadNamePrefix("ChatExecutor-");
+        executor.setTaskDecorator(MdcContext::wrapRunnable);
         // 拒绝策略：由调用者所在的线程执行
         executor.setRejectedExecutionHandler(new ThreadPoolExecutor.CallerRunsPolicy());
         // 初始化
@@ -42,6 +43,7 @@ public class ThreadPoolConfig {
         executor.setMaxPoolSize(2);
         executor.setQueueCapacity(100);
         executor.setThreadNamePrefix("memory-task-");
+        executor.setTaskDecorator(MdcContext::wrapRunnable);
         executor.initialize();
         return executor;
     }

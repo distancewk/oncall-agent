@@ -7,6 +7,7 @@ import lombok.Setter;
 @Setter
 public class BackgroundJobRecord {
 
+    private String tenantId = "default";
     private String jobId;
     private String jobType;
     private String businessKey;
@@ -16,6 +17,7 @@ public class BackgroundJobRecord {
     private int maxAttempts;
     private long availableAt;
     private String leaseOwner;
+    private String leaseToken;
     private long leaseExpiresAt;
     private long heartbeatAt;
     private boolean cancelRequested;

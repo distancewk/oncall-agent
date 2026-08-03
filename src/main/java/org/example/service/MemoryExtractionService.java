@@ -40,6 +40,9 @@ public class MemoryExtractionService {
     @Autowired(required = false)
     private DependencyGuard dependencyGuard;
 
+    @Autowired(required = false)
+    private ObservabilityMetrics observabilityMetrics;
+
     /**
      * 提炼对话并存储
      * @param sessionId 会话ID
@@ -153,20 +156,40 @@ public class MemoryExtractionService {
     }
 
     private ChatResponse callChatModel(Prompt prompt) {
-        if (dependencyGuard == null) {
-            return dashScopeChatModel.call(prompt);
+        long startedNanos = System.nanoTime();
+        try {
+            ChatResponse response;
+            if (dependencyGuard == null) {
+                response = dashScopeChatModel.call(prompt);
+            } else {
+                response = dependencyGuard.execute("dashscope-chat", "memoryExtraction",
+                        () -> dashScopeChatModel.call(prompt),
+                        error -> {
+                            if (error instanceof DependencyUnavailableException unavailable) {
+                                throw unavailable;
+                            }
+                            if (error instanceof RuntimeException runtimeException) {
+                                throw runtimeException;
+                            }
+                            throw new RuntimeException(error);
+                        });
+            }
+            recordModelCall("memoryExtraction", "SUCCESS", response, startedNanos);
+            return response;
+        } catch (RuntimeException e) {
+            recordModelCall("memoryExtraction", "ERROR", null, startedNanos);
+            throw e;
         }
-        return dependencyGuard.execute("dashscope-chat", "memoryExtraction",
-                () -> dashScopeChatModel.call(prompt),
-                error -> {
-                    if (error instanceof DependencyUnavailableException unavailable) {
-                        throw unavailable;
-                    }
-                    if (error instanceof RuntimeException runtimeException) {
-                        throw runtimeException;
-                    }
-                    throw new RuntimeException(error);
-                });
+    }
+
+    private void recordModelCall(String operation,
+                                 String outcome,
+                                 ChatResponse response,
+                                 long startedNanos) {
+        if (observabilityMetrics != null) {
+            observabilityMetrics.recordModelCall(operation, null, outcome,
+                    System.nanoTime() - startedNanos, response);
+        }
     }
 
 }

@@ -8,6 +8,7 @@ import org.example.dto.AlertPayload;
 import org.example.dto.DiagnosisEvidence;
 import org.example.dto.DiagnosisRunRecord;
 import org.example.dto.IncidentRecord;
+import org.example.config.MdcContext;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -32,6 +33,7 @@ public class MetricTrendPrefetchService {
 
     private final QueryMetricsTools queryMetricsTools;
     private final DiagnosisEvidenceRecorder diagnosisEvidenceRecorder;
+    private final DiagnosisRunbookPolicy runbookPolicy = new DiagnosisRunbookPolicy();
     private final Executor prefetchExecutor;
     private final ObjectMapper objectMapper = new ObjectMapper();
 
@@ -55,19 +57,64 @@ public class MetricTrendPrefetchService {
             return alertContext;
         }
 
-        List<CompletableFuture<TrendObservation>> futures = new ArrayList<>();
-        for (MetricTarget target : targets) {
-            for (String window : PREFETCH_WINDOWS) {
-                futures.add(CompletableFuture.supplyAsync(
-                        () -> queryTrend(incident, run, target, window), prefetchExecutor));
-            }
+        List<MetricQueryRequest> requests = buildRequests(alertContext, targets);
+        if (requests.isEmpty()) {
+            return alertContext;
         }
-        List<TrendObservation> observations = futures.stream().map(CompletableFuture::join).toList();
+        List<TrendObservation> observations;
+        if (diagnosisEvidenceRecorder != null
+                && !runbookPolicy.requiredTools(alertContext).isEmpty()
+                && notBlank(incident.getId()) && notBlank(run.getRunId())) {
+            // Recorder-enforced Runbook order and concurrent completion order are
+            // incompatible. Recognized Runbooks therefore prefetch serially in
+            // their declared step order; generic alerts retain concurrency.
+            observations = requests.stream()
+                    .map(request -> queryTrend(incident, run, request.target(), request.window()))
+                    .toList();
+        } else {
+            List<CompletableFuture<TrendObservation>> futures = requests.stream()
+                    .map(request -> CompletableFuture.supplyAsync(
+                            MdcContext.wrapSupplier(
+                                    () -> queryTrend(incident, run, request.target(), request.window())),
+                            prefetchExecutor))
+                    .toList();
+            observations = futures.stream().map(CompletableFuture::join).toList();
+        }
 
         if (observations.isEmpty()) {
             return alertContext;
         }
         return alertContext + "\n\n" + buildContextBlock(observations);
+    }
+
+    private List<MetricQueryRequest> buildRequests(String alertContext, Set<MetricTarget> targets) {
+        if (runbookPolicy.requiredTools(alertContext).isEmpty()) {
+            List<MetricQueryRequest> requests = new ArrayList<>();
+            for (MetricTarget target : targets) {
+                for (String window : PREFETCH_WINDOWS) {
+                    requests.add(new MetricQueryRequest(target, window));
+                }
+            }
+            return requests;
+        }
+
+        Set<String> availableMetrics = targets.stream()
+                .map(MetricTarget::metric)
+                .collect(java.util.stream.Collectors.toCollection(LinkedHashSet::new));
+        List<DiagnosisRunbookPolicy.MetricQuery> queries = runbookPolicy.prefetchQueries(
+                alertContext, availableMetrics);
+        Map<String, MetricTarget> firstTargetByMetric = new java.util.LinkedHashMap<>();
+        for (MetricTarget target : targets) {
+            firstTargetByMetric.putIfAbsent(target.metric(), target);
+        }
+        List<MetricQueryRequest> requests = new ArrayList<>();
+        for (DiagnosisRunbookPolicy.MetricQuery query : queries) {
+            MetricTarget target = firstTargetByMetric.get(query.metric());
+            if (target != null) {
+                requests.add(new MetricQueryRequest(target, query.window()));
+            }
+        }
+        return requests;
     }
 
     private TrendObservation queryTrend(IncidentRecord incident,
@@ -205,7 +252,7 @@ public class MetricTrendPrefetchService {
         if (containsAny(text, "error", "errors", "5xx", "5..", "错误率", "失败率")) {
             metrics.add("error_rate");
         }
-        if (containsAny(text, "p99", "latency", "slowresponse", "响应时间", "延迟")) {
+        if (containsAny(text, "p99", "latency", "slowresponse", "slow sql", "slowsql", "慢sql", "慢 sql", "响应时间", "延迟")) {
             metrics.add("p99_latency");
         }
         if (containsAny(text, "restart", "restarts", "crashloop", "oomkilled", "重启")) {
@@ -267,6 +314,9 @@ public class MetricTrendPrefetchService {
     }
 
     private record MetricTarget(String metric, String service, String instance) {
+    }
+
+    private record MetricQueryRequest(MetricTarget target, String window) {
     }
 
     private record TrendObservation(MetricTarget target,

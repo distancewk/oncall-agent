@@ -7,6 +7,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import org.example.dto.BackgroundJobRecord;
 import org.example.dto.DiagnosisRunRecord;
 import org.example.dto.IncidentRecord;
+import org.example.config.MdcContext;
 import org.springframework.ai.tool.ToolCallback;
 import org.springframework.ai.tool.ToolCallbackProvider;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -18,6 +19,7 @@ import java.util.List;
 import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.Executor;
+import java.util.function.Supplier;
 
 @Service
 public class DiagnosisJobHandler implements BackgroundJobHandler {
@@ -32,6 +34,7 @@ public class DiagnosisJobHandler implements BackgroundJobHandler {
     private final BackgroundJobRepository jobRepository;
     private final AlertService alertService;
     private final Executor diagnosisPrefetchExecutor;
+    private final ObservabilityMetrics observabilityMetrics;
 
     @Autowired
     public DiagnosisJobHandler(ObjectMapper objectMapper,
@@ -43,7 +46,8 @@ public class DiagnosisJobHandler implements BackgroundJobHandler {
                                @Nullable MetricTrendPrefetchService metricTrendPrefetchService,
                                BackgroundJobRepository jobRepository,
                                @Nullable AlertService alertService,
-                               @Qualifier("diagnosisPrefetchExecutor") @Nullable Executor diagnosisPrefetchExecutor) {
+                               @Qualifier("diagnosisPrefetchExecutor") @Nullable Executor diagnosisPrefetchExecutor,
+                               @Nullable ObservabilityMetrics observabilityMetrics) {
         this.objectMapper = objectMapper;
         this.incidentService = incidentService;
         this.aiOpsService = aiOpsService;
@@ -54,6 +58,7 @@ public class DiagnosisJobHandler implements BackgroundJobHandler {
         this.jobRepository = jobRepository;
         this.alertService = alertService;
         this.diagnosisPrefetchExecutor = diagnosisPrefetchExecutor == null ? Runnable::run : diagnosisPrefetchExecutor;
+        this.observabilityMetrics = observabilityMetrics;
     }
 
     public DiagnosisJobHandler(ObjectMapper objectMapper,
@@ -66,7 +71,7 @@ public class DiagnosisJobHandler implements BackgroundJobHandler {
                                BackgroundJobRepository jobRepository,
                                @Nullable AlertService alertService) {
         this(objectMapper, incidentService, aiOpsService, chatModel, tools, incidentCaseService,
-                metricTrendPrefetchService, jobRepository, alertService, Runnable::run);
+                metricTrendPrefetchService, jobRepository, alertService, Runnable::run, null);
     }
 
     @Override
@@ -84,26 +89,46 @@ public class DiagnosisJobHandler implements BackgroundJobHandler {
         String runId = required(payload, "runId");
         String alertId = payload.path("alertId").asText(null);
         String context = payload.path("alertContext").asText("");
+        String tenantId = TenantContext.requireMatch(
+                job.getTenantId(), payload.path("tenantId").asText(null));
+        try (TenantContext.Scope ignored = TenantContext.open(tenantId)) {
+            handleInTenant(job, incidentId, runId, alertId, context, tenantId);
+        }
+    }
 
+    private void handleInTenant(BackgroundJobRecord job, String incidentId, String runId,
+                                String alertId, String initialContext, String tenantId) throws Exception {
+        String context = initialContext;
         IncidentRecord incident = incidentService.getIncident(incidentId)
                 .orElseThrow(() -> new IllegalArgumentException("Incident 不存在: " + incidentId));
         DiagnosisRunRecord run = findRun(incidentId, runId);
+        if (observabilityMetrics != null) {
+            observabilityMetrics.recordDiagnosisStarted();
+        }
+        long startedNanos = System.nanoTime();
+        String outcome = "FAILED";
         try {
             incidentService.markRunRunning(incidentId, runId);
 
             if (cancelled(job)) {
+                outcome = "CANCELLED";
                 return;
             }
             String baseContext = context;
             CompletableFuture<String> similarCases = CompletableFuture.supplyAsync(
-                    () -> prefetchSimilarCases(incident, run, baseContext), diagnosisPrefetchExecutor);
+                    MdcContext.wrapSupplier(() -> inTenant(tenantId,
+                            () -> prefetchSimilarCases(incident, run, baseContext))),
+                    diagnosisPrefetchExecutor);
             CompletableFuture<String> metricTrends = CompletableFuture.supplyAsync(
-                    () -> prefetchMetricTrends(incident, run, baseContext), diagnosisPrefetchExecutor);
+                    MdcContext.wrapSupplier(() -> inTenant(tenantId,
+                            () -> prefetchMetricTrends(incident, run, baseContext))),
+                    diagnosisPrefetchExecutor);
             context = mergePrefetchContexts(baseContext, similarCases, metricTrends);
             if (!context.equals(baseContext)) {
                 incidentService.updateRunAlertContext(incident.getId(), run.getRunId(), context);
             }
             if (cancelled(job)) {
+                outcome = "CANCELLED";
                 return;
             }
 
@@ -111,6 +136,7 @@ public class DiagnosisJobHandler implements BackgroundJobHandler {
             Optional<OverAllState> state = aiOpsService.executeAiOpsAnalysis(
                     chatModel, callbacks, context, incidentId, runId);
             if (cancelled(job)) {
+                outcome = "CANCELLED";
                 return;
             }
             if (state.isEmpty()) {
@@ -120,9 +146,15 @@ public class DiagnosisJobHandler implements BackgroundJobHandler {
             if (report.isEmpty()) {
                 throw new IllegalStateException("诊断未完成：Agent 返回了中间计划或空结果，未生成最终告警分析报告");
             }
-            incidentService.completeRun(incidentId, runId, report.get());
+            DiagnosisRunRecord completedRun = incidentService.completeRun(incidentId, runId, report.get());
+            if (observabilityMetrics != null) {
+                observabilityMetrics.recordDiagnosisQuality(
+                        completedRun.getQualityGrade(),
+                        completedRun.getQualityScore() < 60 || !completedRun.getQualityIssues().isEmpty());
+            }
             storeAlertReport(alertId, report.get());
             storeIncidentPendingAlertReports(incidentId, report.get());
+            outcome = "COMPLETED";
         } catch (Exception e) {
             if (job.getAttemptCount() >= job.getMaxAttempts() && !cancelled(job)) {
                 String message = "告警分析异常: " + e.getMessage();
@@ -131,6 +163,16 @@ public class DiagnosisJobHandler implements BackgroundJobHandler {
                 storeIncidentPendingAlertReports(incidentId, message);
             }
             throw e;
+        } finally {
+            if (observabilityMetrics != null) {
+                observabilityMetrics.recordDiagnosisOutcome(outcome, System.nanoTime() - startedNanos);
+            }
+        }
+    }
+
+    private <T> T inTenant(String tenantId, Supplier<T> work) {
+        try (TenantContext.Scope ignored = TenantContext.open(tenantId)) {
+            return work.get();
         }
     }
 

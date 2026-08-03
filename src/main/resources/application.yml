@@ -5,6 +5,15 @@ server:
       charset: UTF-8
       enabled: true
       force: true
+    session:
+      cookie:
+        http-only: true
+        secure: ${APP_SECURITY_COOKIE_SECURE:false}
+        same-site: ${APP_SECURITY_COOKIE_SAME_SITE:lax}
+
+logging:
+  pattern:
+    console: "%d{yyyy-MM-dd'T'HH:mm:ss.SSSXXX} [%thread] %-5level %logger{36} [trace_id=%X{trace_id:-},request_id=%X{request_id:-},incident_id=%X{incident_id:-},run_id=%X{run_id:-}] - %msg%n"
 
 file:
   upload:
@@ -48,10 +57,29 @@ spring:
       pool:
         max-active: 8
         max-idle: 8
-        min-idle: 0
+      min-idle: 0
 
   flyway:
     enabled: false
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,metrics
+  endpoint:
+    health:
+      probes:
+        enabled: true
+      show-details: never
+      group:
+        liveness:
+          include: livenessState
+        readiness:
+          include: readinessState,db,redis
+  metrics:
+    tags:
+      application: superbizagent
 
 # 自定义应用级配置（暂无）
 
@@ -91,15 +119,55 @@ cls:
   base-url: ${CLS_BASE_URL:}
   query-path: ${CLS_QUERY_PATH:/api/v1/logs/query}
   api-key: ${CLS_API_KEY:}
+  native-signing-enabled: ${CLS_NATIVE_SIGNING_ENABLED:false}
+  secret-id: ${CLS_SECRET_ID:}
+  secret-key: ${CLS_SECRET_KEY:}
+  region: ${CLS_REGION:ap-guangzhou}
+  service: ${CLS_SERVICE:cls}
   timeout: ${CLS_TIMEOUT:10}
 
 app:
+  dependency-probes:
+    enabled: ${APP_DEPENDENCY_PROBES_ENABLED:true}
+    timeout-millis: ${APP_DEPENDENCY_PROBE_TIMEOUT_MILLIS:2000}
+    prometheus-url: ${PROMETHEUS_BASE_URL:http://localhost:9090}
+    prometheus-api-key: ${PROMETHEUS_API_KEY:}
+    cls-url: ${CLS_BASE_URL:}
+    cls-api-key: ${CLS_API_KEY:}
+    cls-native-signing-enabled: ${CLS_NATIVE_SIGNING_ENABLED:false}
+    cls-secret-id: ${CLS_SECRET_ID:}
+    cls-secret-key: ${CLS_SECRET_KEY:}
+    cls-region: ${CLS_REGION:ap-guangzhou}
+    cls-service: ${CLS_SERVICE:cls}
+    cls-probe-path: ${CLS_PROBE_PATH:/}
+    cls-probe-topic-id: ${CLS_PROBE_TOPIC_ID:}
+    dashscope-url: ${DASHSCOPE_PROBE_URL:https://dashscope.aliyuncs.com/api/v1}
+    dashscope-api-key: ${DASHSCOPE_API_KEY:}
+    dashscope-probe-path: ${DASHSCOPE_PROBE_PATH:/deployments/models?page_no=1&page_size=1&version=v1.0&model_source=base}
+    milvus-host: ${MILVUS_HOST:localhost}
+    milvus-port: ${MILVUS_PORT:19530}
+    mcp-enabled: ${SPRING_AI_MCP_CLIENT_ENABLED:false}
+  observability:
+    model-usage-enabled: ${APP_MODEL_USAGE_ENABLED:true}
+    default-model: ${APP_MODEL_NAME:qwen3-max}
+    currency: ${APP_MODEL_COST_CURRENCY:CNY}
+    input-cost-per-1k-tokens: ${APP_MODEL_INPUT_COST_PER_1K_TOKENS:0}
+    output-cost-per-1k-tokens: ${APP_MODEL_OUTPUT_COST_PER_1K_TOKENS:0}
+  trace-export:
+    enabled: ${APP_TRACE_EXPORT_ENABLED:false}
+    endpoint: ${APP_TRACE_EXPORT_ENDPOINT:}
+    api-key: ${APP_TRACE_EXPORT_API_KEY:}
+    service-name: ${APP_TRACE_SERVICE_NAME:superbizagent}
+    sampling-probability: ${APP_TRACE_EXPORT_SAMPLING_PROBABILITY:0.1}
+    timeout-millis: ${APP_TRACE_EXPORT_TIMEOUT_MILLIS:1000}
+    max-pending: ${APP_TRACE_EXPORT_MAX_PENDING:100}
   jobs:
     enabled: ${APP_JOBS_ENABLED:true}
     poll-delay-millis: ${APP_JOB_POLL_DELAY_MILLIS:1000}
     lease-duration-millis: ${APP_JOB_LEASE_DURATION_MILLIS:60000}
     heartbeat-interval-millis: ${APP_JOB_HEARTBEAT_INTERVAL_MILLIS:15000}
     recovery-delay-millis: ${APP_JOB_RECOVERY_DELAY_MILLIS:15000}
+    metrics-delay-millis: ${APP_JOB_METRICS_DELAY_MILLIS:15000}
     worker-concurrency: ${APP_JOB_WORKER_CONCURRENCY:4}
     diagnosis-max-attempts: ${APP_JOB_DIAGNOSIS_MAX_ATTEMPTS:2}
     diagnosis-prefetch-concurrency: ${APP_JOB_DIAGNOSIS_PREFETCH_CONCURRENCY:4}
@@ -156,9 +224,42 @@ app:
   security:
     enabled: ${APP_SECURITY_ENABLED:true}
     api-token: ${APP_API_TOKEN:}
+    admin-token: ${APP_ADMIN_TOKEN:}
     webhook-secret: ${APP_WEBHOOK_SECRET:}
+    webhook-signing-secret: ${APP_WEBHOOK_SIGNING_SECRET:${APP_WEBHOOK_SECRET:}}
+    webhook-signing-secrets: ${APP_WEBHOOK_SIGNING_SECRETS:}
+    session-signing-secret: ${APP_SECURITY_SESSION_SIGNING_SECRET:}
+    machine-token-enabled: ${APP_SECURITY_MACHINE_TOKEN_ENABLED:false}
+    machine-token-signing-secret: ${APP_SECURITY_MACHINE_TOKEN_SIGNING_SECRET:}
+    machine-token-signing-secrets: ${APP_SECURITY_MACHINE_TOKEN_SIGNING_SECRETS:}
+    machine-token-ttl-seconds: ${APP_SECURITY_MACHINE_TOKEN_TTL_SECONDS:300}
+    machine-token-clock-skew-seconds: ${APP_SECURITY_MACHINE_TOKEN_CLOCK_SKEW_SECONDS:30}
+    machine-token-require-redis: ${APP_SECURITY_MACHINE_TOKEN_REQUIRE_REDIS:false}
+    webhook-max-age-seconds: ${APP_WEBHOOK_MAX_AGE_SECONDS:300}
+    webhook-replay-require-redis: ${APP_WEBHOOK_REPLAY_REQUIRE_REDIS:false}
+    default-tenant-id: ${APP_SECURITY_DEFAULT_TENANT_ID:default}
     session-ttl-seconds: ${APP_SECURITY_SESSION_TTL_SECONDS:28800}
     cookie-secure: ${APP_SECURITY_COOKIE_SECURE:false}
+    oidc:
+      enabled: ${APP_SECURITY_OIDC_ENABLED:false}
+      issuer-uri: ${APP_SECURITY_OIDC_ISSUER_URI:}
+      client-id: ${APP_SECURITY_OIDC_CLIENT_ID:}
+      client-secret: ${APP_SECURITY_OIDC_CLIENT_SECRET:}
+      redirect-uri: ${APP_SECURITY_OIDC_REDIRECT_URI:{baseUrl}/login/oauth2/code/enterprise}
+      registration-id: ${APP_SECURITY_OIDC_REGISTRATION_ID:enterprise}
+      scopes: ${APP_SECURITY_OIDC_SCOPES:openid,profile,email}
+      tenant-claim: ${APP_SECURITY_OIDC_TENANT_CLAIM:tenant_id}
+      groups-claim: ${APP_SECURITY_OIDC_GROUPS_CLAIM:groups}
+      admin-group: ${APP_SECURITY_OIDC_ADMIN_GROUP:ADMIN}
+      operator-group: ${APP_SECURITY_OIDC_OPERATOR_GROUP:OPERATOR}
+
+  lifecycle:
+    enabled: ${APP_LIFECYCLE_ENABLED:false}
+    cleanup-delay-millis: ${APP_LIFECYCLE_CLEANUP_DELAY_MILLIS:3600000}
+    terminal-job-retention-days: ${APP_LIFECYCLE_TERMINAL_JOB_RETENTION_DAYS:0}
+    index-task-retention-days: ${APP_LIFECYCLE_INDEX_TASK_RETENTION_DAYS:0}
+    chat-session-retention-days: ${APP_LIFECYCLE_CHAT_SESSION_RETENTION_DAYS:0}
+    security-audit-retention-days: ${APP_LIFECYCLE_SECURITY_AUDIT_RETENTION_DAYS:0}
   alerts:
     simulate-enabled: ${APP_ALERT_SIMULATE_ENABLED:false}
   chat-history:

@@ -43,6 +43,7 @@ public class IncidentStore {
     private final IncidentSchemaMigrator schemaMigrator;
     private final DiagnosisRunRepository diagnosisRunRepository;
     private final IncidentAlertRepository incidentAlertRepository;
+    private final DiagnosisRunbookPolicy runbookPolicy = new DiagnosisRunbookPolicy();
     private boolean jdbcInitialized;
     private boolean jdbcInitializing;
 
@@ -86,12 +87,13 @@ public class IncidentStore {
         int safeLimit = Math.max(1, Math.min(100, limit));
         int safeOffset = Math.max(0, offset);
         StringBuilder sql = new StringBuilder("""
-                select id, aggregation_key, title, status, severity, alert_count,
+                select id, tenant_id, aggregation_key, title, status, severity, alert_count,
                        version, created_at, updated_at, last_alert_at
                 from incidents
-                where 1 = 1
+                where tenant_id = ?
                 """);
         List<Object> parameters = new ArrayList<>();
+        parameters.add(TenantContext.currentTenant());
         if (notBlank(status)) {
             sql.append(" and lower(status) = lower(?)");
             parameters.add(status.trim());
@@ -170,10 +172,12 @@ public class IncidentStore {
         ensureJdbcInitialized();
         try (Connection connection = openConnection();
              PreparedStatement statement = connection.prepareStatement("""
-                     select incident_id, run_id
+                     select diagnosis_runs.incident_id, diagnosis_runs.run_id
                      from diagnosis_runs
-                     where status in ('QUEUED', 'RUNNING', 'WAITING_TOOL')
-                       and coalesce(started_at, created_at) < ?
+                     join incidents on incidents.id = diagnosis_runs.incident_id
+                     where diagnosis_runs.status in ('QUEUED', 'RUNNING', 'WAITING_TOOL')
+                       and incidents.tenant_id = ?
+                       and coalesce(diagnosis_runs.started_at, diagnosis_runs.created_at) < ?
                        and not exists (
                            select 1
                            from background_jobs job
@@ -182,10 +186,11 @@ public class IncidentStore {
                              and job.status = 'RUNNING'
                              and job.lease_expires_at >= ?
                        )
-                     order by coalesce(started_at, created_at), run_id
+                     order by coalesce(diagnosis_runs.started_at, diagnosis_runs.created_at), diagnosis_runs.run_id
                      """)) {
-            statement.setLong(1, cutoffMillis);
-            statement.setLong(2, nowMillis);
+            statement.setString(1, TenantContext.currentTenant());
+            statement.setLong(2, cutoffMillis);
+            statement.setLong(3, nowMillis);
             try (ResultSet resultSet = statement.executeQuery()) {
                 List<StaleRunCandidate> candidates = new ArrayList<>();
                 while (resultSet.next()) {
@@ -219,6 +224,7 @@ public class IncidentStore {
     public RecordAlertResult recordAlertWithStatus(IncidentRecord candidate, AlertPayload payload,
                                                    long now, String alertId) {
         ensureJdbcInitialized();
+        assertCurrentTenant(candidate);
         for (int attempt = 1; attempt <= 3; attempt++) {
             try (Connection connection = openConnection()) {
                 connection.setAutoCommit(false);
@@ -258,8 +264,11 @@ public class IncidentStore {
 
     private String findIncidentIdByAlertId(Connection connection, String alertId) throws SQLException {
         try (PreparedStatement statement = connection.prepareStatement(
-                "select incident_id from incident_alerts where alert_id = ?")) {
+                "select alerts.incident_id from incident_alerts alerts "
+                        + "join incidents on incidents.id = alerts.incident_id "
+                        + "where alerts.alert_id = ? and incidents.tenant_id = ?")) {
             statement.setString(1, alertId);
+            statement.setString(2, TenantContext.currentTenant());
             try (ResultSet resultSet = statement.executeQuery()) {
                 return resultSet.next() ? resultSet.getString(1) : null;
             }
@@ -290,10 +299,11 @@ public class IncidentStore {
         try (PreparedStatement statement = connection.prepareStatement("""
                 update incidents
                 set updated_at = ?, version = version + 1
-                where id = ?
+                where id = ? and tenant_id = ?
                 """)) {
             statement.setLong(1, updatedAt);
             statement.setString(2, incidentId);
+            statement.setString(3, TenantContext.currentTenant());
             if (statement.executeUpdate() == 0) {
                 throw new IllegalArgumentException("Incident 不存在: " + incidentId);
             }
@@ -332,9 +342,10 @@ public class IncidentStore {
         try (PreparedStatement statement = connection.prepareStatement("""
                 update incidents
                 set updated_at = updated_at
-                where id = ?
+                where id = ? and tenant_id = ?
                 """)) {
             statement.setString(1, incidentId);
+            statement.setString(2, TenantContext.currentTenant());
             if (statement.executeUpdate() == 0) {
                 throw new IllegalArgumentException("Incident 不存在: " + incidentId);
             }
@@ -353,9 +364,12 @@ public class IncidentStore {
                                    String progressMessage) {
         return inTransaction(connection -> {
             long now = System.currentTimeMillis();
+            DiagnosisRunRecord current = diagnosisRunRepository.findById(connection, incidentId, runId)
+                    .orElseThrow(() -> new IllegalArgumentException("诊断运行不存在: " + runId));
+            DiagnosisRunbookPolicy.Progress progress = runbookProgressFor(current, current.getEvidence(), false);
             boolean updated = diagnosisRunRepository.updateToolState(
                     connection, incidentId, runId, expectedVersion,
-                    status, currentTool, currentStep, progressMessage, now);
+                    status, currentTool, currentStep, progressMessage, now, progress);
             if (!updated) {
                 return -1L;
             }
@@ -369,14 +383,38 @@ public class IncidentStore {
                                    long expectedVersion,
                                    DiagnosisEvidence evidence) {
         return inTransaction(connection -> {
+            DiagnosisRunRecord current = diagnosisRunRepository.findById(connection, incidentId, runId)
+                    .orElseThrow(() -> new IllegalArgumentException("诊断运行不存在: " + runId));
+            List<DiagnosisEvidence> evidenceSnapshot = new ArrayList<>(current.getEvidence());
+            evidenceSnapshot.add(evidence);
+            DiagnosisRunbookPolicy.Progress progress = runbookProgressFor(current, evidenceSnapshot, false);
             boolean updated = diagnosisRunRepository.appendToolEvidence(
-                    connection, incidentId, runId, expectedVersion, evidence);
+                    connection, incidentId, runId, expectedVersion, evidence, progress);
             if (!updated) {
                 return -1L;
             }
             touchIncident(connection, incidentId, System.currentTimeMillis());
             return expectedVersion + 1L;
         });
+    }
+
+    private DiagnosisRunbookPolicy.Progress runbookProgressFor(DiagnosisRunRecord run,
+                                                               List<DiagnosisEvidence> evidence,
+                                                               boolean terminal) {
+        DiagnosisRunbookPolicy.Progress progress = runbookPolicy.progressFor(
+                run.getAlertContext(), evidence);
+        if (progress.status().equals("NOT_APPLICABLE")) {
+            return progress;
+        }
+        if (terminal && !progress.status().equals("COMPLETED")) {
+            return new DiagnosisRunbookPolicy.Progress(progress.runbookId(), "BLOCKED",
+                    progress.completedStep(), progress.requiredTools(), progress.completedTools());
+        }
+        if ("COMPLETED".equals(progress.status())) {
+            return progress;
+        }
+        return new DiagnosisRunbookPolicy.Progress(progress.runbookId(), "IN_PROGRESS",
+                progress.completedStep(), progress.requiredTools(), progress.completedTools());
     }
 
     public DiagnosisRunRecord updateRunCaseArchive(String incidentId,
@@ -395,14 +433,31 @@ public class IncidentStore {
         });
     }
 
+    public DiagnosisRunRecord transitionRunCaseArchive(String incidentId,
+                                                       String runId,
+                                                       String targetStatus,
+                                                       String documentId,
+                                                       String message) {
+        return inTransaction(connection -> {
+            boolean updated = diagnosisRunRepository.transitionCaseArchive(
+                    connection, incidentId, runId, targetStatus, documentId, message);
+            if (updated) {
+                touchIncident(connection, incidentId, System.currentTimeMillis());
+            }
+            return diagnosisRunRepository.findById(connection, incidentId, runId)
+                    .orElseThrow(() -> new IllegalArgumentException("DiagnosisRun 不存在: " + runId));
+        });
+    }
+
     private void touchIncident(Connection connection, String incidentId, long updatedAt) throws SQLException {
         try (PreparedStatement statement = connection.prepareStatement("""
                 update incidents
                 set updated_at = ?, version = version + 1
-                where id = ?
+                where id = ? and tenant_id = ?
                 """)) {
             statement.setLong(1, updatedAt);
             statement.setString(2, incidentId);
+            statement.setString(3, TenantContext.currentTenant());
             if (statement.executeUpdate() != 1) {
                 throw new IllegalArgumentException("Incident 不存在: " + incidentId);
             }
@@ -470,15 +525,16 @@ public class IncidentStore {
 
     private void saveToJdbc(IncidentRecord record) {
         ensureJdbcInitialized();
+        assertCurrentTenant(record);
         try (Connection connection = openConnection()) {
             connection.setAutoCommit(false);
             try (PreparedStatement statement = connection.prepareStatement("""
                          merge into incidents as target
-                         using (values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)) as source (
-                             id, aggregation_key, title, status, severity, alert_count,
+                         using (values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)) as source (
+                             id, tenant_id, aggregation_key, title, status, severity, alert_count,
                              created_at, updated_at, last_alert_at, payload, version
                          )
-                         on target.id = source.id
+                         on target.id = source.id and target.tenant_id = source.tenant_id
                          when matched and target.version = source.version then update set
                              aggregation_key = source.aggregation_key,
                              title = source.title,
@@ -491,10 +547,10 @@ public class IncidentStore {
                              payload = source.payload,
                              version = target.version + 1
                          when not matched then insert (
-                             id, aggregation_key, title, status, severity, alert_count,
+                             id, tenant_id, aggregation_key, title, status, severity, alert_count,
                              created_at, updated_at, last_alert_at, payload, version
                          ) values (
-                             source.id, source.aggregation_key, source.title, source.status,
+                             source.id, source.tenant_id, source.aggregation_key, source.title, source.status,
                              source.severity, source.alert_count, source.created_at,
                              source.updated_at, source.last_alert_at, source.payload, source.version
                          )
@@ -502,8 +558,9 @@ public class IncidentStore {
                 bindIncidentUpsert(statement, record);
                 int affectedRows = statement.executeUpdate();
                 try (PreparedStatement versionStatement = connection.prepareStatement(
-                        "select version from incidents where id = ?")) {
+                        "select version from incidents where id = ? and tenant_id = ?")) {
                     versionStatement.setString(1, record.getId());
+                    versionStatement.setString(2, record.getTenantId());
                     try (ResultSet resultSet = versionStatement.executeQuery()) {
                         if (!resultSet.next()) {
                             throw new IllegalStateException("保存 JDBC Incident 后未找到记录: " + record.getId());
@@ -536,11 +593,12 @@ public class IncidentStore {
         ensureJdbcInitialized();
         try (Connection connection = openConnection();
              PreparedStatement statement = connection.prepareStatement("""
-                     select id, aggregation_key, title, status, severity, alert_count,
+                     select id, tenant_id, aggregation_key, title, status, severity, alert_count,
                             version, created_at, updated_at, last_alert_at
-                     from incidents where id = ?
+                     from incidents where id = ? and tenant_id = ?
                      """)) {
             statement.setString(1, incidentId);
+            statement.setString(2, TenantContext.currentTenant());
             try (ResultSet resultSet = statement.executeQuery()) {
                 if (!resultSet.next()) {
                     return Optional.empty();
@@ -557,10 +615,11 @@ public class IncidentStore {
         try (Connection connection = openConnection();
              PreparedStatement statement = connection.prepareStatement(
                      """
-                     select id, aggregation_key, title, status, severity, alert_count,
+                     select id, tenant_id, aggregation_key, title, status, severity, alert_count,
                             version, created_at, updated_at, last_alert_at
-                     from incidents order by updated_at desc
+                     from incidents where tenant_id = ? order by updated_at desc
                      """)) {
+            statement.setString(1, TenantContext.currentTenant());
             try (ResultSet resultSet = statement.executeQuery()) {
                 java.util.ArrayList<IncidentRecord> records = new java.util.ArrayList<>();
                 while (resultSet.next()) {
@@ -577,14 +636,15 @@ public class IncidentStore {
         ensureJdbcInitialized();
         try (Connection connection = openConnection();
              PreparedStatement statement = connection.prepareStatement("""
-                     select id, aggregation_key, title, status, severity, alert_count,
+                     select id, tenant_id, aggregation_key, title, status, severity, alert_count,
                             version, created_at, updated_at, last_alert_at
                      from incidents
-                     where aggregation_key = ?
+                     where tenant_id = ? and aggregation_key = ?
                      order by updated_at desc
                      limit 1
                      """)) {
-            statement.setString(1, aggregationKey);
+            statement.setString(1, TenantContext.currentTenant());
+            statement.setString(2, aggregationKey);
             try (ResultSet resultSet = statement.executeQuery()) {
                 if (!resultSet.next()) {
                     return Optional.empty();
@@ -598,16 +658,17 @@ public class IncidentStore {
 
     private void bindIncidentUpsert(PreparedStatement statement, IncidentRecord record) throws Exception {
         statement.setString(1, record.getId());
-        statement.setString(2, record.getAggregationKey());
-        statement.setString(3, record.getTitle());
-        statement.setString(4, record.getStatus());
-        statement.setString(5, record.getSeverity());
-        statement.setInt(6, record.getAlertCount());
-        statement.setLong(7, record.getCreatedAt());
-        statement.setLong(8, record.getUpdatedAt());
-        statement.setLong(9, record.getLastAlertAt());
-        statement.setString(10, "{}");
-        statement.setLong(11, record.getVersion());
+        statement.setString(2, record.getTenantId());
+        statement.setString(3, record.getAggregationKey());
+        statement.setString(4, record.getTitle());
+        statement.setString(5, record.getStatus());
+        statement.setString(6, record.getSeverity());
+        statement.setInt(7, record.getAlertCount());
+        statement.setLong(8, record.getCreatedAt());
+        statement.setLong(9, record.getUpdatedAt());
+        statement.setLong(10, record.getLastAlertAt());
+        statement.setString(11, "{}");
+        statement.setLong(12, record.getVersion());
     }
 
     private IncidentRecord readIncidentPayload(String payload) throws IOException {
@@ -625,6 +686,7 @@ public class IncidentStore {
     private IncidentRecord readIncidentRow(ResultSet resultSet) throws SQLException {
         IncidentRecord record = new IncidentRecord();
         record.setId(resultSet.getString("id"));
+        record.setTenantId(resultSet.getString("tenant_id"));
         record.setAggregationKey(resultSet.getString("aggregation_key"));
         record.setTitle(resultSet.getString("title"));
         record.setStatus(resultSet.getString("status"));
@@ -642,10 +704,10 @@ public class IncidentStore {
                                          long now) throws SQLException {
         try (PreparedStatement statement = connection.prepareStatement("""
                 insert into incidents (
-                    id, aggregation_key, title, status, severity, alert_count,
+                    id, tenant_id, aggregation_key, title, status, severity, alert_count,
                     version, created_at, updated_at, last_alert_at, payload
-                ) values (?, ?, ?, ?, ?, 1, 0, ?, ?, ?, '{}')
-                on conflict (aggregation_key) do update set
+                ) values (?, ?, ?, ?, ?, ?, 1, 0, ?, ?, ?, '{}')
+                on conflict (tenant_id, aggregation_key) do update set
                     title = excluded.title,
                     status = excluded.status,
                     severity = excluded.severity,
@@ -656,13 +718,14 @@ public class IncidentStore {
                 returning id
                 """)) {
             statement.setString(1, candidate.getId());
-            statement.setString(2, candidate.getAggregationKey());
-            statement.setString(3, candidate.getTitle());
-            statement.setString(4, candidate.getStatus());
-            statement.setString(5, candidate.getSeverity());
-            statement.setLong(6, candidate.getCreatedAt());
-            statement.setLong(7, now);
+            statement.setString(2, candidate.getTenantId());
+            statement.setString(3, candidate.getAggregationKey());
+            statement.setString(4, candidate.getTitle());
+            statement.setString(5, candidate.getStatus());
+            statement.setString(6, candidate.getSeverity());
+            statement.setLong(7, candidate.getCreatedAt());
             statement.setLong(8, now);
+            statement.setLong(9, now);
             try (ResultSet resultSet = statement.executeQuery()) {
                 resultSet.next();
                 return resultSet.getString(1);
@@ -675,9 +738,10 @@ public class IncidentStore {
                                        long now) throws SQLException {
         String existingId = null;
         try (PreparedStatement select = connection.prepareStatement("""
-                select id from incidents where aggregation_key = ? for update
+                select id from incidents where tenant_id = ? and aggregation_key = ? for update
                 """)) {
-            select.setString(1, candidate.getAggregationKey());
+            select.setString(1, candidate.getTenantId());
+            select.setString(2, candidate.getAggregationKey());
             try (ResultSet resultSet = select.executeQuery()) {
                 if (resultSet.next()) {
                     existingId = resultSet.getString(1);
@@ -691,7 +755,7 @@ public class IncidentStore {
                         alert_count = alert_count + 1,
                         version = version + 1,
                         updated_at = ?, last_alert_at = ?
-                    where id = ?
+                    where id = ? and tenant_id = ?
                     """)) {
                 update.setString(1, candidate.getTitle());
                 update.setString(2, candidate.getStatus());
@@ -699,24 +763,26 @@ public class IncidentStore {
                 update.setLong(4, now);
                 update.setLong(5, now);
                 update.setString(6, existingId);
+                update.setString(7, candidate.getTenantId());
                 update.executeUpdate();
             }
             return existingId;
         }
         try (PreparedStatement insert = connection.prepareStatement("""
                 insert into incidents (
-                    id, aggregation_key, title, status, severity, alert_count,
+                    id, tenant_id, aggregation_key, title, status, severity, alert_count,
                     version, created_at, updated_at, last_alert_at, payload
-                ) values (?, ?, ?, ?, ?, 1, 0, ?, ?, ?, '{}')
+                ) values (?, ?, ?, ?, ?, ?, 1, 0, ?, ?, ?, '{}')
                 """)) {
             insert.setString(1, candidate.getId());
-            insert.setString(2, candidate.getAggregationKey());
-            insert.setString(3, candidate.getTitle());
-            insert.setString(4, candidate.getStatus());
-            insert.setString(5, candidate.getSeverity());
-            insert.setLong(6, candidate.getCreatedAt());
-            insert.setLong(7, now);
+            insert.setString(2, candidate.getTenantId());
+            insert.setString(3, candidate.getAggregationKey());
+            insert.setString(4, candidate.getTitle());
+            insert.setString(5, candidate.getStatus());
+            insert.setString(6, candidate.getSeverity());
+            insert.setLong(7, candidate.getCreatedAt());
             insert.setLong(8, now);
+            insert.setLong(9, now);
             insert.executeUpdate();
             return candidate.getId();
         }
@@ -736,6 +802,7 @@ public class IncidentStore {
             return;
         }
         for (IncidentRecord record : listFromFiles()) {
+            record.setTenantId(TenantContext.DEFAULT_TENANT_ID);
             saveToJdbc(record);
         }
     }
@@ -765,6 +832,14 @@ public class IncidentStore {
         if (!jdbcInitialized) {
             initializeJdbcStore();
         }
+    }
+
+    private void assertCurrentTenant(IncidentRecord record) {
+        String tenantId = TenantContext.normalize(record.getTenantId());
+        if (!TenantContext.currentTenant().equals(tenantId)) {
+            throw new IllegalArgumentException("Incident 租户与当前请求不匹配");
+        }
+        record.setTenantId(tenantId);
     }
 
     private void validateIncidentId(String incidentId) {

@@ -67,6 +67,22 @@ class IncidentServiceTest {
     }
 
     @Test
+    void recordAlert_shouldPreserveMultiAlertCorrelationAndContextBoundary() {
+        IncidentService service = newIncidentService();
+        AlertPayload payload = multiAlertPayload();
+
+        IncidentRecord incident = service.recordAlert(payload);
+        String context = service.buildAlertContext(incident);
+
+        assertTrue(incident.getAggregationKey().startsWith("alertmanager-group:"));
+        assertTrue(incident.getTitle().startsWith("多告警关联(2)"));
+        assertEquals("critical", incident.getSeverity());
+        assertTrue(context.contains("多告警关联: true"));
+        assertTrue(context.contains("关联告警数量: 2"));
+        assertEquals("multi-alert-v1", new DiagnosisRunbookPolicy().select(context).id());
+    }
+
+    @Test
     void recordAlert_shouldNormalizeEquivalentCpuAlertNamesAndServiceFallbacks() {
         IncidentService service = newIncidentService();
 
@@ -160,23 +176,26 @@ class IncidentServiceTest {
         IncidentService service = new IncidentService(
                 store, new ObjectMapper(), null, properties,
                 jobRepository, registry, jobProperties);
-        IncidentRecord incident = service.recordAlert(
-                alertPayload("fp-job-1", "HighCPUUsage", "payment-service"));
+        try (TenantContext.Scope ignored = TenantContext.open("tenant-a")) {
+            IncidentRecord incident = service.recordAlert(
+                    alertPayload("fp-job-1", "HighCPUUsage", "payment-service"));
 
-        DiagnosisRunRecord run = service.createDiagnosisRunAndEnqueue(
-                incident.getId(), "CPU 告警上下文");
+            DiagnosisRunRecord run = service.createDiagnosisRunAndEnqueue(
+                    incident.getId(), "CPU 告警上下文");
 
-        org.example.dto.BackgroundJobRecord job = jobRepository
-                .findByBusinessKey("DIAGNOSIS", run.getRunId())
-                .orElseThrow();
-        assertEquals("QUEUED", job.getStatus());
-        assertEquals(2, job.getMaxAttempts());
-        assertTrue(job.getPayload().contains(incident.getId()));
+            org.example.dto.BackgroundJobRecord job = jobRepository
+                    .findByBusinessKey("DIAGNOSIS", run.getRunId())
+                    .orElseThrow();
+            assertEquals("QUEUED", job.getStatus());
+            assertEquals(2, job.getMaxAttempts());
+            assertTrue(job.getPayload().contains(incident.getId()));
+            assertTrue(job.getPayload().contains("\"tenantId\":\"tenant-a\""));
 
-        service.cancelRun(incident.getId(), run.getRunId(), "用户取消");
+            service.cancelRun(incident.getId(), run.getRunId(), "用户取消");
 
-        assertEquals("CANCELLED", jobRepository.findById(job.getJobId()).orElseThrow().getStatus());
-        verify(registry).cancelByBusinessKey("DIAGNOSIS", run.getRunId());
+            assertEquals("CANCELLED", jobRepository.findById(job.getJobId()).orElseThrow().getStatus());
+            verify(registry).cancelByBusinessKey("DIAGNOSIS", run.getRunId());
+        }
     }
 
     @Test
@@ -457,6 +476,7 @@ class IncidentServiceTest {
                 service.markStaleRunsFailed(claimTime + 60_001L);
         assertEquals(1, failedAfterLeaseExpiry.size());
         assertEquals("FAILED", failedAfterLeaseExpiry.get(0).getStatus());
+        assertEquals("BLOCKED", failedAfterLeaseExpiry.get(0).getRunbookStatus());
     }
 
     @Test
@@ -468,7 +488,7 @@ class IncidentServiceTest {
         IncidentService setupService = new IncidentService(setupStore, new ObjectMapper(), null, properties);
         IncidentRecord incident = setupService.recordAlert(
                 alertPayload("fp-stale-completed-race", "HighCPUUsage", "payment-service"));
-        DiagnosisRunRecord stale = setupService.createDiagnosisRun(incident.getId(), "CPU 告警上下文");
+        DiagnosisRunRecord stale = setupService.createDiagnosisRun(incident.getId(), "通用告警上下文");
         DiagnosisRunRecord running = setupService.markRunRunning(incident.getId(), stale.getRunId());
         AtomicReference<IncidentService> completingService = new AtomicReference<>();
         AtomicInteger listCalls = new AtomicInteger();
@@ -669,11 +689,27 @@ class IncidentServiceTest {
                 System.currentTimeMillis());
         evidence.setId("ev-cpu-guard");
         service.addToolEvidence(incident.getId(), queued.getRunId(), evidence);
+        org.example.dto.DiagnosisEvidence baseline = org.example.dto.DiagnosisEvidence.toolCall(
+                "queryMetricTrend",
+                "{\"metric\":\"cpu_usage\",\"window\":\"1h\"}",
+                "1h",
+                "cpu_usage 1h 基线已确认",
+                "{\"success\":true}",
+                true,
+                null,
+                System.currentTimeMillis());
+        baseline.setId("ev-cpu-guard-baseline");
+        service.addToolEvidence(incident.getId(), queued.getRunId(), baseline);
+        org.example.dto.DiagnosisEvidence logs = org.example.dto.DiagnosisEvidence.toolCall(
+                "queryLogs", "{\"query\":\"ERROR\"}", "15m",
+                "未发现异常日志", "{\"success\":true}", true, null, System.currentTimeMillis());
+        logs.setId("ev-cpu-guard-logs");
+        service.addToolEvidence(incident.getId(), queued.getRunId(), logs);
 
         DiagnosisRunRecord completed = service.completeRun(
                 incident.getId(),
                 queued.getRunId(),
-                validReport() + "\nCPU 持续上升 [evidence: ev-cpu-guard]");
+                validReport() + "\nCPU 持续上升 [evidence: ev-cpu-guard]。未发现异常日志 [evidence: ev-cpu-guard-logs]");
 
         assertTrue(completed.getReport().contains("## 证据校验"));
         assertTrue(completed.getReport().contains("置信度: 高"));
@@ -681,6 +717,14 @@ class IncidentServiceTest {
         assertTrue(completed.getQualityScore() >= 80);
         assertEquals("HIGH", completed.getQualityGrade());
         assertTrue(completed.getQualitySummary().contains("HIGH"));
+        assertEquals("cpu-saturation-v1", completed.getRunbookId());
+        assertEquals("COMPLETED", completed.getRunbookStatus());
+        assertEquals(3, completed.getRunbookStep());
+        assertEquals(List.of("queryMetricTrend", "queryLogs"), completed.getRunbookRequiredTools());
+        DiagnosisRunRecord restored = newIncidentService().getDiagnosisRun(
+                incident.getId(), queued.getRunId()).orElseThrow();
+        assertEquals("COMPLETED", restored.getRunbookStatus());
+        assertEquals(3, restored.getRunbookStep());
     }
 
     @Test
@@ -999,6 +1043,38 @@ class IncidentServiceTest {
         payload.setCommonLabels(Map.of("severity", "critical"));
         payload.setCommonAnnotations(Map.of("summary", "CPU 使用率超过 90%"));
         payload.setAlerts(List.of(alert));
+        return payload;
+    }
+
+    private AlertPayload multiAlertPayload() {
+        AlertPayload.Alert cpu = new AlertPayload.Alert();
+        cpu.setStatus("firing");
+        cpu.setFingerprint("fp-multi-cpu");
+        cpu.setStartsAt("2026-07-29T10:00:00Z");
+        cpu.setLabels(Map.of(
+                "alertname", "HighCPUUsage",
+                "severity", "warning",
+                "service", "payments",
+                "instance", "payments-pod-1"));
+        cpu.setAnnotations(Map.of("summary", "HighCPUUsage payments"));
+
+        AlertPayload.Alert dependency = new AlertPayload.Alert();
+        dependency.setStatus("firing");
+        dependency.setFingerprint("fp-multi-dependency");
+        dependency.setStartsAt("2026-07-29T10:00:05Z");
+        dependency.setLabels(Map.of(
+                "alertname", "DependencyTimeout",
+                "severity", "critical",
+                "service", "payments",
+                "instance", "payments-pod-1"));
+        dependency.setAnnotations(Map.of("summary", "DependencyTimeout payments"));
+
+        AlertPayload payload = new AlertPayload();
+        payload.setReceiver("webhook");
+        payload.setStatus("firing");
+        payload.setGroupKey("{service=payments}");
+        payload.setCommonAnnotations(Map.of("summary", "Payments correlated alerts"));
+        payload.setAlerts(List.of(cpu, dependency));
         return payload;
     }
 

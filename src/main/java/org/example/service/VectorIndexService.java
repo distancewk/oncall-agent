@@ -7,6 +7,7 @@ import io.milvus.param.RpcStatus;
 import io.milvus.param.collection.LoadCollectionParam;
 import io.milvus.param.dml.DeleteParam;
 import io.milvus.param.dml.InsertParam;
+import io.milvus.param.dml.UpsertParam;
 import lombok.Getter;
 import lombok.Setter;
 import org.example.constant.MilvusConstants;
@@ -198,7 +199,7 @@ public class VectorIndexService {
         }
 
         // 6. 批量写入 Milvus
-        insertBatchToMilvus(contents, vectors, sparseVectors, metadataList);
+        upsertBatchToMilvus(contents, vectors, sparseVectors, metadataList);
         deletePreviousVersions(documentId, contentHash);
 
         logger.info("文件索引完成: {}, 共 {} 个分片", filePath, chunks.size());
@@ -226,7 +227,9 @@ public class VectorIndexService {
             // 两个值都由服务端生成且只包含十六进制字符，不接受用户输入。
             // 仅清理已成功写入新内容之外的旧版本，索引失败时不会触碰旧向量。
             String expr = String.format("metadata[\"_document_id\"] == \"%s\" "
-                    + "&& metadata[\"_content_hash\"] != \"%s\"", documentId, contentHash);
+                    + "&& metadata[\"tenant_id\"] == \"%s\" "
+                    + "&& metadata[\"_content_hash\"] != \"%s\"",
+                    documentId, TenantContext.currentTenant(), contentHash);
             
             logger.info("准备删除文档旧数据, documentId: {}", documentId);
 
@@ -292,6 +295,7 @@ public class VectorIndexService {
             metadata.put("_content_hash", contentHash);
         }
         metadata.put("doc_type", MilvusConstants.DOC_TYPE_DOCUMENT);
+        metadata.put("tenant_id", TenantContext.currentTenant());
         metadata.put("_extension", extension);
         metadata.put("_file_name", fileNameStr);
         
@@ -310,7 +314,7 @@ public class VectorIndexService {
     /**
      * 插入向量到 Milvus
      */
-    private void insertBatchToMilvus(List<String> contents,
+    private void upsertBatchToMilvus(List<String> contents,
                                      List<List<Float>> vectors,
                                      List<java.util.SortedMap<Long, Float>> sparseVectors,
                                      List<Map<String, Object>> metadataList) throws Exception {
@@ -319,22 +323,27 @@ public class VectorIndexService {
             for (Map<String, Object> metadata : metadataList) {
                 String source = (String) metadata.get("_document_id");
                 int chunkIndex = ((Number) metadata.get("chunkIndex")).intValue();
-                ids.add(UUID.nameUUIDFromBytes((source + "_" + chunkIndex).getBytes(StandardCharsets.UTF_8)).toString());
+                ids.add(UUID.nameUUIDFromBytes((TenantContext.currentTenant() + ":"
+                        + source + "_" + chunkIndex).getBytes(StandardCharsets.UTF_8)).toString());
             }
 
             InsertParam insertParam = insertHelper.buildInsertParam(ids, contents, vectors, sparseVectors, metadataList);
-            R<MutationResult> insertResponse = DependencyGuardExecutor.executeMilvus(
-                    dependencyGuard, "insertBatchToMilvus",
-                    () -> milvusClient.insert(insertParam));
+            UpsertParam upsertParam = UpsertParam.newBuilder()
+                    .withCollectionName(MilvusConstants.MILVUS_COLLECTION_NAME)
+                    .withFields(insertParam.getFields())
+                    .build();
+            R<MutationResult> upsertResponse = DependencyGuardExecutor.executeMilvus(
+                    dependencyGuard, "upsertBatchToMilvus",
+                    () -> milvusClient.upsert(upsertParam));
 
-            if (insertResponse.getStatus() != 0) {
-                throw new RuntimeException("插入向量失败: " + insertResponse.getMessage());
+            if (upsertResponse.getStatus() != 0) {
+                throw new RuntimeException("更新向量失败: " + upsertResponse.getMessage());
             }
 
-            logger.info("✓ 批量向量插入成功: {} 条", contents.size());
+            logger.info("✓ 批量向量幂等写入成功: {} 条", contents.size());
 
         } catch (Exception e) {
-            logger.error("批量插入向量到 Milvus 失败", e);
+            logger.error("批量幂等写入向量到 Milvus 失败", e);
             throw e;
         }
     }

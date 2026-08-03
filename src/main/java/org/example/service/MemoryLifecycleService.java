@@ -64,7 +64,8 @@ public class MemoryLifecycleService {
 
     public String stableMemoryId(String sessionId, String fact) {
         String normalizedFact = normalizeFact(fact);
-        return UUID.nameUUIDFromBytes(("chat_memory:" + sessionId + ":" + normalizedFact)
+        return UUID.nameUUIDFromBytes(("chat_memory:" + TenantContext.currentTenant() + ":"
+                        + sessionId + ":" + normalizedFact)
                 .getBytes(StandardCharsets.UTF_8)).toString();
     }
 
@@ -73,6 +74,7 @@ public class MemoryLifecycleService {
         Map<String, Object> metadata = new HashMap<>();
         metadata.put("_source", MilvusConstants.DOC_TYPE_CHAT_MEMORY);
         metadata.put("doc_type", MilvusConstants.DOC_TYPE_CHAT_MEMORY);
+        metadata.put("tenant_id", TenantContext.currentTenant());
         metadata.put("session_id", sessionId);
         metadata.put("created_at", now);
         metadata.put("last_seen_at", now);
@@ -188,8 +190,7 @@ public class MemoryLifecycleService {
     }
 
     public void deleteSessionMemories(String sessionId) {
-        String expr = "metadata[\"doc_type\"] == \"" + MilvusConstants.DOC_TYPE_CHAT_MEMORY
-                + "\" && metadata[\"session_id\"] == \"" + escapeExprValue(sessionId) + "\"";
+        String expr = MilvusConstants.chatMemoryFilterExpr(TenantContext.currentTenant(), sessionId);
         try {
             DeleteParam deleteParam = DeleteParam.newBuilder()
                     .withCollectionName(MilvusConstants.MILVUS_COLLECTION_NAME)

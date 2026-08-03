@@ -2,11 +2,13 @@ package org.example.agent.tool;
 
 import com.fasterxml.jackson.annotation.JsonProperty;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import okhttp3.ResponseBody;
 import lombok.Data;
 import org.example.exception.DependencyUnavailableException;
 import org.example.service.DependencyGuard;
 import org.example.service.DependencyGuardExecutor;
 import org.example.service.DiagnosisEvidenceRecorder;
+import org.example.service.ClsClient;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.ai.tool.annotation.Tool;
@@ -36,11 +38,7 @@ import java.util.Map;
  * 用于查询 CLS（云日志服务）的日志信息
  * 支持 Mock 模式，提供与告警关联的模拟日志数据
  *
- * 注意：当前版本仅 Mock 模式可用。生产环境需要：
- * 1. 通过 MCP 客户端连接腾讯云 CLS 服务
- * 2. 或者在 cls.mock-enabled=true 时使用模拟数据
- *
- * 如果使用 MCP 方式，此工具类应在 MCP 连接可用时设置为 required=false
+ * 生产环境使用配置驱动的 CLS HTTP 查询；开发环境可显式启用 Mock。
  */
 @Component
 public class QueryLogsTools {
@@ -65,6 +63,21 @@ public class QueryLogsTools {
     @Value("${cls.api-key:}")
     private String apiKey;
 
+    @Value("${cls.native-signing-enabled:false}")
+    private boolean nativeSigningEnabled;
+
+    @Value("${cls.secret-id:}")
+    private String secretId;
+
+    @Value("${cls.secret-key:}")
+    private String secretKey;
+
+    @Value("${cls.region:ap-guangzhou}")
+    private String signingRegion;
+
+    @Value("${cls.service:cls}")
+    private String signingService;
+
     @Value("${cls.timeout:10}")
     private int timeoutSeconds;
 
@@ -79,6 +92,16 @@ public class QueryLogsTools {
             .withZone(ZoneId.of("Asia/Shanghai"));
 
     private HttpClient httpClient = HttpClient.newHttpClient();
+    private final ClsClient clsClient;
+
+    public QueryLogsTools() {
+        this.clsClient = new ClsClient(new okhttp3.OkHttpClient());
+    }
+
+    @Autowired
+    public QueryLogsTools(ClsClient clsClient) {
+        this.clsClient = clsClient;
+    }
     
     @jakarta.annotation.PostConstruct
     public void init() {
@@ -237,7 +260,7 @@ public class QueryLogsTools {
                 logEntries = buildMockLogs(region, logTopic, safeQuery, actualLimit);
                 logger.info("使用 Mock 数据，返回 {} 条日志", logEntries.size());
             } else {
-                // 真实模式：调用 CLS API（这里预留接口，后续实现）
+                // 真实模式：调用配置驱动的 CLS 网关或原生签名 API
                 logEntries = queryClsLogs(region, logTopic, safeQuery, actualLimit);
             }
             
@@ -276,12 +299,30 @@ public class QueryLogsTools {
         if (!notBlank(baseUrl)) {
             throw new IllegalStateException("CLS base-url 未配置，请设置 CLS_BASE_URL 或启用 mock 模式");
         }
-        URI uri = buildClsQueryUri(region, logTopic, query, limit);
+        boolean nativeRequest = nativeSigningEnabled;
+        URI uri = nativeRequest ? buildNativeClsUri() : buildClsQueryUri(region, logTopic, query, limit);
         HttpRequest.Builder requestBuilder = HttpRequest.newBuilder(uri)
                 .timeout(Duration.ofSeconds(Math.max(1, timeoutSeconds)))
-                .GET()
                 .header("Accept", "application/json");
-        if (notBlank(apiKey)) {
+        if (nativeSigningEnabled) {
+            try (okhttp3.Response response = clsClient.execute(new ClsClient.SearchRequest(
+                    baseUrl, queryPath, logTopic, Instant.now().minus(Duration.ofMinutes(5)).toEpochMilli(),
+                    Instant.now().toEpochMilli(), query, limit, secretId, secretKey,
+                    signingRegion, signingService, timeoutSeconds * 1000))) {
+                String responseBody;
+                try (ResponseBody body = response.body()) {
+                    responseBody = body == null ? "" : body.string();
+                }
+                if (!response.isSuccessful()) {
+                    throw new IllegalStateException("CLS HTTP 查询失败，status=" + response.code()
+                            + ", body=" + truncate(responseBody));
+                }
+                return parseClsLogsResponse(responseBody);
+            }
+        } else {
+            requestBuilder.GET();
+        }
+        if (!nativeSigningEnabled && notBlank(apiKey)) {
             requestBuilder.header("X-API-Key", apiKey);
         }
         HttpResponse<String> response = httpClient.send(
@@ -306,13 +347,26 @@ public class QueryLogsTools {
         return URI.create(normalizedBaseUrl + normalizedPath + "?" + queryString);
     }
 
+    private URI buildNativeClsUri() {
+        String normalizedBaseUrl = stripTrailingSlash(baseUrl);
+        String normalizedPath = queryPath == null || queryPath.isBlank()
+                || "/api/v1/logs/query".equals(queryPath) ? "/" : queryPath;
+        if (!normalizedPath.startsWith("/")) {
+            normalizedPath = "/" + normalizedPath;
+        }
+        return URI.create(normalizedBaseUrl + normalizedPath);
+    }
+
     private List<LogEntry> parseClsLogsResponse(String body) throws Exception {
         com.fasterxml.jackson.databind.JsonNode root = objectMapper.readTree(body);
         if (root.path("success").isBoolean() && !root.path("success").asBoolean()) {
             String message = root.path("message").asText(root.path("error").asText("CLS 查询失败"));
             throw new IllegalStateException(message);
         }
-        com.fasterxml.jackson.databind.JsonNode logsNode = root.isArray() ? root : root.path("logs");
+        com.fasterxml.jackson.databind.JsonNode response = root.path("Response").isObject()
+                ? root.path("Response") : root;
+        com.fasterxml.jackson.databind.JsonNode logsNode = response.isArray() ? response
+                : response.has("Results") ? response.path("Results") : response.path("logs");
         if (!logsNode.isArray()) {
             return List.of();
         }
@@ -325,13 +379,29 @@ public class QueryLogsTools {
 
     private LogEntry parseLogEntry(com.fasterxml.jackson.databind.JsonNode node) {
         LogEntry entry = new LogEntry();
-        entry.setTimestamp(node.path("timestamp").asText(""));
+        boolean nativeRecord = node.has("LogJson") || node.has("Time");
+        entry.setTimestamp(nativeRecord ? node.path("Time").asText("")
+                : node.path("timestamp").asText(""));
         entry.setLevel(node.path("level").asText(""));
-        entry.setService(node.path("service").asText(""));
+        entry.setService(nativeRecord
+                ? node.path("TopicName").asText(node.path("TopicId").asText(""))
+                : node.path("service").asText(""));
         entry.setInstance(node.path("instance").asText(""));
-        entry.setMessage(node.path("message").asText(node.toString()));
-        entry.setMetrics(parseMetrics(node));
+        String nativeLog = node.path("LogJson").asText("");
+        entry.setMessage(nativeRecord && !nativeLog.isBlank()
+                ? nativeLog : node.path("message").asText(node.toString()));
+        entry.setMetrics(parseMetrics(nativeRecord && !nativeLog.isBlank()
+                ? parseJsonObject(nativeLog) : node));
         return entry;
+    }
+
+    private com.fasterxml.jackson.databind.JsonNode parseJsonObject(String value) {
+        try {
+            com.fasterxml.jackson.databind.JsonNode parsed = objectMapper.readTree(value);
+            return parsed == null ? objectMapper.createObjectNode() : parsed;
+        } catch (Exception e) {
+            return objectMapper.createObjectNode();
+        }
     }
 
     private Map<String, String> parseMetrics(com.fasterxml.jackson.databind.JsonNode node) {

@@ -8,6 +8,7 @@ import org.example.config.AppResilienceProperties;
 import org.example.dto.DependencyHealthSnapshot;
 import org.example.exception.DependencyUnavailableException;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.lang.Nullable;
 import org.springframework.stereotype.Service;
 
 import java.util.Comparator;
@@ -20,11 +21,19 @@ import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Function;
 import java.util.function.Supplier;
 
+/**
+ * 统一封装外部依赖调用的熔断、重试与健康状态记录。
+ *
+ * <p>启用韧性配置时，调用会经过按依赖隔离的熔断器；失败按配置重试，最终通过
+ * fallback 返回可控结果，并记录最近错误与熔断打开时间。关闭韧性开关时直接执行
+ * 原调用，不触发 fallback，但仍将依赖标记为 {@code DISABLED}。</p>
+ */
 @Service
 public class DependencyGuard {
 
     private final AppResilienceProperties properties;
     private final ToolCallAttemptContext attemptContext;
+    private final ObservabilityMetrics observabilityMetrics;
     private final CircuitBreakerRegistry registry;
     private final Map<String, String> lastErrors = new ConcurrentHashMap<>();
     private final Map<String, Long> openedAt = new ConcurrentHashMap<>();
@@ -32,21 +41,49 @@ public class DependencyGuard {
     private final Set<String> eventPublisherRegistered = ConcurrentHashMap.newKeySet();
 
     public DependencyGuard(AppResilienceProperties properties) {
-        this(properties, new ToolCallAttemptContext());
+        this(properties, new ToolCallAttemptContext(), null);
+    }
+
+    public DependencyGuard(AppResilienceProperties properties, ToolCallAttemptContext attemptContext) {
+        this(properties, attemptContext, null);
     }
 
     @Autowired
-    public DependencyGuard(AppResilienceProperties properties, ToolCallAttemptContext attemptContext) {
+    public DependencyGuard(AppResilienceProperties properties,
+                           ToolCallAttemptContext attemptContext,
+                           @Nullable ObservabilityMetrics observabilityMetrics) {
         this.properties = properties;
         this.attemptContext = attemptContext == null ? new ToolCallAttemptContext() : attemptContext;
+        this.observabilityMetrics = observabilityMetrics;
         this.registry = CircuitBreakerRegistry.ofDefaults();
     }
 
+    /**
+     * 执行依赖调用并统一处理熔断、重试和失败降级。
+     *
+     * <p>只有普通运行时异常会按配置重试；依赖不可用异常不会再次重试。韧性开关关闭时，
+     * 直接执行 {@code call}，其异常原样向上传播；开启时，熔断打开或最终失败则调用
+     * {@code fallback}。每次实际尝试次数都会记录到当前工具调用上下文。</p>
+     *
+     * @param dependency 依赖名称，用于选择熔断器和记录健康状态
+     * @param operation 当前依赖操作名称
+     * @param call 实际依赖调用
+     * @param fallback 熔断打开或调用失败后的降级处理
+     * @param <T> 调用结果类型
+     * @return 依赖调用结果或降级结果
+     */
     public <T> T execute(String dependency, String operation, Supplier<T> call, Function<Throwable, T> fallback) {
         if (!properties.isEnabled()) {
             disabledDependencies.add(dependency);
             attemptContext.recordAttempts(1);
-            return call.get();
+            try {
+                T result = call.get();
+                recordDependency(dependency, "SUCCESS");
+                return result;
+            } catch (RuntimeException e) {
+                recordDependency(dependency, "ERROR");
+                throw e;
+            }
         }
 
         AppResilienceProperties.InstanceConfig config = properties.configFor(dependency);
@@ -55,17 +92,26 @@ public class DependencyGuard {
         try {
             T result = breaker.executeSupplier(() -> executeWithRetry(dependency, operation, config, call, attempts));
             attemptContext.recordAttempts(attempts.get());
+            recordDependency(dependency, "SUCCESS");
             return result;
         } catch (CallNotPermittedException e) {
             attemptContext.recordAttempts(0);
             DependencyUnavailableException unavailable =
                     new DependencyUnavailableException(dependency, operation, "CIRCUIT_OPEN", e);
             rememberOpen(dependency, unavailable);
+            recordDependency(dependency, "CIRCUIT_OPEN");
             return fallback.apply(unavailable);
         } catch (RuntimeException e) {
             attemptContext.recordAttempts(attempts.get());
             rememberFailure(dependency, e);
+            recordDependency(dependency, "FALLBACK");
             return fallback.apply(e);
+        }
+    }
+
+    private void recordDependency(String dependency, String outcome) {
+        if (observabilityMetrics != null) {
+            observabilityMetrics.recordDependencyCall(dependency, outcome);
         }
     }
 

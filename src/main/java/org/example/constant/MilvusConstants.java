@@ -22,13 +22,28 @@ public class MilvusConstants {
 
     public static final String INCIDENT_CASE_FILTER_EXPR = "metadata[\"doc_type\"] == \"incident_case\"";
 
+    public static String incidentCaseFilterExpr(String tenantId) {
+        return INCIDENT_CASE_FILTER_EXPR + " && metadata[\"tenant_id\"] == \""
+                + escapeExprValue(tenantId) + "\"";
+    }
+
+    public static String documentFilterExpr(String tenantId) {
+        return DOCUMENT_FILTER_EXPR + " && metadata[\"tenant_id\"] == \""
+                + escapeExprValue(tenantId) + "\"";
+    }
+
     public static String chatMemoryFilterExpr(String sessionId) {
-        return "metadata[\"doc_type\"] == \"chat_memory\" && metadata[\"session_id\"] == \""
+        return chatMemoryFilterExpr("default", sessionId);
+    }
+
+    public static String chatMemoryFilterExpr(String tenantId, String sessionId) {
+        return "metadata[\"doc_type\"] == \"chat_memory\" && metadata[\"tenant_id\"] == \""
+                + escapeExprValue(tenantId) + "\" && metadata[\"session_id\"] == \""
                 + escapeExprValue(sessionId) + "\"";
     }
 
     private static String escapeExprValue(String value) {
-        return value.replace("\\", "\\\\").replace("\"", "\\\"");
+        return (value == null ? "" : value).replace("\\", "\\\\").replace("\"", "\\\"");
     }
     
     /**

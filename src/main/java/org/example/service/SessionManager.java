@@ -3,6 +3,7 @@ package org.example.service;
 import org.example.dto.ChatSessionRecord;
 import org.example.dto.ChatSessionSummary;
 import org.example.config.AppMemoryProperties;
+import org.example.config.MdcContext;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -82,7 +83,8 @@ public class SessionManager {
         }
         validateSessionId(sessionId);
         // Check L1 cache first
-        SessionInfo existing = sessions.get(sessionId);
+        String scopedSessionKey = scopedSessionKey(sessionId);
+        SessionInfo existing = sessions.get(scopedSessionKey);
         if (existing != null) {
             refreshRedisTtl(sessionId);
             return existing;
@@ -90,18 +92,18 @@ public class SessionManager {
         // Check Redis persistence
         SessionInfo fromRedis = loadFromRedis(sessionId);
         if (fromRedis != null) {
-            sessions.put(sessionId, fromRedis);
+            sessions.put(scopedSessionKey, fromRedis);
             return fromRedis;
         }
         SessionInfo fromHistoryStore = loadFromHistoryStore(sessionId);
         if (fromHistoryStore != null) {
-            sessions.put(sessionId, fromHistoryStore);
+            sessions.put(scopedSessionKey, fromHistoryStore);
             saveToRedis(fromHistoryStore);
             return fromHistoryStore;
         }
         // Create new
         SessionInfo session = newActiveSession(sessionId);
-        sessions.put(sessionId, session);
+        sessions.put(scopedSessionKey, session);
         saveToRedis(session);
         return session;
     }
@@ -117,7 +119,8 @@ public class SessionManager {
             return null;
         }
         // Check L1 cache first
-        SessionInfo session = sessions.get(sessionId);
+        String scopedSessionKey = scopedSessionKey(sessionId);
+        SessionInfo session = sessions.get(scopedSessionKey);
         if (session != null) {
             refreshRedisTtl(sessionId);
             return session;
@@ -125,12 +128,12 @@ public class SessionManager {
         // Check Redis
         SessionInfo fromRedis = loadFromRedis(sessionId);
         if (fromRedis != null) {
-            sessions.put(sessionId, fromRedis);
+            sessions.put(scopedSessionKey, fromRedis);
             return fromRedis;
         }
         SessionInfo fromHistoryStore = loadFromHistoryStore(sessionId);
         if (fromHistoryStore != null) {
-            sessions.put(sessionId, fromHistoryStore);
+            sessions.put(scopedSessionKey, fromHistoryStore);
             saveToRedis(fromHistoryStore);
             return fromHistoryStore;
         }
@@ -155,7 +158,7 @@ public class SessionManager {
             data.put("messageHistory", session.getHistory());
             String json = objectMapper.writeValueAsString(data);
             redisTemplate.opsForValue().set(
-                REDIS_KEY_PREFIX + session.getSessionId(),
+                redisKey(session.getSessionId()),
                 json,
                 SESSION_TTL_SECONDS,
                 TimeUnit.SECONDS
@@ -170,7 +173,10 @@ public class SessionManager {
             return null;
         }
         try {
-            String json = redisTemplate.opsForValue().get(REDIS_KEY_PREFIX + sessionId);
+            String json = redisTemplate.opsForValue().get(redisKey(sessionId));
+            if (json == null && TenantContext.DEFAULT_TENANT_ID.equals(TenantContext.currentTenant())) {
+                json = redisTemplate.opsForValue().get(REDIS_KEY_PREFIX + sessionId);
+            }
             if (json == null) {
                 return null;
             }
@@ -196,7 +202,7 @@ public class SessionManager {
             return;
         }
         try {
-            redisTemplate.expire(REDIS_KEY_PREFIX + sessionId, SESSION_TTL_SECONDS, TimeUnit.SECONDS);
+            redisTemplate.expire(redisKey(sessionId), SESSION_TTL_SECONDS, TimeUnit.SECONDS);
         } catch (Exception e) {
             // Non-critical, ignore
         }
@@ -217,7 +223,10 @@ public class SessionManager {
 
     public List<ChatSessionSummary> listSessions() {
         if (chatHistoryStore == null) {
-            return sessions.values().stream()
+            String tenantPrefix = TenantContext.currentTenant() + ":";
+            return sessions.entrySet().stream()
+                    .filter(entry -> entry.getKey().startsWith(tenantPrefix))
+                    .map(Map.Entry::getValue)
                     .map(this::summaryFromSession)
                     .sorted(Comparator.comparingLong(ChatSessionSummary::getUpdateTime).reversed())
                     .toList();
@@ -250,7 +259,7 @@ public class SessionManager {
         }
         advanceMemoryGeneration(sessionId);
         discardPendingMemory(sessionId);
-        boolean removedFromMemory = sessions.remove(sessionId) != null;
+        boolean removedFromMemory = sessions.remove(scopedSessionKey(sessionId)) != null;
         deleteFromRedis(sessionId);
         boolean removedFromHistory = chatHistoryStore != null && chatHistoryStore.delete(sessionId);
         boolean deleted = removedFromMemory || removedFromHistory;
@@ -305,7 +314,7 @@ public class SessionManager {
             for (int attempt = 1; attempt <= 2; attempt++) {
                 try {
                     memoryLifecycleService.deleteSessionMemories(sessionId);
-                    memoryOperationLocks.remove(sessionId, lock);
+                    memoryOperationLocks.remove(scopedSessionKey(sessionId), lock);
                     return true;
                 } catch (RuntimeException e) {
                     lastFailure = e;
@@ -314,17 +323,17 @@ public class SessionManager {
                 }
             }
             logger.error("Private memory deletion failed after retries for session: {}", sessionId, lastFailure);
-            memoryOperationLocks.remove(sessionId, lock);
+            memoryOperationLocks.remove(scopedSessionKey(sessionId), lock);
             return false;
         }
     }
 
     private synchronized long currentMemoryGeneration(String sessionId) {
-        return memoryGenerations.getOrDefault(sessionId, 0L);
+        return memoryGenerations.getOrDefault(scopedSessionKey(sessionId), 0L);
     }
 
     private synchronized long advanceMemoryGeneration(String sessionId) {
-        return memoryGenerations.merge(sessionId, 1L, Long::sum);
+        return memoryGenerations.merge(scopedSessionKey(sessionId), 1L, Long::sum);
     }
 
     private synchronized long advanceMemoryGenerationIfCurrent(String sessionId, long expectedGeneration) {
@@ -336,11 +345,11 @@ public class SessionManager {
     }
 
     private Object memoryOperationLock(String sessionId) {
-        return memoryOperationLocks.computeIfAbsent(sessionId, ignored -> new Object());
+        return memoryOperationLocks.computeIfAbsent(scopedSessionKey(sessionId), ignored -> new Object());
     }
 
     private void discardPendingMemory(String sessionId) {
-        PendingMemory pending = pendingMemories.remove(sessionId);
+        PendingMemory pending = pendingMemories.remove(scopedSessionKey(sessionId));
         if (pending == null) {
             return;
         }
@@ -359,7 +368,10 @@ public class SessionManager {
             return;
         }
         try {
-            redisTemplate.delete(REDIS_KEY_PREFIX + sessionId);
+            redisTemplate.delete(redisKey(sessionId));
+            if (TenantContext.DEFAULT_TENANT_ID.equals(TenantContext.currentTenant())) {
+                redisTemplate.delete(REDIS_KEY_PREFIX + sessionId);
+            }
         } catch (Exception e) {
             logger.warn("Failed to delete session from Redis: {}", e.getMessage());
         }
@@ -597,7 +609,9 @@ public class SessionManager {
                 || memoryExtractionService == null || memoryExecutor == null) {
             return;
         }
-        PendingMemory pending = pendingMemories.computeIfAbsent(sessionId, ignored -> new PendingMemory());
+        String tenantId = TenantContext.currentTenant();
+        String scopedSessionKey = scopedSessionKey(sessionId);
+        PendingMemory pending = pendingMemories.computeIfAbsent(scopedSessionKey, ignored -> new PendingMemory());
         synchronized (pending) {
             int maxQueue = memoryProperties().getExtractionMaxQueueMessages();
             if (pending.messages.size() + historyToArchive.size() > maxQueue) {
@@ -610,18 +624,18 @@ public class SessionManager {
             if (!pending.scheduled) {
                 pending.scheduled = true;
                 if (memoryFlushScheduler == null) {
-                    submitPendingMemory(sessionId, pending);
+                    submitPendingMemory(sessionId, pending, tenantId);
                 } else {
-                    schedulePendingMemory(sessionId, pending);
+                    schedulePendingMemory(sessionId, pending, tenantId);
                 }
             }
         }
     }
 
-    private void schedulePendingMemory(String sessionId, PendingMemory pending) {
+    private void schedulePendingMemory(String sessionId, PendingMemory pending, String tenantId) {
         try {
             pending.future = memoryFlushScheduler.schedule(
-                    () -> submitPendingMemory(sessionId, pending),
+                    MdcContext.wrapRunnable(() -> submitPendingMemory(sessionId, pending, tenantId)),
                     memoryProperties().getExtractionDebounceMillis(), TimeUnit.MILLISECONDS);
         } catch (RuntimeException e) {
             pending.scheduled = false;
@@ -630,9 +644,9 @@ public class SessionManager {
         }
     }
 
-    private void submitPendingMemory(String sessionId, PendingMemory pending) {
+    private void submitPendingMemory(String sessionId, PendingMemory pending, String tenantId) {
         try {
-            memoryExecutor.execute(() -> processPendingMemory(sessionId, pending));
+            memoryExecutor.execute(() -> processPendingMemory(sessionId, pending, tenantId));
         } catch (RuntimeException e) {
             synchronized (pending) {
                 pending.scheduled = false;
@@ -641,7 +655,13 @@ public class SessionManager {
         }
     }
 
-    private void processPendingMemory(String sessionId, PendingMemory pending) {
+    private void processPendingMemory(String sessionId, PendingMemory pending, String tenantId) {
+        try (TenantContext.Scope ignored = TenantContext.open(tenantId)) {
+            processPendingMemoryInTenant(sessionId, pending);
+        }
+    }
+
+    private void processPendingMemoryInTenant(String sessionId, PendingMemory pending) {
         List<Map<String, String>> batch = new ArrayList<>();
         long generation;
         synchronized (pending) {
@@ -668,12 +688,12 @@ public class SessionManager {
             if (!pending.messages.isEmpty() && !pending.scheduled) {
                 pending.scheduled = true;
                 if (memoryFlushScheduler == null) {
-                    submitPendingMemory(sessionId, pending);
+                    submitPendingMemory(sessionId, pending, TenantContext.currentTenant());
                 } else {
-                    schedulePendingMemory(sessionId, pending);
+                    schedulePendingMemory(sessionId, pending, TenantContext.currentTenant());
                 }
             } else if (pending.messages.isEmpty()) {
-                pendingMemories.remove(sessionId, pending);
+                pendingMemories.remove(scopedSessionKey(sessionId), pending);
             }
         }
     }
@@ -688,13 +708,16 @@ public class SessionManager {
         if (sessionId == null || sessionId.isBlank() || memoryExtractionService == null || memoryExecutor == null) {
             return;
         }
+        String tenantId = TenantContext.currentTenant();
         memoryExecutor.execute(() -> {
-            synchronized (memoryOperationLock(sessionId)) {
-                if (generation != currentMemoryGeneration(sessionId)) {
-                    logger.debug("跳过过期会话记忆提炼任务: sessionId={}", sessionId);
-                    return;
+            try (TenantContext.Scope ignored = TenantContext.open(tenantId)) {
+                synchronized (memoryOperationLock(sessionId)) {
+                    if (generation != currentMemoryGeneration(sessionId)) {
+                        logger.debug("跳过过期会话记忆提炼任务: sessionId={}", sessionId);
+                        return;
+                    }
+                    memoryExtractionService.extractAndStore(sessionId, historyToArchive);
                 }
-                memoryExtractionService.extractAndStore(sessionId, historyToArchive);
             }
         });
     }
@@ -704,5 +727,13 @@ public class SessionManager {
         private long generation;
         private boolean scheduled;
         private ScheduledFuture<?> future;
+    }
+
+    private String scopedSessionKey(String sessionId) {
+        return TenantContext.currentTenant() + ":" + sessionId;
+    }
+
+    private String redisKey(String sessionId) {
+        return REDIS_KEY_PREFIX + TenantContext.currentTenant() + ":" + sessionId;
     }
 }

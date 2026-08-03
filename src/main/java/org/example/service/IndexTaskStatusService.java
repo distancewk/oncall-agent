@@ -5,11 +5,14 @@ import org.example.config.AppJobProperties;
 import org.example.dto.IndexTaskStatus;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Service;
+import org.slf4j.MDC;
 
 import javax.sql.DataSource;
 import java.sql.Connection;
 import java.sql.SQLException;
 import java.util.List;
+import java.util.LinkedHashMap;
+import java.util.Map;
 import java.util.Optional;
 import java.util.UUID;
 
@@ -54,13 +57,18 @@ public class IndexTaskStatusService {
         try (Connection connection = dataSource.getConnection()) {
             connection.setAutoCommit(false);
             try {
-                String payload = objectMapper.writeValueAsString(java.util.Map.of(
-                        "taskId", status.getTaskId(),
-                        "fileName", fileName,
-                        "filePath", filePath,
-                        "documentId", documentId,
-                        "contentHash", contentHash == null ? "" : contentHash
-                ));
+                Map<String, String> jobPayload = new LinkedHashMap<>();
+                jobPayload.put("taskId", status.getTaskId());
+                jobPayload.put("fileName", fileName);
+                jobPayload.put("filePath", filePath);
+                jobPayload.put("documentId", documentId);
+                jobPayload.put("contentHash", contentHash == null ? "" : contentHash);
+                jobPayload.put("tenantId", TenantContext.currentTenant());
+                String traceparent = MDC.get("traceparent");
+                if (traceparent != null && !traceparent.isBlank()) {
+                    jobPayload.put("traceparent", traceparent);
+                }
+                String payload = objectMapper.writeValueAsString(jobPayload);
                 repository.insert(connection, status);
                 backgroundJobRepository.enqueue(
                         connection,
@@ -94,6 +102,7 @@ public class IndexTaskStatusService {
                                           String documentId, String contentHash) {
         long now = System.currentTimeMillis();
         IndexTaskStatus status = new IndexTaskStatus();
+        status.setTenantId(TenantContext.currentTenant());
         status.setTaskId(UUID.randomUUID().toString());
         status.setFileName(fileName);
         status.setFilePath(filePath);
