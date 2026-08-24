@@ -18,6 +18,7 @@ import java.util.concurrent.FutureTask;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 @Service
 public class BackgroundJobWorker {
@@ -81,11 +82,23 @@ public class BackgroundJobWorker {
 
     private void execute(BackgroundJobRecord job) {
         long heartbeatInterval = Math.max(1L, properties.getHeartbeatIntervalMillis());
-        ScheduledFuture<?> heartbeat = heartbeatExecutor.scheduleAtFixedRate(
-                () -> heartbeat(job), heartbeatInterval, heartbeatInterval, TimeUnit.MILLISECONDS);
+        AtomicBoolean leaseLost = new AtomicBoolean(false);
+        Thread[] executionThread = new Thread[1];
+        ScheduledFuture<?> heartbeat = heartbeatExecutor.scheduleAtFixedRate(() -> {
+            if (!heartbeat(job)) {
+                // 心跳返回租约丢失：fencing token 已被回收/重新认领，立即停止执行，
+                // 避免旧 Worker 继续产生副作用并尝试覆盖新 Worker 的结果。
+                leaseLost.set(true);
+                Thread running = executionThread[0];
+                if (running != null) {
+                    running.interrupt();
+                }
+            }
+        }, heartbeatInterval, heartbeatInterval, TimeUnit.MILLISECONDS);
         try {
+            executionThread[0] = Thread.currentThread();
             if (repository.isCancelRequested(job.getJobId())) {
-                repository.retryOrFail(job.getJobId(), workerId, "任务已取消",
+                repository.retryOrFail(job.getJobId(), workerId, job.getLeaseVersion(), "任务已取消",
                         System.currentTimeMillis(), System.currentTimeMillis());
                 return;
             }
@@ -94,27 +107,36 @@ public class BackgroundJobWorker {
                 throw new IllegalStateException("未注册后台任务处理器: " + job.getJobType());
             }
             handler.handle(job);
-            repository.complete(job.getJobId(), workerId, System.currentTimeMillis());
+            if (leaseLost.get()) {
+                LOGGER.warn("后台任务租约已丢失，放弃提交结果, jobId: {}", job.getJobId());
+                return;
+            }
+            repository.complete(job.getJobId(), workerId, job.getLeaseVersion(), System.currentTimeMillis());
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
-            repository.retryOrFail(job.getJobId(), workerId, "任务执行被中断",
-                    retryAt(), System.currentTimeMillis());
+            if (!leaseLost.get()) {
+                repository.retryOrFail(job.getJobId(), workerId, job.getLeaseVersion(), "任务执行被中断",
+                        retryAt(), System.currentTimeMillis());
+            }
         } catch (Exception e) {
             LOGGER.warn("后台任务执行失败, jobId: {}, type: {}", job.getJobId(), job.getJobType(), e);
-            repository.retryOrFail(job.getJobId(), workerId, e.getMessage(),
-                    retryAt(), System.currentTimeMillis());
+            if (!leaseLost.get()) {
+                repository.retryOrFail(job.getJobId(), workerId, job.getLeaseVersion(), e.getMessage(),
+                        retryAt(), System.currentTimeMillis());
+            }
         } finally {
             heartbeat.cancel(false);
             runningJobRegistry.unregister(job);
         }
     }
 
-    private void heartbeat(BackgroundJobRecord job) {
+    private boolean heartbeat(BackgroundJobRecord job) {
         try {
-            repository.heartbeat(job.getJobId(), workerId, System.currentTimeMillis(),
-                    properties.getLeaseDurationMillis());
+            return repository.heartbeat(job.getJobId(), workerId, job.getLeaseVersion(),
+                    System.currentTimeMillis(), properties.getLeaseDurationMillis());
         } catch (RuntimeException e) {
             LOGGER.warn("后台任务心跳失败, jobId: {}", job.getJobId(), e);
+            return false;
         }
     }
 

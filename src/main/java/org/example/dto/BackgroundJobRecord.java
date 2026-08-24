@@ -16,6 +16,7 @@ public class BackgroundJobRecord {
     private int maxAttempts;
     private long availableAt;
     private String leaseOwner;
+    private long leaseVersion;
     private long leaseExpiresAt;
     private long heartbeatAt;
     private boolean cancelRequested;

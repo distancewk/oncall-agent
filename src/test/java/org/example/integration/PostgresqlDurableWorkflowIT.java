@@ -150,8 +150,9 @@ class PostgresqlDurableWorkflowIT {
         BackgroundJobRecord claimed = backgroundJobRepository.claimNext("worker-finish", 510L, 100L)
                 .orElseThrow();
         assertEquals(completed.getJobId(), claimed.getJobId());
-        assertTrue(backgroundJobRepository.heartbeat(claimed.getJobId(), "worker-finish", 520L, 100L));
-        backgroundJobRepository.complete(claimed.getJobId(), "worker-finish", 530L);
+        assertTrue(backgroundJobRepository.heartbeat(claimed.getJobId(), "worker-finish",
+                claimed.getLeaseVersion(), 520L, 100L));
+        backgroundJobRepository.complete(claimed.getJobId(), "worker-finish", claimed.getLeaseVersion(), 530L);
         assertEquals("COMPLETED", backgroundJobRepository.findById(claimed.getJobId())
                 .orElseThrow()
                 .getStatus());

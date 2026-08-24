@@ -120,9 +120,10 @@ class BackgroundJobRepositoryTest {
         assertEquals("CANCELLED", repository.findById(queued.getJobId()).orElseThrow().getStatus());
 
         BackgroundJobRecord running = repository.enqueue("DIAGNOSIS", "run-running", "{}", 2, 300L);
-        repository.claimNext("worker-a", 300L, 1_000L).orElseThrow();
+        BackgroundJobRecord claimed = repository.claimNext("worker-a", 300L, 1_000L).orElseThrow();
         repository.requestCancel("DIAGNOSIS", "run-running", 350L);
-        repository.retryOrFail(running.getJobId(), "worker-a", "interrupted", 400L, 350L);
+        repository.retryOrFail(claimed.getJobId(), "worker-a", claimed.getLeaseVersion(),
+                "interrupted", 400L, 350L);
 
         BackgroundJobRecord cancelled = repository.findById(running.getJobId()).orElseThrow();
         assertEquals("CANCELLED", cancelled.getStatus());
@@ -132,13 +133,34 @@ class BackgroundJobRepositoryTest {
     @Test
     void attemptsExhausted_shouldFailJob() {
         BackgroundJobRecord job = repository.enqueue("INDEX", "task-1", "{}", 1, 100L);
-        repository.claimNext("worker-a", 100L, 1_000L).orElseThrow();
+        BackgroundJobRecord claimed = repository.claimNext("worker-a", 100L, 1_000L).orElseThrow();
 
-        repository.retryOrFail(job.getJobId(), "worker-a", "boom", 200L, 150L);
+        repository.retryOrFail(claimed.getJobId(), "worker-a", claimed.getLeaseVersion(),
+                "boom", 200L, 150L);
 
         BackgroundJobRecord failed = repository.findById(job.getJobId()).orElseThrow();
         assertEquals("FAILED", failed.getStatus());
         assertEquals("boom", failed.getLastError());
         assertFalse(failed.isCancelRequested());
+    }
+
+    @Test
+    void staleLeaseVersion_shouldNotOverrideNewClaim() {
+        BackgroundJobRecord job = repository.enqueue("DIAGNOSIS", "run-fence", "{}", 2, 100L);
+        BackgroundJobRecord firstClaim = repository.claimNext("worker-a", 200L, 100L).orElseThrow();
+        assertEquals(1L, firstClaim.getLeaseVersion());
+
+        // 旧租约过期被回收，新 Worker 重新认领（lease_version 递增）。
+        repository.recoverExpiredLeases(301L);
+        BackgroundJobRecord secondClaim = repository.claimNext("worker-b", 302L, 1_000L).orElseThrow();
+        assertEquals(2L, secondClaim.getLeaseVersion());
+
+        // 旧 Worker 用过期 lease_version 尝试完成，不应覆盖新 Worker 的状态。
+        repository.complete(firstClaim.getJobId(), "worker-a", firstClaim.getLeaseVersion(), 303L);
+
+        BackgroundJobRecord persisted = repository.findById(job.getJobId()).orElseThrow();
+        assertEquals("RUNNING", persisted.getStatus());
+        assertEquals("worker-b", persisted.getLeaseOwner());
+        assertEquals(2L, persisted.getLeaseVersion());
     }
 }

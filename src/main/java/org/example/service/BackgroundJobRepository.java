@@ -135,16 +135,19 @@ public class BackgroundJobRepository {
                             lease_owner = ?,
                             lease_expires_at = ?,
                             heartbeat_at = ?,
-                            updated_at = ?
+                            updated_at = ?,
+                            lease_version = lease_version + 1
                         where job_id = ?
                           and status in ('QUEUED', 'RETRY')
                           and cancel_requested = false
+                          and lease_version = ?
                         """)) {
                     statement.setString(1, leaseOwner);
                     statement.setLong(2, now + Math.max(1L, leaseDurationMillis));
                     statement.setLong(3, now);
                     statement.setLong(4, now);
                     statement.setString(5, selected.getJobId());
+                    statement.setLong(6, selected.getLeaseVersion());
                     if (statement.executeUpdate() == 0) {
                         connection.rollback();
                         return Optional.empty();
@@ -162,29 +165,31 @@ public class BackgroundJobRepository {
         }
     }
 
-    public boolean heartbeat(String jobId, String leaseOwner, long now, long leaseDurationMillis) {
+    public boolean heartbeat(String jobId, String leaseOwner, long leaseVersion,
+                             long now, long leaseDurationMillis) {
         try (Connection connection = dataSource.getConnection();
              PreparedStatement statement = connection.prepareStatement("""
                      update background_jobs
                      set heartbeat_at = ?, lease_expires_at = ?, updated_at = ?
-                     where job_id = ? and status = 'RUNNING' and lease_owner = ?
+                     where job_id = ? and status = 'RUNNING' and lease_owner = ? and lease_version = ?
                      """)) {
             statement.setLong(1, now);
             statement.setLong(2, now + Math.max(1L, leaseDurationMillis));
             statement.setLong(3, now);
             statement.setString(4, jobId);
             statement.setString(5, leaseOwner);
+            statement.setLong(6, leaseVersion);
             return statement.executeUpdate() > 0;
         } catch (Exception e) {
             throw new IllegalStateException("刷新后台任务租约失败: " + jobId, e);
         }
     }
 
-    public void complete(String jobId, String leaseOwner, long now) {
-        updateRunningTerminal(jobId, leaseOwner, "COMPLETED", null, now);
+    public void complete(String jobId, String leaseOwner, long leaseVersion, long now) {
+        updateRunningTerminal(jobId, leaseOwner, leaseVersion, "COMPLETED", null, now);
     }
 
-    public void retryOrFail(String jobId, String leaseOwner, String error,
+    public void retryOrFail(String jobId, String leaseOwner, long leaseVersion, String error,
                             long retryAt, long now) {
         BackgroundJobRecord current = findById(jobId).orElseThrow();
         String status;
@@ -205,6 +210,7 @@ public class BackgroundJobRepository {
                          lease_expires_at = null, heartbeat_at = null,
                          last_error = ?, updated_at = ?
                      where job_id = ? and status = 'RUNNING' and lease_owner = ?
+                       and lease_version = ?
                      """)) {
             statement.setString(1, status);
             statement.setLong(2, availableAt);
@@ -212,6 +218,7 @@ public class BackgroundJobRepository {
             statement.setLong(4, now);
             statement.setString(5, jobId);
             statement.setString(6, leaseOwner);
+            statement.setLong(7, leaseVersion);
             statement.executeUpdate();
         } catch (Exception e) {
             throw new IllegalStateException("结束失败后台任务失败: " + jobId, e);
@@ -311,8 +318,8 @@ public class BackgroundJobRepository {
         }
     }
 
-    private void updateRunningTerminal(String jobId, String leaseOwner, String status,
-                                       String error, long now) {
+    private void updateRunningTerminal(String jobId, String leaseOwner, long leaseVersion,
+                                       String status, String error, long now) {
         try (Connection connection = dataSource.getConnection();
              PreparedStatement statement = connection.prepareStatement("""
                      update background_jobs
@@ -320,12 +327,14 @@ public class BackgroundJobRepository {
                          lease_owner = null, lease_expires_at = null, heartbeat_at = null,
                          last_error = ?, updated_at = ?
                      where job_id = ? and status = 'RUNNING' and lease_owner = ?
+                       and lease_version = ?
                      """)) {
             statement.setString(1, status);
             statement.setString(2, error);
             statement.setLong(3, now);
             statement.setString(4, jobId);
             statement.setString(5, leaseOwner);
+            statement.setLong(6, leaseVersion);
             statement.executeUpdate();
         } catch (Exception e) {
             throw new IllegalStateException("完成后台任务失败: " + jobId, e);
@@ -354,6 +363,7 @@ public class BackgroundJobRepository {
         job.setMaxAttempts(resultSet.getInt("max_attempts"));
         job.setAvailableAt(resultSet.getLong("available_at"));
         job.setLeaseOwner(resultSet.getString("lease_owner"));
+        job.setLeaseVersion(resultSet.getLong("lease_version"));
         job.setLeaseExpiresAt(resultSet.getLong("lease_expires_at"));
         job.setHeartbeatAt(resultSet.getLong("heartbeat_at"));
         job.setCancelRequested(resultSet.getBoolean("cancel_requested"));

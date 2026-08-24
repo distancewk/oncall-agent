@@ -445,6 +445,8 @@ Webhook 默认走共享密钥回退（兼容 Alertmanager 等只支持固定头�
 
 诊断和文档索引请求只创建 durable job。诊断 run 与对应 job 在同一个数据库事务内创建；文档索引 task 与对应 job 也在同一个数据库事务内创建，任一写入失败都会整体回滚，不留下孤立 run、task 或 job。Worker 原子领取任务、持有并刷新租约；进程中断后，过期租约会转为 `RETRY` 或在尝试耗尽后转为 `FAILED`。取消先在数据库事务中把 DiagnosisRun 置为 `CANCELLED` 并标记 job 的 `cancel_requested`，事务提交后再尽力中断本实例正在执行的 Future；终态不会被后续完成/失败回写覆盖。
 
+任务采用 fencing token（`background_jobs.lease_version`）保证一致性：每次 claim 原子递增 `lease_version`，Worker 持有 `job_id + lease_owner + lease_version` 三元组，heartbeat/complete/retry/fail 等写操作必须同时匹配三元组；心跳返回租约丢失时 Worker 立即中断执行并放弃提交结果，避免旧 Worker 在租约被回收、任务被重新认领后继续产生副作用或覆盖新 Worker 的结果。
+
 所有 job 时间、并发和重试配置都必须为正数，并在启动时校验。`APP_JOB_HEARTBEAT_INTERVAL_MILLIS` 必须小于 `APP_JOB_LEASE_DURATION_MILLIS / 2`，否则应用拒绝启动，避免心跳过慢导致运行中任务被错误回收。
 
 ### Compose 专用变量
