@@ -75,20 +75,10 @@ class SecurityInterceptorTest {
     }
 
     @Test
-    void preHandle_shouldRejectWebhookWithoutWebhookSecret() throws Exception {
+    void preHandle_shouldDelegateWebhookAuthToSignatureFilter() throws Exception {
+        // Webhook 鉴权（HMAC 签名 + nonce 防重放 + 共享密钥回退）已由 WebhookSignatureFilter 统一接管，
+        // interceptor 对 webhook 路径直接放行，不再做共享密钥校验。
         MockHttpServletRequest request = new MockHttpServletRequest("POST", "/api/webhook/alert");
-        MockHttpServletResponse response = new MockHttpServletResponse();
-
-        boolean allowed = interceptor.preHandle(request, response, new Object());
-
-        assertFalse(allowed);
-        assertEquals(401, response.getStatus());
-    }
-
-    @Test
-    void preHandle_shouldAllowWebhookWithMatchingWebhookSecret() throws Exception {
-        MockHttpServletRequest request = new MockHttpServletRequest("POST", "/api/webhook/alert");
-        request.addHeader("X-Webhook-Secret", "webhook-secret");
         MockHttpServletResponse response = new MockHttpServletResponse();
 
         boolean allowed = interceptor.preHandle(request, response, new Object());

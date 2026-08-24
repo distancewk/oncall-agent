@@ -43,6 +43,7 @@ spring:
   redis:
     host: ${REDIS_HOST:localhost}
     port: ${REDIS_PORT:6379}
+    password: ${REDIS_PASSWORD:}
     timeout: 3000
     lettuce:
       pool:
@@ -157,6 +158,9 @@ app:
     enabled: ${APP_SECURITY_ENABLED:true}
     api-token: ${APP_API_TOKEN:}
     webhook-secret: ${APP_WEBHOOK_SECRET:}
+    session-signing-key: ${APP_SESSION_SIGNING_KEY:}
+    webhook-hmac-required: ${APP_WEBHOOK_HMAC_REQUIRED:false}
+    webhook-timestamp-tolerance-seconds: ${APP_WEBHOOK_TIMESTAMP_TOLERANCE_SECONDS:300}
     session-ttl-seconds: ${APP_SECURITY_SESSION_TTL_SECONDS:28800}
     cookie-secure: ${APP_SECURITY_COOKIE_SECURE:false}
   alerts:

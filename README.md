@@ -327,12 +327,15 @@ node --test src/test/js/incidentFrontendActions.test.mjs
 ## 安全与配置
 
 默认启用鉴权。浏览器通过 HttpOnly Cookie 登录，机器客户端可使用 `X-API-Key`；生产环境必须使用强随机密钥。
-启动 `prod` profile 时会执行生产配置校验：必须提供 DashScope Key、API Token、Webhook Secret 和非本地 CORS 白名单；同时禁止开启 Prometheus/CLS mock 和模拟告警接口。
+启动 `prod` profile 时会执行生产配置校验：必须提供 DashScope Key、API Token、Webhook Secret、独立的会话签名密钥（`APP_SESSION_SIGNING_KEY`，不得与 `APP_API_TOKEN` 相同）和非本地 CORS 白名单；强制开启 Webhook HMAC（`APP_WEBHOOK_HMAC_REQUIRED=true`）；同时禁止开启 Prometheus/CLS mock 和模拟告警接口。
 
 | 场景 | Header |
 |------|--------|
 | 普通 `/api/**` 请求 | `X-API-Key: ${APP_API_TOKEN}` |
-| `/api/webhook/**` 请求 | `X-Webhook-Secret: ${APP_WEBHOOK_SECRET}` |
+| `/api/webhook/**` 请求（HMAC 模式） | `X-Webhook-Timestamp` + `X-Webhook-Nonce` + `X-Webhook-Signature` |
+| `/api/webhook/**` 请求（共享密钥回退） | `X-Webhook-Secret: ${APP_WEBHOOK_SECRET}` |
+
+Webhook 默认走共享密钥回退（兼容 Alertmanager 等只支持固定头的客户端）；设置 `APP_WEBHOOK_HMAC_REQUIRED=true` 后强制 HMAC 签名。HMAC 模式签名内容为 `timestamp + "." + nonce + "." + rawBody`（rawBody 为原始请求体），算法 HmacSHA256（hex 小写），密钥为 `APP_WEBHOOK_SECRET`；时间戳窗口默认 ±300 秒，nonce 通过 Redis 认领防重放，Redis 不可用时 fail-closed（拒绝）。
 
 内置前端首次访问时会提示输入 `APP_API_TOKEN`，登录后使用 HttpOnly Cookie；SSE 连接会自动携带该 Cookie。
 
@@ -347,6 +350,7 @@ node --test src/test/js/incidentFrontendActions.test.mjs
 | `MILVUS_PORT` | `19530` | Milvus 端口 |
 | `REDIS_HOST` | `localhost` | Redis 主机 |
 | `REDIS_PORT` | `6379` | Redis 端口 |
+| `REDIS_PASSWORD` | 空 | Redis 密码；留空表示无密码（本地开发） |
 | `PROMETHEUS_BASE_URL` | `http://localhost:9090` | Prometheus 地址 |
 | `PROMETHEUS_MOCK_ENABLED` | `false` | Prometheus mock 开关，dev profile 默认为 true |
 | `CLS_MOCK_ENABLED` | `false` | CLS mock 开关，dev profile 默认为 true |
@@ -358,7 +362,10 @@ node --test src/test/js/incidentFrontendActions.test.mjs
 | `APP_CORS_ALLOWED_ORIGINS` | `http://localhost:9900,http://127.0.0.1:9900` | CORS 白名单 |
 | `APP_SECURITY_ENABLED` | `true` | API 鉴权开关，关闭仅限隔离测试环境 |
 | `APP_API_TOKEN` | 必填 | 普通 API 令牌 |
-| `APP_WEBHOOK_SECRET` | 必填 | Webhook 共享密钥 |
+| `APP_WEBHOOK_SECRET` | 必填 | Webhook 共享密钥 / HMAC 签名密钥 |
+| `APP_SESSION_SIGNING_KEY` | 空 | 会话 Cookie 签名密钥；未设置时回退到 `APP_API_TOKEN`，prod profile 强制独立设置 |
+| `APP_WEBHOOK_HMAC_REQUIRED` | `false` | 是否强制 Webhook HMAC 签名；prod profile 强制 true |
+| `APP_WEBHOOK_TIMESTAMP_TOLERANCE_SECONDS` | `300` | Webhook HMAC 时间戳容差（秒） |
 | `APP_SECURITY_SESSION_TTL_SECONDS` | `28800` | 浏览器登录会话有效期（秒） |
 | `APP_SECURITY_COOKIE_SECURE` | `false` | 是否要求登录 Cookie 仅通过 HTTPS 发送；prod profile 默认 true |
 | `APP_TRUSTED_PROXIES` | 空 | 受信任反向代理地址，用于安全地解析转发请求信息 |
@@ -448,6 +455,7 @@ node --test src/test/js/incidentFrontendActions.test.mjs
 | `POSTGRES_USER` | `superbizagent` | Compose 内 PostgreSQL 用户 |
 | `POSTGRES_PASSWORD` | 必填 | Compose 内 PostgreSQL 密码 |
 | `POSTGRES_PORT` | `5433` | PostgreSQL 仅绑定宿主机 `127.0.0.1`，不对外网卡暴露 |
+| `REDIS_PASSWORD` | 空 | Compose 内 Redis 密码；留空表示无密码（本地开发） |
 | `DOCKER_VOLUME_DIRECTORY` | `.` | Compose 数据、上传和历史目录挂载根路径 |
 
 ## MCP 工具

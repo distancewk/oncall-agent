@@ -25,4 +25,10 @@
     <Match>
         <Bug pattern="VA_FORMAT_STRING_USES_NEWLINE"/>
     </Match>
+    <!-- WebhookSignatureFilter 通过 ObjectProvider 延迟解析依赖，构造器调用 getIfAvailable() 被
+         误判为可能抛异常导致 Finalizer 攻击；依赖缺失时降级为 null 由 doFilterInternal 放行。 -->
+    <Match>
+        <Class name="org.example.config.WebhookSignatureFilter"/>
+        <Bug pattern="CT_CONSTRUCTOR_THROW"/>
+    </Match>
 </FindBugsFilter>

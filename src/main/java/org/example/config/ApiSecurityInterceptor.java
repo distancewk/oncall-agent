@@ -21,7 +21,6 @@ public class ApiSecurityInterceptor implements HandlerInterceptor {
     private static final java.security.SecureRandom CSRF_RANDOM = new java.security.SecureRandom();
 
     private static final String API_KEY_HEADER = "X-API-Key";
-    private static final String WEBHOOK_SECRET_HEADER = "X-Webhook-Secret";
     private static final String SESSION_COOKIE = "SB_SESSION";
     private static final String CSRF_COOKIE = "SB_CSRF";
     private static final String CSRF_HEADER = "X-CSRF-Token";
@@ -48,8 +47,9 @@ public class ApiSecurityInterceptor implements HandlerInterceptor {
             return true;
         }
 
+        // Webhook 鉴权（HMAC 签名 + nonce 防重放 + 共享密钥回退）由 WebhookSignatureFilter 统一接管。
         if (request.getRequestURI().startsWith("/api/webhook/")) {
-            return validateSecret(response, request.getHeader(WEBHOOK_SECRET_HEADER), properties.getWebhookSecret());
+            return true;
         }
 
         String presentedApiKey = request.getHeader(API_KEY_HEADER);
@@ -63,15 +63,6 @@ public class ApiSecurityInterceptor implements HandlerInterceptor {
                 writeUnauthorized(response);
                 return false;
             }
-            return true;
-        }
-        writeUnauthorized(response);
-        return false;
-    }
-
-    private boolean validateSecret(HttpServletResponse response, String presentedSecret, String expectedSecret)
-            throws java.io.IOException {
-        if (isValidSecret(presentedSecret, expectedSecret)) {
             return true;
         }
         writeUnauthorized(response);
@@ -151,7 +142,7 @@ public class ApiSecurityInterceptor implements HandlerInterceptor {
         try {
             var mac = javax.crypto.Mac.getInstance("HmacSHA256");
             mac.init(new javax.crypto.spec.SecretKeySpec(
-                    properties.getApiToken().getBytes(StandardCharsets.UTF_8), "HmacSHA256"));
+                    properties.effectiveSessionSigningKey().getBytes(StandardCharsets.UTF_8), "HmacSHA256"));
             return Base64.getUrlEncoder().withoutPadding().encodeToString(
                     mac.doFinal(value.getBytes(StandardCharsets.UTF_8)));
         } catch (Exception e) {

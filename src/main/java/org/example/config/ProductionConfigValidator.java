@@ -29,6 +29,8 @@ public class ProductionConfigValidator {
         requireTrue(errors, "app.security.enabled");
         requireNonBlank(errors, "app.security.api-token");
         requireNonBlank(errors, "app.security.webhook-secret");
+        validateSessionSigningKey(errors);
+        validateWebhookHmac(errors);
         validateCors(errors);
         requireFalse(errors, "prometheus.mock-enabled");
         requireFalse(errors, "cls.mock-enabled");
@@ -55,6 +57,30 @@ public class ProductionConfigValidator {
     private void requireFalse(List<String> errors, String propertyName) {
         if (environment.getProperty(propertyName, Boolean.class, false)) {
             errors.add(propertyName + " 在 prod profile 下必须为 false");
+        }
+    }
+
+    private void validateSessionSigningKey(List<String> errors) {
+        // 会话签名密钥分离只在 prod 下强制，避免本地「真实接入 + 鉴权」场景额外多配一个变量。
+        if (!environment.acceptsProfiles(Profiles.of("prod"))) {
+            return;
+        }
+        String sessionSigningKey = environment.getProperty("app.security.session-signing-key", "");
+        String apiToken = environment.getProperty("app.security.api-token", "");
+        if (sessionSigningKey == null || sessionSigningKey.isBlank()) {
+            errors.add("app.security.session-signing-key 在 prod profile 下必须独立设置");
+        } else if (sessionSigningKey.equals(apiToken)) {
+            errors.add("app.security.session-signing-key 不能与 app.security.api-token 相同");
+        }
+    }
+
+    private void validateWebhookHmac(List<String> errors) {
+        // 仅 prod 强制 HMAC；非 prod 允许共享密钥回退，兼容 Alertmanager 本地调试。
+        if (!environment.acceptsProfiles(Profiles.of("prod"))) {
+            return;
+        }
+        if (!environment.getProperty("app.security.webhook-hmac-required", Boolean.class, false)) {
+            errors.add("app.security.webhook-hmac-required 在 prod profile 下必须为 true");
         }
     }
 

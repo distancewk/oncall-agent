@@ -75,6 +75,40 @@ class ProductionConfigValidatorTest {
         assertTrue(thrown.getMessage().contains("不能为空"));
     }
 
+    @Test
+    void validate_shouldRejectProdWhenSessionSigningKeyIsMissing() {
+        MockEnvironment environment = baseProdEnvironment()
+                .withProperty("app.security.session-signing-key", "");
+
+        IllegalStateException thrown = assertThrows(IllegalStateException.class,
+                () -> new ProductionConfigValidator(environment).validate());
+
+        assertTrue(thrown.getMessage().contains("app.security.session-signing-key"));
+    }
+
+    @Test
+    void validate_shouldRejectProdWhenSessionSigningKeyEqualsApiToken() {
+        MockEnvironment environment = baseProdEnvironment()
+                .withProperty("app.security.session-signing-key", "api-token");
+
+        IllegalStateException thrown = assertThrows(IllegalStateException.class,
+                () -> new ProductionConfigValidator(environment).validate());
+
+        assertTrue(thrown.getMessage().contains("session-signing-key"));
+        assertTrue(thrown.getMessage().contains("api-token"));
+    }
+
+    @Test
+    void validate_shouldRejectProdWhenWebhookHmacNotRequired() {
+        MockEnvironment environment = baseProdEnvironment()
+                .withProperty("app.security.webhook-hmac-required", "false");
+
+        IllegalStateException thrown = assertThrows(IllegalStateException.class,
+                () -> new ProductionConfigValidator(environment).validate());
+
+        assertTrue(thrown.getMessage().contains("webhook-hmac-required"));
+    }
+
     private MockEnvironment baseProdEnvironment() {
         return new MockEnvironment()
                 .withProperty("spring.profiles.active", "prod")
@@ -82,6 +116,8 @@ class ProductionConfigValidatorTest {
                 .withProperty("app.security.enabled", "true")
                 .withProperty("app.security.api-token", "api-token")
                 .withProperty("app.security.webhook-secret", "webhook-secret")
+                .withProperty("app.security.session-signing-key", "session-signing-key")
+                .withProperty("app.security.webhook-hmac-required", "true")
                 .withProperty("app.cors.allowed-origins", "https://ops.example.com")
                 .withProperty("prometheus.mock-enabled", "false")
                 .withProperty("cls.mock-enabled", "false")
