@@ -64,6 +64,39 @@ class ProductionConfigValidatorTest {
     }
 
     @Test
+    void validate_shouldAllowLocalhostCorsOutsideProd() {
+        MockEnvironment environment = new MockEnvironment()
+                .withProperty("app.security.enabled", "true")
+                .withProperty("spring.ai.dashscope.api-key", "dashscope-key")
+                .withProperty("app.security.api-token", "api-token")
+                .withProperty("app.security.webhook-secret", "webhook-secret")
+                .withProperty("app.cors.allowed-origins", "http://localhost:9900,http://127.0.0.1:9900")
+                .withProperty("prometheus.mock-enabled", "false")
+                .withProperty("cls.mock-enabled", "false")
+                .withProperty("app.alerts.simulate-enabled", "false");
+
+        assertDoesNotThrow(() -> new ProductionConfigValidator(environment).validate());
+    }
+
+    @Test
+    void validate_shouldStillRejectWildcardCorsOutsideProd() {
+        MockEnvironment environment = new MockEnvironment()
+                .withProperty("app.security.enabled", "true")
+                .withProperty("spring.ai.dashscope.api-key", "dashscope-key")
+                .withProperty("app.security.api-token", "api-token")
+                .withProperty("app.security.webhook-secret", "webhook-secret")
+                .withProperty("app.cors.allowed-origins", "https://ops.example.com,*")
+                .withProperty("prometheus.mock-enabled", "false")
+                .withProperty("cls.mock-enabled", "false")
+                .withProperty("app.alerts.simulate-enabled", "false");
+
+        IllegalStateException thrown = assertThrows(IllegalStateException.class,
+                () -> new ProductionConfigValidator(environment).validate());
+
+        assertTrue(thrown.getMessage().contains("*"));
+    }
+
+    @Test
     void validate_shouldRejectProdWhenCorsIsBlank() {
         MockEnvironment environment = baseProdEnvironment()
                 .withProperty("app.cors.allowed-origins", " ");

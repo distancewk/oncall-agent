@@ -94,7 +94,10 @@ public class ProductionConfigValidator {
         if (normalized.contains("*")) {
             errors.add("app.cors.allowed-origins 在 prod profile 下不能包含 *");
         }
-        if (normalized.contains("localhost") || normalized.contains("127.0.0.1")) {
+        // 本地开发地址约束只在 prod profile 下生效：非 prod 环境（即使启用了安全校验）允许 localhost/127.0.0.1，
+        // 以便本地「真实接入 + 验证鉴权」场景下仍能使用本地前端。
+        boolean isProd = environment.acceptsProfiles(Profiles.of("prod"));
+        if (isProd && (normalized.contains("localhost") || normalized.contains("127.0.0.1"))) {
             errors.add("app.cors.allowed-origins 在 prod profile 下不能使用本地开发地址");
         }
     }
