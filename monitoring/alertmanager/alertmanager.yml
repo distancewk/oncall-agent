@@ -1,0 +1,26 @@
+global:
+  resolve_timeout: 5m
+
+# 所有告警统一投递到 SuperBizAgent 的 Webhook 入口。
+# 对应代码：WebhookController.receiveAlert -> /api/webhook/alert
+# 对应 DTO：AlertPayload（与 Alertmanager webhook 格式一致）
+route:
+  receiver: 'superbiz-webhook'
+  group_by: ['alertname', 'service', 'severity']
+  group_wait: 10s
+  group_interval: 30s
+  repeat_interval: 1h
+
+receivers:
+  - name: 'superbiz-webhook'
+    webhook_configs:
+      # App 在宿主机运行（Docker Desktop 下用 host.docker.internal 访问宿主机 9900）。
+      # 若 App 与监控栈在同一 docker 网络，可改为 http://<app-service>:9900/api/webhook/alert
+      - url: 'http://host.docker.internal:9900/api/webhook/alert'
+        send_resolved: true          # 告警恢复时也回推 resolved 状态，系统会据此把 Incident 标记为 RESOLVED
+        http_config:
+          # 必须匹配 App 启动时的 APP_WEBHOOK_SECRET（新版 Alertmanager 用 http_headers + values）
+          http_headers:
+            X-Webhook-Secret:
+              values:
+                - 'dev-webhook-secret-2026'

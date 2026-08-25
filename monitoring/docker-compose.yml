@@ -1,0 +1,44 @@
+# 独立监控接入栈：Prometheus + Alertmanager + node_exporter
+# 与项目主 docker-compose.yml 解耦，不修改现有编排。
+# 用途：真实产生告警 -> Alertmanager 推送到 SuperBizAgent 的 /api/webhook/alert。
+services:
+  prometheus:
+    image: prom/prometheus:v2.53.1
+    container_name: sb-monitor-prometheus
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./prometheus:/etc/prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+    networks:
+      - monitoring
+    restart: unless-stopped
+
+  alertmanager:
+    image: prom/alertmanager:v0.34.0
+    container_name: sb-monitor-alertmanager
+    ports:
+      - "9094:9093"
+    volumes:
+      - ./alertmanager:/etc/alertmanager
+    command:
+      - '--config.file=/etc/alertmanager/alertmanager.yml'
+      - '--storage.path=/alertmanager'
+    networks:
+      - monitoring
+    restart: unless-stopped
+
+  node_exporter:
+    image: prom/node-exporter:v1.8.2
+    container_name: sb-monitor-node-exporter
+    ports:
+      - "9100:9100"
+    networks:
+      - monitoring
+    restart: unless-stopped
+
+networks:
+  monitoring:
+    driver: bridge

@@ -1,0 +1,36 @@
+groups:
+  - name: demo-alerts
+    rules:
+      # 1) 内存可用率偏低：几乎一定会立刻 firing，用于演示告警从产生到推送到 OnCall 系统的全链路。
+      - alert: MemoryUsageHigh
+        expr: (node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes) < 0.95
+        for: 0m
+        labels:
+          severity: warning
+          service: infra-node
+        annotations:
+          summary: "节点内存可用率偏低 ({{ $labels.instance }})"
+          description: "可用内存占比低于 95% 阈值，节点内存可能紧张。"
+
+      # 2) 应用不可达：当 SuperBizAgent 没在 9900 暴露指标时触发（critical）。
+      #    这既能演示"应用挂了"类告警，也验证了 Prometheus 主动探测能力。
+      - alert: SuperBizAgentDown
+        expr: up{job="superbiz-agent"} == 0
+        for: 1m
+        labels:
+          severity: critical
+          service: super-biz-agent
+        annotations:
+          summary: "SuperBizAgent 应用不可达"
+          description: "Prometheus 抓取 superbiz-agent 失败，应用可能已宕机或指标端点未开启。"
+
+      # 3) CPU 持续偏高：仅在高负载时 firing，用于演示带 for 抑制的告警。
+      - alert: HostHighCpu
+        expr: 100 - (avg by(instance) (rate(node_cpu_seconds_total{mode="idle"}[5m])) * 100) > 80
+        for: 2m
+        labels:
+          severity: warning
+          service: infra-node
+        annotations:
+          summary: "节点 CPU 使用率过高 ({{ $labels.instance }})"
+          description: "CPU 使用率持续高于 80% 阈值，节点负载偏高。"

@@ -1,0 +1,30 @@
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+# 告警规则文件（含 demo 告警）
+rule_files:
+  - /etc/prometheus/alert.rules.yml
+
+# 把产生的告警推给同栈的 Alertmanager
+alerting:
+  alertmanagers:
+    - static_configs:
+        - targets: ['alertmanager:9093']
+
+scrape_configs:
+  - job_name: 'prometheus'
+    static_configs:
+      - targets: ['localhost:9090']
+
+  - job_name: 'node'
+    static_configs:
+      - targets: ['node_exporter:9100']
+
+  # 可选：抓取 SuperBizAgent 的 Prometheus 指标。
+  # 需要 App 开启 actuator prometheus 端点（management.endpoints.web.exposure.include 含 prometheus）。
+  # 没开启时该 target 会显示 DOWN —— 正好被下面的 SuperBizAgentDown 规则捕获。
+  - job_name: 'superbiz-agent'
+    metrics_path: /actuator/prometheus
+    static_configs:
+      - targets: ['host.docker.internal:9900']

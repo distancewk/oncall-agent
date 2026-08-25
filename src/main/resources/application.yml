@@ -6,6 +6,19 @@ server:
       enabled: true
       force: true
 
+# Actuator 端点暴露（供 Prometheus 抓取应用自身指标）
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,prometheus
+  endpoint:
+    prometheus:
+      enabled: true
+  metrics:
+    tags:
+      application: super-biz-agent
+
 file:
   upload:
     path: ${FILE_UPLOAD_PATH:./uploads}
