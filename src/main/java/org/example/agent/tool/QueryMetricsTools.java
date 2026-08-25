@@ -397,12 +397,17 @@ public class QueryMetricsTools {
     private String buildMetricTrendQuery(String metric, String service, String instance) {
         String appSelector = buildSelector("job", service, "instance", instance, Collections.emptyMap());
         String appErrorSelector = buildSelector("job", service, "instance", instance, Map.of("status", "=~\"5..\""));
-        String podSelector = buildSelector("pod", firstNonBlank(instance, service), null, null, Map.of("container", "!\"\""));
+        // node_exporter 主机指标 selector：按 instance 筛选，兼容无 instance 的裸查询场景
+        String hostSelector = buildSelector("instance", firstNonBlank(instance, service), null, null, Collections.emptyMap());
+        // 主机 CPU 需额外带 mode="idle"，用 idle 时间反推使用率
+        String hostCpuSelector = buildSelector("instance", firstNonBlank(instance, service), null, null, Map.of("mode", "=\"idle\""));
 
         return switch (metric) {
-            case "cpu_usage" -> "100 * avg(rate(container_cpu_usage_seconds_total" + podSelector + "[5m]))";
-            case "memory_usage" -> "100 * avg(container_memory_working_set_bytes" + podSelector + ") / "
-                    + "clamp_min(avg(container_spec_memory_limit_bytes" + podSelector + "), 1)";
+            // 主机 CPU 使用率（node_exporter 的 node_cpu_seconds_total），对齐 HostHighCpu 告警规则
+            case "cpu_usage" -> "100 - (avg(rate(node_cpu_seconds_total" + hostCpuSelector + "[5m])) * 100)";
+            // 主机内存使用率（node_exporter 的 node_memory_*），对齐 MemoryUsageHigh 告警规则
+            case "memory_usage" -> "100 * (1 - node_memory_MemAvailable_bytes" + hostSelector
+                    + " / node_memory_MemTotal_bytes" + hostSelector + ")";
             case "error_rate" -> "sum(rate(http_requests_total" + appErrorSelector + "[5m])) / "
                     + "clamp_min(sum(rate(http_requests_total" + appSelector + "[5m])), 1) * 100";
             case "p99_latency" -> "histogram_quantile(0.99, sum(rate(http_request_duration_seconds_bucket"
