@@ -53,10 +53,21 @@ data/
 *.py
 !start-local.sh
 !stop-local.sh
+!monitoring/*.sh
+!monitoring/*.py
+!eval/*.sh
+!eval/*.py
 
 ### docker
 /volumes
-/server.pid
+
+### Runtime Artifacts ###
+*.pid
+/database-backups/
+/.workbuddy/
+ONCALL_AGENT_*.md
+/eval/_latencies.txt
+
 .claude/
 .superpowers/
 docs/
